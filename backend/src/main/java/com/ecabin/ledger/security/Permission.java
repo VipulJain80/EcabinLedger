@@ -1,0 +1,3 @@
+package com.ecabin.ledger.security;
+
+public enum Permission { VIEW, REPORT, REVIEW, INSPECT, ASSIGN_ACTION, PERFORM_ACTION, VERIFY, APPROVE, CLOSE, REOPEN, AUDIT, ADMINISTER_ORGANIZATION }
