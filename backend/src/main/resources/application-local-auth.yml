@@ -1,0 +1,14 @@
+# Local development only. The API binds to loopback and uses an ephemeral per-process key.
+server:
+  address: 127.0.0.1
+spring:
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ecabin-ledger-local
+app:
+  security:
+    audience: ecabin-ledger-api
+  local-auth:
+    email: abc@gmail.com

@@ -20,7 +20,18 @@
     <dependency><groupId>org.testcontainers</groupId><artifactId>postgresql</artifactId><version>1.21.3</version><scope>test</scope></dependency>
   </dependencies>
   <build>
-    <plugins><plugin><groupId>org.springframework.boot</groupId><artifactId>spring-boot-maven-plugin</artifactId></plugin></plugins>
+    <plugins>
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+        <configuration>
+          <!-- The local shortcut applies only to `spring-boot:run`; packaged apps keep enterprise JWT validation. -->
+          <profiles>
+            <profile>local-auth</profile>
+          </profiles>
+        </configuration>
+      </plugin>
+    </plugins>
   </build>
   <profiles>
     <profile><id>test</id><properties><spring.profiles.active>test</spring.profiles.active></properties></profile>

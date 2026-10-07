@@ -1,0 +1,30 @@
+.login-shell{min-height:100vh;display:grid;place-items:center;padding:24px;background:radial-gradient(ellipse at 50% 0%,#e8efe7 0,#f8f9f6 54%)}
+.login-card{width:min(430px,100%);background:#fff;border:1px solid #e8ede7;border-radius:12px;padding:36px 38px;box-shadow:0 18px 60px #30483412}
+.login-brand{padding:0;margin:0 0 42px}
+.login-eyebrow{display:flex;align-items:center;gap:8px;color:#78877b;font-size:9px;font-weight:700;letter-spacing:1.1px}
+.login-eyebrow span{width:6px;height:6px;border-radius:50%;background:#7f9c7d}
+.login-card h1{font:600 25px var(--display);letter-spacing:-.8px;margin:13px 0 8px;color:#29372e}
+.login-copy{font-size:12px;line-height:1.65;color:#849087;margin:0 0 25px}
+.login-form label{display:block;color:#526257;font-size:10px;font-weight:600;margin-bottom:7px}
+.login-form input{display:block;width:100%;height:40px;padding:0 11px;border:1px solid #e1e8e0;border-radius:5px;color:#35443a;font-size:11px;outline:0}
+.login-form input:focus{border-color:#7c9b7e;box-shadow:0 0 0 3px #e3ede280}
+.login-form input::placeholder{color:#a4ada5}
+.login-form .button-primary{width:100%;height:40px;margin-top:14px;text-align:center}
+.login-form .button-primary span{margin-left:7px}
+.login-help{display:flex;gap:10px;align-items:flex-start;margin-top:19px;padding:11px;border:1px solid #edf1eb;background:#f8faf7;border-radius:6px;color:#879389}
+.login-help>span{display:grid;place-items:center;flex:none;width:16px;height:16px;border-radius:50%;background:#e7efe5;color:#658066;font-size:10px;font-weight:700}
+.login-help p{margin:0;font-size:9px;line-height:1.6}
+.login-help b{color:#5a6b5d;font-weight:600}
+.login-help code{color:#496d50;font-size:10px}
+.login-error{margin:9px 0 0;color:#a45545;font-size:10px;line-height:1.5}
+.login-footer{border-top:1px solid #eef1ed;margin:23px 0 0;padding-top:15px;color:#9aa39b;font-size:9px;line-height:1.5;text-align:center}
+.local-signout{margin-left:auto;padding:4px 6px;border:1px solid #e7ebe6;border-radius:4px;background:white;color:#718076;font-size:8px}
+.account-profile{display:flex;align-items:center;gap:8px;padding-left:13px;border-left:1px solid #e9ede9}
+.account-avatar{display:grid;place-items:center;flex:none;width:29px;height:29px;border-radius:50%;background:#e9dacc;color:#785b45;font-size:9px;font-weight:700}
+.account-copy{display:grid;gap:3px;max-width:155px}
+.account-name{overflow:hidden;color:#48564c;font-size:9px;font-weight:600;text-overflow:ellipsis;white-space:nowrap}
+.account-email{overflow:hidden;color:#929d94;font-size:8px;text-overflow:ellipsis;white-space:nowrap}
+.account-signout{height:27px;padding:0 9px;border:1px solid #e5eae4;border-radius:5px;background:#fff;color:#69776c;font-size:9px}
+.account-signout:hover{background:#f7f9f6;border-color:#d7e0d5}
+@media(max-width:480px){.login-card{padding:28px 24px}.login-brand{margin-bottom:34px}}
+@media(max-width:760px){.topbar-right{gap:9px}.topbar-right .help,.topbar-right .bell{display:none}.account-profile{gap:6px;padding-left:8px}.account-copy{max-width:100px}.account-signout{height:25px;padding:0 7px;font-size:8px}}

@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useState } from "react";
+import ConfigurationPage from "./configuration";
 
 declare global { interface Window { eCabinAuth?: { getAccessToken: () => Promise<string> }; } }
 
@@ -12,8 +13,11 @@ type Defect = {
 type Page = { items: Defect[]; nextCursor: string | null };
 type Summary = { openDefects: number; criticalDefects: number; reportedToday: number; closedThisMonth: number };
 type Identity = { organizationName: string; displayName: string; role: string };
+type MasterOption = { code: string; name: string };
 type AuditEvent = { id: string; eventType: string; fromStatus: string | null; toStatus: string | null; note: string; evidenceReference: string | null; inspectionOutcome: string | null; actorId: string; occurredAt: string };
 const API = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8080/api/v1";
+let localDevToken: { value: string; expiresAt: number } | null = null;
+let localDevEmail: string | null = null;
 const areas = ["ALL AREAS", "CABIN", "GALLEY", "LAVATORY", "ATTENDANT_SEAT"];
 const statuses = ["ALL STATUS", "REPORTED", "UNDER_REVIEW", "INSPECTION_REQUIRED", "INSPECTION_IN_PROGRESS", "INSPECTION_COMPLETE", "ACTION_ASSIGNED", "IN_PROGRESS", "AWAITING_VERIFICATION", "VERIFIED", "APPROVAL_REQUIRED", "CLOSED", "REOPENED", "REJECTED", "CANCELLED"];
 const human = (value: string) => value.replaceAll("_", " ").toLowerCase().replace(/\b\w/g, (char) => char.toUpperCase());
@@ -25,11 +29,42 @@ const canAdvance = (role: string | undefined, status: string) => {
   if (role === "QUALITY_COMPLIANCE") return ["AWAITING_VERIFICATION", "VERIFIED", "APPROVAL_REQUIRED", "CLOSED"].includes(status);
   return false;
 };
+async function getAccessToken(refreshLocal = false) {
+  let token = await window.eCabinAuth?.getAccessToken();
+  if (!token && process.env.NODE_ENV === "development" && localDevEmail) {
+    if (refreshLocal) localDevToken = null;
+    if (!localDevToken || localDevToken.expiresAt <= Date.now() + 30_000) {
+      const tokenResponse = await fetch("http://127.0.0.1:8080/api/dev/token", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email: localDevEmail }),
+        cache: "no-store",
+      });
+      if (!tokenResponse.ok) throw new Error("Local demo access is unavailable. Start the backend with the local-auth profile and apply the demo seed.");
+      const issued: { accessToken: string; expiresAt: string } = await tokenResponse.json();
+      localDevToken = { value: issued.accessToken, expiresAt: Date.parse(issued.expiresAt) };
+    }
+    token = localDevToken.value;
+  }
+  return token;
+}
+
 async function apiFetch(path: string, init: RequestInit = {}) {
-  const token = await window.eCabinAuth?.getAccessToken();
+  let token = await getAccessToken();
   const headers = new Headers(init.headers);
   if (token) headers.set("Authorization", `Bearer ${token}`);
-  return fetch(path, { ...init, headers, credentials: "omit", cache: "no-store" });
+  const request = () => fetch(path, { ...init, headers, credentials: "omit", cache: "no-store" });
+  let response = await request();
+  if (response.status === 401 && process.env.NODE_ENV === "development" && !window.eCabinAuth) {
+    token = await getAccessToken(true);
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+    response = await request();
+  }
+  return response;
+}
+
+async function configurationFetch(path: string, init: RequestInit = {}) {
+  return apiFetch(`${API}${path}`, init);
 }
 
 export default function Home() {
@@ -45,6 +80,20 @@ export default function Home() {
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [summary, setSummary] = useState<Summary>({ openDefects: 0, criticalDefects: 0, reportedToday: 0, closedThisMonth: 0 });
   const [identity, setIdentity] = useState<Identity | null>(null);
+  const [categoryOptions, setCategoryOptions] = useState<MasterOption[]>([]);
+  const [zoneOptions, setZoneOptions] = useState<MasterOption[]>([]);
+  const [componentOptions, setComponentOptions] = useState<MasterOption[]>([]);
+  const [localSessionEmail, setLocalSessionEmail] = useState<string | null>(null);
+  const [gatewayAuthAvailable, setGatewayAuthAvailable] = useState(false);
+  const [loginEmail, setLoginEmail] = useState("");
+  const [loginError, setLoginError] = useState("");
+  const [loginLoading, setLoginLoading] = useState(false);
+  const [activeSection, setActiveSection] = useState<"defects" | "configuration">("defects");
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => setGatewayAuthAvailable(Boolean(window.eCabinAuth)));
+    return () => window.cancelAnimationFrame(frame);
+  }, []);
 
   const load = useCallback(async (after: string | null = null, append = false) => {
     setLoading(true); setNotice("");
@@ -58,6 +107,13 @@ export default function Home() {
       const [data, summaryData, identityData]: [Page, Summary, Identity] = await Promise.all([response.json(), summaryResponse.json(), identityResponse.json()]);
       setSummary(summaryData);
       setIdentity(identityData);
+      const referenceResponse = await apiFetch(`${API}/reference-data`);
+      if (referenceResponse.ok) {
+        const referenceData: { categories: MasterOption[]; zones: MasterOption[]; components: MasterOption[] } = await referenceResponse.json();
+        setCategoryOptions(referenceData.categories);
+        setZoneOptions(referenceData.zones);
+        setComponentOptions(referenceData.components);
+      }
       setItems((previous) => append ? [...previous, ...data.items] : data.items);
       setCursor(data.nextCursor);
     } catch (error) { setNotice(error instanceof Error ? error.message : "The service is unavailable."); }
@@ -65,10 +121,56 @@ export default function Home() {
   }, [area, filter]);
 
   useEffect(() => {
+    if (process.env.NODE_ENV === "development" && !localSessionEmail && !gatewayAuthAvailable) {
+      return;
+    }
     let cancelled = false;
     void Promise.resolve().then(() => { if (!cancelled) return load(); });
     return () => { cancelled = true; };
-  }, [load]);
+  }, [gatewayAuthAvailable, load, localSessionEmail]);
+
+  async function loginLocal(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const email = loginEmail.trim().toLowerCase();
+    setLoginError("");
+    if (window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1") {
+      setLoginError("Local demo sign-in works only on this computer. Open http://localhost:3000, then sign in again.");
+      return;
+    }
+    setLoginLoading(true);
+    try {
+      const response = await fetch("http://127.0.0.1:8080/api/dev/token", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email }),
+        cache: "no-store",
+      });
+      if (!response.ok) {
+        setLoginError(response.status === 403
+          ? "Local demo access is enabled only for abc@gmail.com."
+          : "Could not sign in. Check that the backend is running with the local demo profile.");
+        return;
+      }
+      const issued: { accessToken: string; expiresAt: string } = await response.json();
+      localDevEmail = email;
+      localDevToken = { value: issued.accessToken, expiresAt: Date.parse(issued.expiresAt) };
+      setLocalSessionEmail(email);
+    } catch {
+      setLoginError("Could not connect to the backend. Make sure it is running, then try again.");
+    } finally {
+      setLoginLoading(false);
+    }
+  }
+
+  function logoutLocal() {
+    localDevEmail = null;
+    localDevToken = null;
+    setLocalSessionEmail(null);
+    setIdentity(null);
+    setActiveSection("defects");
+    setItems([]);
+    setSummary({ openDefects: 0, criticalDefects: 0, reportedToday: 0, closedThisMonth: 0 });
+  }
 
   async function createDefect(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setSaving(true); setNotice("");
@@ -134,6 +236,23 @@ export default function Home() {
     } catch { /* Keep the defect details available if audit history is temporarily unavailable. */ }
   }
 
+  if (process.env.NODE_ENV === "development" && !localSessionEmail && !gatewayAuthAvailable) return <main className="login-shell">
+    <section className="login-card" aria-labelledby="login-title">
+      <a className="brand login-brand" href="#home" aria-label="eCabin Ledger"><span className="brand-mark">e</span><span>eCabin <b>Ledger</b></span></a>
+      <div className="login-eyebrow"><span></span> AVIATION CABIN OPERATIONS</div>
+      <h1 id="login-title">Sign in to your workspace</h1>
+      <p className="login-copy">Access the defect register, inspections, and maintenance records for your operator.</p>
+      <form className="login-form" onSubmit={loginLocal}>
+        <label htmlFor="login-email">Work email</label>
+        <input id="login-email" type="email" autoComplete="email" autoFocus required placeholder="name@operator.com" value={loginEmail} onChange={(event) => setLoginEmail(event.target.value)} />
+        {loginError && <p className="login-error" role="alert">{loginError}</p>}
+        <button type="submit" className="button-primary" disabled={loginLoading}>{loginLoading ? "Signing in…" : "Continue with email"}<span>→</span></button>
+      </form>
+      <div className="login-help"><span>i</span><p><b>Local demo access</b><br />Enter <code>abc@gmail.com</code> to explore the demo workspace.</p></div>
+      <p className="login-footer">Production access is provided by your enterprise authentication gateway.</p>
+    </section>
+  </main>;
+
   return <main className="shell">
     <aside className="rail">
       <a className="brand" href="#home" aria-label="eCabin Ledger home"><span className="brand-mark">e</span><span>eCabin <b>Ledger</b></span></a>
@@ -145,11 +264,12 @@ export default function Home() {
         <a className="nav-link" href="#inspections"><span>◷</span> Inspections</a>
         <a className="nav-link" href="#reports"><span>▤</span> Reports</a>
       </nav>
-      <div className="rail-bottom"><div className="compliance"><span className="compliance-icon">✓</span><strong>Audit history enabled</strong><p>Workflow changes are captured with actor and timestamp.</p><a href="#audit">View audit log <span>→</span></a></div><div className="user"><span className="user-avatar">{identity?.displayName.split(/\s+/).map((part) => part[0]).slice(0, 2).join("").toUpperCase() || "—"}</span><span><b>{identity?.displayName || "Enterprise user"}</b><small>{human(identity?.role || "")}</small></span></div></div>
+      {identity?.role === "ADMIN" && <><div className="nav-label configuration-nav-label">ADMINISTRATION</div><nav className="nav"><button className={activeSection === "configuration" ? "nav-link selected" : "nav-link"} onClick={() => setActiveSection("configuration")}><span>⚙</span> Configuration</button></nav></>}
+      <div className="rail-bottom"><div className="compliance"><span className="compliance-icon">✓</span><strong>Audit history enabled</strong><p>Workflow changes are captured with actor and timestamp.</p><a href="#audit">View audit log <span>→</span></a></div></div>
     </aside>
     <section className="workspace" id="home">
-      <header className="topbar"><div className="crumb">{identity?.organizationName || "Operations"} <span>/</span> <b>Defect register</b></div><div className="topbar-right"><span className="sync"><i></i> API CONNECTED</span><button aria-label="Help" className="help">?</button><button aria-label="Notifications" className="bell">♧<i></i></button><span className="small-avatar">{identity?.displayName.split(/\s+/).map((part) => part[0]).slice(0, 2).join("").toUpperCase() || "—"}</span></div></header>
-      <div className="content" id="defects">
+      <header className="topbar"><div className="crumb">{identity?.organizationName || "Operations"} <span>/</span> <b>{activeSection === "configuration" ? "Configuration" : "Defect register"}</b></div><div className="topbar-right"><span className="sync"><i></i> API CONNECTED</span><button aria-label="Help" className="help">?</button><button aria-label="Notifications" className="bell">♧<i></i></button><div className="account-profile"><span className="account-avatar" aria-hidden="true">{identity?.displayName.split(/\s+/).map((part) => part[0]).slice(0, 2).join("").toUpperCase() || "—"}</span><span className="account-copy"><b className="account-name">{identity?.displayName || "Enterprise user"}</b><small className="account-email">{localSessionEmail || "Enterprise account"}</small></span>{localSessionEmail && <button className="account-signout" onClick={logoutLocal}>Sign out</button>}</div></div></header>
+      {activeSection === "configuration" && identity?.role === "ADMIN" ? <ConfigurationPage request={configurationFetch} /> : <div className="content" id="defects">
         <div className="heading"><div><div className="eyebrow"><span></span> CABIN OPERATIONS <em>·</em> FLEET OVERVIEW</div><h1>Defect register</h1><p>One clear view from first report to verified closure.</p></div>{canReport(identity?.role) && <button className="button-primary" onClick={() => setDialog(true)}><span>＋</span> Log a defect</button>}</div>
         <section className="metrics" aria-label="Defect summary">
           <article className="metric-card"><div className="metric-head">OPEN DEFECTS <span className="metric-icon green">↗</span></div><strong>{loading ? "—" : summary.openDefects}</strong><div className="metric-foot">Across active fleet <span className="sparkline">▁▃▂▅▃▆▄▇</span></div></article>
@@ -172,12 +292,12 @@ export default function Home() {
           <div className="table-foot"><span>Showing <b>{items.length}</b> recent records</span>{cursor && <button className="load-more" onClick={() => void load(cursor, true)}>Load more defects <span>↓</span></button>}<span className="audit-note"><i>✓</i> Changes are recorded in the audit trail</span></div>
         </section>
         <footer><span>eCabin Ledger <i>·</i> Operational recordkeeping</span><span>UTC <i>·</i> Data synced just now</span></footer>
-      </div>
+      </div>}
     </section>
 
     {dialog && canReport(identity?.role) && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setDialog(false); }}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div className="modal-heading"><div><div className="eyebrow">NEW OPERATIONAL RECORD</div><h2 id="modal-title">Log a defect</h2></div><button className="close" onClick={() => setDialog(false)} aria-label="Close">×</button></div><form onSubmit={createDefect}>
-      <label>Aircraft registration<input name="tailNumber" required maxLength={16} placeholder="N482NW" /></label><div className="form-row"><label>Cabin area<select name="location"><option value="CABIN">Cabin</option><option value="GALLEY">Galley</option><option value="LAVATORY">Lavatory</option><option value="ATTENDANT_SEAT">Attendant seat</option></select></label><label>Defect category<select name="category"><option value="SEAT">Passenger seat</option><option value="CABIN">Cabin</option><option value="GALLEY">Galley</option><option value="LAVATORY">Lavatory</option><option value="ATTENDANT_SEAT">Attendant seat</option><option value="IFE">IFE</option><option value="LIGHTING">Lighting</option><option value="OVERHEAD_BIN">Overhead bin</option><option value="PSU">PSU</option><option value="EMERGENCY_EQUIPMENT">Emergency equipment</option><option value="OTHER">Other</option></select></label></div>
-      <div className="form-row"><label>Cabin zone<input name="zone" required maxLength={80} placeholder="FWD CABIN / ROW" /></label><label>Row<input name="rowNumber" type="number" min="1" max="200" placeholder="14" /></label></div><div className="form-row"><label>Seat<input name="seatReference" maxLength={8} placeholder="14A" /></label><label>Component<input name="component" maxLength={120} placeholder="Seat cover / PSU" /></label></div>
+      <label>Aircraft registration<input name="tailNumber" required maxLength={16} placeholder="N482NW" /></label><div className="form-row"><label>Cabin area<select name="location"><option value="CABIN">Cabin</option><option value="GALLEY">Galley</option><option value="LAVATORY">Lavatory</option><option value="ATTENDANT_SEAT">Attendant seat</option></select></label><label>Defect category<select name="category">{(categoryOptions.length ? categoryOptions : [{ code: "SEAT", name: "Passenger seat" }, { code: "CABIN", name: "Cabin" }, { code: "GALLEY", name: "Galley" }, { code: "LAVATORY", name: "Lavatory" }, { code: "ATTENDANT_SEAT", name: "Attendant seat" }, { code: "IFE", name: "In-flight entertainment" }, { code: "LIGHTING", name: "Lighting" }, { code: "OVERHEAD_BIN", name: "Overhead bin" }, { code: "PSU", name: "Passenger service unit" }, { code: "EMERGENCY_EQUIPMENT", name: "Emergency equipment" }, { code: "OTHER", name: "Other" }]).map((item) => <option key={item.code} value={item.code}>{item.name}</option>)}</select></label></div>
+      <div className="form-row"><label>Cabin zone<input name="zone" required maxLength={80} list="cabin-zone-options" placeholder="FWD CABIN / ROW" /><datalist id="cabin-zone-options">{zoneOptions.map((item) => <option key={item.code} value={item.name} />)}</datalist><span className="field-hint">Use a configured cabin zone or enter a row/seat reference.</span></label><label>Row<input name="rowNumber" type="number" min="1" max="200" placeholder="14" /></label></div><div className="form-row"><label>Seat<input name="seatReference" maxLength={8} placeholder="14A" /></label><label>Component<input name="component" maxLength={120} list="cabin-component-options" placeholder="Seat cover / PSU" /><datalist id="cabin-component-options">{componentOptions.map((item) => <option key={item.code} value={item.name} />)}</datalist></label></div>
       <label>Defect title<input name="title" required maxLength={160} placeholder="Concise description of finding" /></label><label>Details<textarea name="description" required maxLength={4000} rows={3} placeholder="Describe what was found and the inspection context." /></label>
       <label>Severity<select name="severity"><option value="LOW">Low</option><option value="MEDIUM" selected>Medium</option><option value="HIGH">High</option><option value="CRITICAL">Critical</option></select></label>
       <div className="modal-note"><span>✓</span> A dated report event will be added to the audit history.</div><div className="modal-actions"><button type="button" className="button-secondary" onClick={() => setDialog(false)}>Cancel</button><button className="button-primary" disabled={saving}>{saving ? "Saving…" : "Save defect →"}</button></div>

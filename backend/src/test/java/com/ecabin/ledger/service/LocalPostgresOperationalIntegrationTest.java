@@ -11,6 +11,7 @@ import com.ecabin.ledger.api.ApiModels.DefectView;
 import com.ecabin.ledger.api.ApiModels.InspectionRequest;
 import com.ecabin.ledger.api.ApiModels.TransitionRequest;
 import com.ecabin.ledger.api.ApiModels.VerificationRequest;
+import com.ecabin.ledger.service.ConfigurationService.SaveRequest;
 import com.ecabin.ledger.security.AppRole;
 import com.ecabin.ledger.security.CurrentUserResolver;
 import java.time.Instant;
@@ -49,6 +50,7 @@ class LocalPostgresOperationalIntegrationTest {
     @MockitoBean JwtDecoder jwtDecoder;
     @Autowired JdbcTemplate jdbc;
     @Autowired DefectService defects;
+    @Autowired ConfigurationService configuration;
     @Autowired OperationalWorkflowService workflow;
     @Autowired CurrentUserResolver users;
 
@@ -101,6 +103,33 @@ class LocalPostgresOperationalIntegrationTest {
         assertEquals(11, defects.events(orgA, defect.id()).size());
         jdbc.update("UPDATE defects SET isactive=2 WHERE operator_id=? AND id=?", orgA, defect.id());
         assertThrows(ResponseStatusException.class, () -> defects.get(orgA, defect.id()));
+    }
+
+    @Test
+    @Transactional
+    @Rollback
+    void configurationCrudIsTenantScopedAndAudited() {
+        UUID orgA = createTenant("CONFIG-A");
+        UUID orgB = createTenant("CONFIG-B");
+        addMember(orgA, "config-admin", "ADMIN");
+
+        var fleet = configuration.save(orgA, "config-admin", "fleets", new SaveRequest(null, java.util.Map.of("name", "Cabin Fleet")));
+        String fleetId = fleet.get("id").toString();
+        assertEquals(1, configuration.list(orgA, "fleets", false).stream().filter(row -> "Cabin Fleet".equals(row.get("name"))).count());
+        assertEquals(0, configuration.list(orgB, "fleets", false).stream().filter(row -> "Cabin Fleet".equals(row.get("name"))).count());
+
+        var aircraft = configuration.save(orgA, "config-admin", "aircraft", new SaveRequest(null, java.util.Map.of(
+            "fleetId", fleetId, "tailNumber", "CFG-A320", "aircraftType", "A320-200")));
+        assertEquals("CFG-A320", aircraft.get("tailNumber"));
+
+        var category = configuration.save(orgA, "config-admin", "defect-categories", new SaveRequest(null, java.util.Map.of(
+            "code", "CABIN_FIXTURE", "name", "Cabin fixture", "description", "Demo category")));
+        String categoryId = category.get("id").toString();
+        configuration.deactivate(orgA, "config-admin", "defect-categories", categoryId, "Retired in integration fixture");
+        assertEquals(0, configuration.list(orgA, "defect-categories", false).stream().filter(row -> categoryId.equals(row.get("id").toString())).count());
+        assertEquals(1, configuration.list(orgA, "defect-categories", true).stream().filter(row -> categoryId.equals(row.get("id").toString())).count());
+        var categoryAuditId = UUID.fromString(categoryId);
+        assertEquals(2, jdbc.queryForObject("SELECT count(*) FROM defect_events WHERE operator_id=? AND entity_type='DEFECT_CATEGORIES' AND entity_id=?", Integer.class, orgA, categoryAuditId));
     }
 
     private UUID createTenant(String suffix) {

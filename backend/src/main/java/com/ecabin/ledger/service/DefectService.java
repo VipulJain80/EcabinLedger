@@ -81,7 +81,9 @@ public class DefectService {
         String severity = input.severity().toUpperCase();
         if (!LOCATIONS.contains(location)) throw new IllegalArgumentException("Unsupported defect location.");
         String category = input.category().toUpperCase();
-        if (!CATEGORIES.contains(category)) throw new IllegalArgumentException("Unsupported defect category.");
+        boolean hasTenantCatalog = Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM defect_categories WHERE operator_id=?)", Boolean.class, operatorId));
+        boolean activeCategory = Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM defect_categories WHERE operator_id=? AND code=? AND isactive=1)", Boolean.class, operatorId, category));
+        if (hasTenantCatalog ? !activeCategory : !CATEGORIES.contains(category)) throw new IllegalArgumentException("Unsupported defect category.");
         if (!SEVERITIES.contains(severity)) throw new IllegalArgumentException("Unsupported severity.");
         UUID aircraftId = jdbc.query("SELECT id FROM aircraft WHERE operator_id=? AND tail_number=? AND isactive=1", (rs, row) -> rs.getObject(1, UUID.class), operatorId, input.tailNumber().toUpperCase()).stream().findFirst()
             .orElseThrow(() -> new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.NOT_FOUND, "Aircraft not found."));

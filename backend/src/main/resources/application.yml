@@ -6,9 +6,9 @@ spring:
   application:
     name: ecabin-ledger-api
   datasource:
-    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/ecabin}
-    username: ${SPRING_DATASOURCE_USERNAME:ecabin}
-    password: ${SPRING_DATASOURCE_PASSWORD:ecabin}
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/postgres?connectTimeout=10&sslmode=prefer&currentSchema=ecabin_ledger}
+    username: ${SPRING_DATASOURCE_USERNAME:postgres}
+    password: ${SPRING_DATASOURCE_PASSWORD:root}
     hikari:
       schema: ${DB_SCHEMA:ecabin_ledger}
       maximum-pool-size: ${DB_POOL_SIZE:20}

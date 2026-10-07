@@ -18,10 +18,12 @@ class PostgresMigrationSmokeTest {
     private static final String SCHEMA = "ecabin_ledger";
     private static final Set<String> REQUIRED_TABLES = Set.of("operators", "fleets", "aircraft", "operator_memberships",
         "operator_membership_teams", "defects", "inspections", "corrective_actions", "verifications",
-        "closure_approvals", "attachments", "notifications", "defect_events", "flyway_schema_history");
+        "closure_approvals", "attachments", "notifications", "defect_events", "maintenance_teams",
+        "cabin_zones", "defect_categories", "cabin_components", "flyway_schema_history");
     private static final Set<String> SOFT_DELETE_TABLES = Set.of("operators", "fleets", "aircraft", "operator_memberships",
         "operator_membership_teams", "defects", "inspections", "corrective_actions", "verifications",
-        "closure_approvals", "attachments", "notifications");
+        "closure_approvals", "attachments", "notifications", "maintenance_teams", "cabin_zones",
+        "defect_categories", "cabin_components");
 
     @Test
     void createsProjectSchemaAndAppliesFlywayMigrations() throws Exception {
@@ -49,9 +51,9 @@ class PostgresMigrationSmokeTest {
                 Set<String> actual = new java.util.HashSet<>();
                 while (rows.next()) actual.add(rows.getString(1));
                 assertTrue(actual.containsAll(REQUIRED_TABLES), "The project schema must contain all migrated operational tables.");
-                assertEquals(4, appliedMigrationCount(connection), "All versioned migrations must be recorded as applied.");
+                assertEquals(5, appliedMigrationCount(connection), "All versioned migrations must be recorded as applied.");
             }
-            try (var queryActive = connection.prepareStatement("SELECT table_name FROM information_schema.columns WHERE table_schema=? AND column_name='isactive' AND data_type='smallint' AND column_default='1'")) {
+            try (var queryActive = connection.prepareStatement("SELECT table_name FROM information_schema.columns WHERE table_schema=? AND column_name='isactive' AND data_type='smallint' AND column_default LIKE '1%'")) {
                 queryActive.setString(1, SCHEMA);
                 try (var rows = queryActive.executeQuery()) {
                     Set<String> flagged = new java.util.HashSet<>();
@@ -72,6 +74,10 @@ class PostgresMigrationSmokeTest {
             assertEquals(3, jdbc.queryForObject("SELECT count(*) FROM aircraft WHERE operator_id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' AND isactive=1", Integer.class));
             assertEquals(4, jdbc.queryForObject("SELECT count(*) FROM defects WHERE operator_id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' AND isactive=1", Integer.class));
             assertEquals(4, jdbc.queryForObject("SELECT count(*) FROM defect_events WHERE operator_id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' AND event_type='DEMO_SEEDED'", Integer.class));
+            assertEquals("ADMIN", jdbc.queryForObject("SELECT role FROM operator_memberships WHERE operator_id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' AND external_user_id='abc@gmail.com'", String.class));
+            assertEquals(11, jdbc.queryForObject("SELECT count(*) FROM defect_categories WHERE operator_id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' AND isactive=1", Integer.class));
+            assertEquals(13, jdbc.queryForObject("SELECT count(*) FROM cabin_zones WHERE operator_id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' AND isactive=1", Integer.class));
+            assertEquals(8, jdbc.queryForObject("SELECT count(*) FROM cabin_components WHERE operator_id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' AND isactive=1", Integer.class));
         }
     }
 

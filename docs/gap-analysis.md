@@ -7,7 +7,7 @@ Reviewed the complete checked-out tree before changing it. This workspace has no
 - Spring Security is stateless and uses Spring's default Bearer-token resolver (`Authorization: Bearer …`).
 - `SecurityConfig` constructs a `NimbusJwtDecoder` from `SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI`, applies issuer/time validation, and adds an `OAUTH2_AUDIENCE` check.
 - The original `DefectController` read `operator_id` and `sub` from the validated JWT and checked `scope`/`scp`-derived `SCOPE_defects.read` and `SCOPE_defects.write`. It has been changed to resolve `operator_id` + `sub` against active `operator_memberships`; the application role is from that DB record and backend permission checks gate each operation.
-- The browser calls a hypothetical `window.eCabinAuth.getAccessToken()` bridge. No gateway adapter, gateway headers, Microsoft integration, role/group claim mapping, user directory, or user provisioning exists in this repository. These values must not be treated as evidence of the real gateway contract.
+- Production browser integration expects `window.eCabinAuth.getAccessToken()`; no enterprise gateway adapter, gateway headers, Microsoft integration, role/group claim mapping, user directory, or user provisioning exists in this repository. A separate loopback-only `local-auth` profile issues short-lived tokens for the seeded `abc@gmail.com` demo membership and is not evidence of the real gateway contract.
 - No signing algorithm is pinned in application configuration; Spring Nimbus validates the token signature using issuer metadata/JWKS. Issuer/JWKS and forwarded-header behavior therefore remain unknown until the gateway contract is supplied.
 
 No claim about Microsoft token type, exact signing algorithm, issuer, audience, key-rotation behavior or gateway headers can be made from this repository. Spring Resource Server's current default expects a JWT bearer token using issuer discovery/JWKS. The actual enterprise gateway owner must validate that this is their supported interface.
@@ -16,7 +16,7 @@ No claim about Microsoft token type, exact signing algorithm, issuer, audience, 
 
 ### Critical
 
-- Gateway integration is not present; browser token provider is an undefined global. Real issuer/audience/key/header/claims and Microsoft-gateway flow cannot be safely inferred.
+- Production gateway integration is not present; browser token provider is an undefined global. Real issuer/audience/key/header/claims and Microsoft-gateway flow cannot be safely inferred. The local development token issuer is bound to loopback and must never be deployed.
 - The original state machine allowed direct `REPORTED → INSPECTING` and `IN_PROGRESS → RESOLVED → CLOSED`; it had no independent verification/approval or reopen flow.
 - Operator claim directly selected the tenant. No server-side membership/user record or application RBAC existed; any trusted token with the claim and scope could cross into that tenant.
 - Evidence was only an arbitrary text reference. No upload/download controls, content validation, malware scanning, or storage authorization existed.
@@ -52,6 +52,7 @@ Next App Router, responsive defect list/create/detail UI, REST DTOs, PostgreSQL/
 - Dedicated inspection, corrective action, verification and approval endpoints; explicit state transition rules, transactional row locks and actor/evidence audit events.
 - Request ID filter, structured log configuration, Actuator health/Prometheus hooks, Springdoc, Maven Wrapper, workflow/RBAC unit tests and Docker-dependent tenant isolation test.
 - UI identity comes from `/me`; reporting/workflow controls are hidden according to role as a usability hint.
+- V5 adds tenant-scoped configuration masters for cabin zones, defect categories, components and maintenance teams, plus audited GET/POST administration for organization profile, fleets, aircraft and user memberships. Configuration is ADMIN-only, menu metadata comes from the API, and deactivation/reactivation uses reasoned `isactive` changes.
 - Development seed now provides a DEMO-labelled Air India Express tenant, three synthetic aircraft, four sample defects across lifecycle states, memberships, inspections, actions, verification, approval, and seed audit events. The opt-in seed test applied it twice and verified idempotency.
 
 ## Verification gaps

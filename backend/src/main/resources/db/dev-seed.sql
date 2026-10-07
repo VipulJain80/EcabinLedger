@@ -6,6 +6,7 @@ ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, isactive=1;
 
 INSERT INTO operator_memberships(operator_id, external_user_id, display_name, role, isactive) VALUES
   ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'demo-user', 'Alex Morgan (DEMO)', 'SUPERVISOR', 1),
+  ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'abc@gmail.com', 'abc@gmail.com (LOCAL DEMO)', 'ADMIN', 1),
   ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'demo-inspector', 'Riya Shah (DEMO)', 'INSPECTOR', 1),
   ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'demo-tech', 'Arun Das (DEMO)', 'MAINTENANCE_TECHNICIAN', 1),
   ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'demo-quality', 'Meera Rao (DEMO)', 'QUALITY_COMPLIANCE', 1)
@@ -15,6 +16,38 @@ SET display_name=EXCLUDED.display_name, role=EXCLUDED.role, isactive=1;
 INSERT INTO fleets(id, operator_id, name) VALUES
   ('eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'General Fleet')
 ON CONFLICT (operator_id, name) DO NOTHING;
+
+INSERT INTO defect_categories(operator_id, code, name)
+SELECT 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', c.code, c.name FROM (VALUES
+  ('CABIN','Cabin'),('GALLEY','Galley'),('LAVATORY','Lavatory'),('ATTENDANT_SEAT','Attendant seat'),
+  ('IFE','In-flight entertainment'),('SEAT','Passenger seat'),('LIGHTING','Lighting'),
+  ('OVERHEAD_BIN','Overhead bin'),('PSU','Passenger service unit'),('EMERGENCY_EQUIPMENT','Emergency equipment'),('OTHER','Other')
+) AS c(code,name) ON CONFLICT(operator_id, code) DO NOTHING;
+
+INSERT INTO cabin_zones(operator_id, code, name, area)
+SELECT 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', z.code, z.name, z.area FROM (VALUES
+  ('FWD_CABIN','FWD CABIN','CABIN'),('AFT_CABIN','AFT CABIN','CABIN'),('ROW','Row','CABIN'),('SEAT','Seat','CABIN'),
+  ('L1','L1','CABIN'),('L2','L2','CABIN'),('R1','R1','CABIN'),('R2','R2','CABIN'),
+  ('FWD_GALLEY','FWD GALLEY','GALLEY'),('AFT_GALLEY','AFT GALLEY','GALLEY'),
+  ('FWD_LAV','FWD LAV','LAVATORY'),('AFT_LAV','AFT LAV','LAVATORY'),('ATTENDANT_SEAT','Attendant seat','ATTENDANT_SEAT')
+) AS z(code,name,area) ON CONFLICT(operator_id, code) DO NOTHING;
+
+INSERT INTO cabin_components(operator_id, code, name)
+SELECT 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', c.code, c.name FROM (VALUES
+  ('SEAT','Passenger seat'),('IFE_DISPLAY','IFE display'),('READING_LIGHT','Reading light'),
+  ('OVERHEAD_BIN_LATCH','Overhead bin latch'),('PSU','Passenger service unit'),
+  ('GALLEY_CART_LATCH','Galley cart latch'),('LAVATORY_FAUCET','Lavatory faucet'),('ATTENDANT_SEAT_BELT','Attendant seat belt')
+) AS c(code,name) ON CONFLICT(operator_id, code) DO NOTHING;
+
+INSERT INTO maintenance_teams(operator_id, name) VALUES
+  ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'Cabin Maintenance (DEMO)'),
+  ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'Cabin Quality (DEMO)')
+ON CONFLICT(operator_id, name) DO NOTHING;
+
+INSERT INTO operator_membership_teams(operator_id, external_user_id, team_name, isactive) VALUES
+  ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'demo-tech', 'Cabin Maintenance (DEMO)', 1),
+  ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'demo-quality', 'Cabin Quality (DEMO)', 1)
+ON CONFLICT (operator_id, external_user_id, team_name) DO UPDATE SET isactive=1;
 
 INSERT INTO aircraft(id, operator_id, fleet_id, tail_number, aircraft_type, isactive) VALUES
   ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', (SELECT id FROM fleets WHERE operator_id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' AND name='General Fleet'), 'DEMO-A320-01', 'A320-200', 1),

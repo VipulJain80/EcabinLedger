@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import "./details.css";
+import "./login.css";
+import "./configuration.css";
 
 export const metadata: Metadata = {
   title: "eCabin Ledger | Cabin Defect Operations",
