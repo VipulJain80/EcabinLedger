@@ -8,10 +8,16 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.Map;
+import java.util.ArrayList;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.io.UncheckedIOException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.ResultSetExtractor;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.annotation.Transactional;
 
 @Service
@@ -34,9 +40,19 @@ public class DefectService {
 
     public DefectService(JdbcTemplate jdbc) { this.jdbc = jdbc; }
 
-    public DefectPage list(UUID operatorId, String status, String location, String cursor, int limit) {
+    public DefectPage list(UUID operatorId, String externalUserId, String status, String location, String query, String searchBy, String aircraftType,
+            Instant fromDate, Instant toDate, boolean mine, String cursor, int limit) {
         if (status != null && !Set.of("REPORTED", "UNDER_REVIEW", "INSPECTION_REQUIRED", "INSPECTION_IN_PROGRESS", "INSPECTION_COMPLETE", "ACTION_ASSIGNED", "IN_PROGRESS", "AWAITING_VERIFICATION", "VERIFIED", "APPROVAL_REQUIRED", "CLOSED", "REJECTED", "CANCELLED", "REOPENED").contains(status)) throw new IllegalArgumentException("Unsupported status filter.");
         if (location != null && !LOCATIONS.contains(location)) throw new IllegalArgumentException("Unsupported location filter.");
+        String searchColumn = switch (searchBy == null ? "ALL" : searchBy.toUpperCase(java.util.Locale.ROOT)) {
+            case "DEFECT_ID" -> "d.reference";
+            case "AIRCRAFT_REGISTRATION" -> "a.tail_number";
+            case "CATEGORY" -> "d.category";
+            case "COMPONENT" -> "d.component";
+            case "ASSIGNED_USER" -> "d.assigned_to";
+            case "ALL" -> "concat_ws(' ',d.reference,d.title,d.description,a.tail_number,a.aircraft_type,d.category,d.zone,d.component,d.assigned_to)";
+            default -> throw new IllegalArgumentException("Unsupported defect search field.");
+        };
         Instant before = null;
         UUID beforeId = null;
         if (cursor != null && !cursor.isBlank()) {
@@ -49,13 +65,24 @@ public class DefectService {
         String sql = "SELECT d.*, a.tail_number, a.aircraft_type, current_action.id AS active_action_id FROM defects d JOIN aircraft a ON a.id=d.aircraft_id AND a.operator_id=d.operator_id " +
             "LEFT JOIN LATERAL (SELECT ca.id FROM corrective_actions ca WHERE ca.operator_id=d.operator_id AND ca.defect_id=d.id AND ca.isactive=1 AND ca.status IN ('ASSIGNED','IN_PROGRESS') ORDER BY ca.created_at DESC LIMIT 1) current_action ON TRUE " +
             "WHERE d.operator_id=? AND d.isactive=1 AND a.isactive=1 AND (CAST(? AS varchar) IS NULL OR d.status=?) AND (CAST(? AS varchar) IS NULL OR d.location=?) " +
+            "AND (CAST(? AS varchar) IS NULL OR " + searchColumn + " ILIKE '%'||?||'%') " +
+            "AND (CAST(? AS varchar) IS NULL OR a.aircraft_type=?) AND (CAST(? AS timestamptz) IS NULL OR d.reported_at>=CAST(? AS timestamptz)) " +
+            "AND (CAST(? AS timestamptz) IS NULL OR d.reported_at<CAST(? AS timestamptz)+interval '1 day') AND (?=false OR d.reported_by=?) " +
             "AND (CAST(? AS timestamptz) IS NULL OR (d.reported_at,d.id) < (CAST(? AS timestamptz),CAST(? AS uuid))) ORDER BY d.reported_at DESC,d.id DESC LIMIT ?";
-        List<DefectView> results = jdbc.query(sql, DEFECT, operatorId, status, status, location, location, before, before, beforeId, Math.min(Math.max(limit, 1), 100) + 1);
+        List<DefectView> results = jdbc.query(sql, DEFECT, operatorId, status, status, location, location,
+            blankToNull(query), blankToNull(query), blankToNull(aircraftType), blankToNull(aircraftType), fromDate, fromDate, toDate, toDate,
+            mine, externalUserId, before, before, beforeId, Math.min(Math.max(limit, 1), 100) + 1);
         boolean more = results.size() > Math.min(Math.max(limit, 1), 100);
         List<DefectView> items = more ? results.subList(0, results.size() - 1) : results;
         String next = more ? Base64.getUrlEncoder().withoutPadding().encodeToString((items.get(items.size()-1).reportedAt()+"|"+items.get(items.size()-1).id()).getBytes(StandardCharsets.UTF_8)) : null;
         return new DefectPage(items, next);
     }
+
+    public DefectPage list(UUID operatorId, String status, String location, String cursor, int limit) {
+        return list(operatorId, "", status, location, null, "ALL", null, null, null, false, cursor, limit);
+    }
+
+    private static String blankToNull(String value) { return value == null || value.isBlank() ? null : value.trim(); }
 
     public DashboardSummary summary(UUID operatorId) {
         return jdbc.queryForObject("SELECT " +
@@ -65,6 +92,53 @@ public class DefectService {
             "count(*) FILTER (WHERE status='CLOSED' AND updated_at >= date_trunc('month',now())) AS closed_this_month " +
             "FROM defects WHERE operator_id=? AND isactive=1", (rs, row) -> new DashboardSummary(rs.getLong("open_defects"), rs.getLong("critical_defects"), rs.getLong("reported_today"), rs.getLong("closed_this_month")), operatorId);
     }
+
+    public FleetStatusPage fleetStatus(UUID operatorId, int page, int size, String search, String sortBy, String sortDirection) {
+        if (page < 0 || size < 1 || size > 100) throw new IllegalArgumentException("Choose a page and page size between 1 and 100.");
+        String sort = fleetSort(sortBy, sortDirection);
+        String query = search == null ? "" : search.trim();
+        if (query.length() > 200) throw new IllegalArgumentException("Search is limited to 200 characters.");
+        String where = " WHERE a.operator_id=? AND a.isactive=1 AND (?='' OR POSITION(LOWER(?) IN LOWER(CONCAT_WS(' ',a.msn_number,a.tail_number,a.aircraft_type)))>0)";
+        Long count = jdbc.queryForObject("SELECT count(*) FROM aircraft a" + where, Long.class, operatorId, query, query);
+        String sql = "SELECT a.id,a.msn_number,a.tail_number,a.aircraft_type,COUNT(d.id) FILTER (WHERE d.status NOT IN ('CLOSED','CANCELLED')) AS open_defects " +
+            "FROM aircraft a LEFT JOIN defects d ON d.operator_id=a.operator_id AND d.aircraft_id=a.id AND d.isactive=1" + where +
+            " GROUP BY a.id,a.msn_number,a.tail_number,a.aircraft_type ORDER BY " + sort + " NULLS LAST,a.id ASC LIMIT ? OFFSET ?";
+        List<FleetStatusRow> rows = jdbc.query(sql, (rs, row) -> new FleetStatusRow(rs.getObject("id", UUID.class), rs.getString("msn_number"), rs.getString("tail_number"), rs.getString("aircraft_type"), rs.getLong("open_defects")), operatorId, query, query, size, (long) page * size);
+        long total = count == null ? 0 : count;
+        return new FleetStatusPage(rows, page, size, total, (int) Math.ceil((double) total / size));
+    }
+
+    @Transactional(readOnly = true)
+    public void exportFleetStatus(UUID operatorId, String search, String sortBy, String sortDirection, OutputStream output) throws IOException {
+        String sort = fleetSort(sortBy, sortDirection);
+        String query = search == null ? "" : search.trim();
+        if (query.length() > 200) throw new IllegalArgumentException("Search is limited to 200 characters.");
+        String where = " WHERE a.operator_id=? AND a.isactive=1 AND (?='' OR POSITION(LOWER(?) IN LOWER(CONCAT_WS(' ',a.msn_number,a.tail_number,a.aircraft_type)))>0)";
+        Long count = jdbc.queryForObject("SELECT count(*) FROM aircraft a" + where, Long.class, operatorId, query, query);
+        XlsxStreamWriter writer = new XlsxStreamWriter(output, List.of("MSN Number", "Aircraft Registration", "Aircraft Type", "Open Defects"), count == null ? 0 : count);
+        String sql = "SELECT a.msn_number,a.tail_number,a.aircraft_type,COUNT(d.id) FILTER (WHERE d.status NOT IN ('CLOSED','CANCELLED')) AS open_defects FROM aircraft a LEFT JOIN defects d ON d.operator_id=a.operator_id AND d.aircraft_id=a.id AND d.isactive=1" + where + " GROUP BY a.id,a.msn_number,a.tail_number,a.aircraft_type ORDER BY " + sort + " NULLS LAST,a.id ASC";
+        try {
+            jdbc.query(connection -> {
+                var prepared = connection.prepareStatement(sql); prepared.setFetchSize(500);
+                prepared.setObject(1, operatorId); prepared.setString(2, query); prepared.setString(3, query); return prepared;
+            }, result -> {
+                try { writer.writeRow(List.of(value(result.getString(1)), value(result.getString(2)), value(result.getString(3)), String.valueOf(result.getLong(4)))); }
+                catch (IOException ex) { throw new UncheckedIOException(ex); }
+            });
+            writer.finish();
+        } catch (UncheckedIOException ex) { throw ex.getCause(); }
+    }
+
+    private String fleetSort(String sortBy, String sortDirection) {
+        Map<String,String> columns = Map.of("msnNumber","a.msn_number","tailNumber","a.tail_number","aircraftType","a.aircraft_type","openDefects","COUNT(d.id) FILTER (WHERE d.status NOT IN ('CLOSED','CANCELLED'))");
+        String column = columns.get(sortBy == null || sortBy.isBlank() ? "tailNumber" : sortBy);
+        if (column == null) throw new IllegalArgumentException("Choose a supported fleet status sort column.");
+        String direction = sortDirection == null || sortDirection.isBlank() ? "ASC" : sortDirection.toUpperCase(java.util.Locale.ROOT);
+        if (!Set.of("ASC","DESC").contains(direction)) throw new IllegalArgumentException("Choose ascending or descending sort order.");
+        return column + " " + direction;
+    }
+
+    private static String value(String value) { return value == null ? "—" : value; }
 
     public String organizationName(UUID operatorId) {
         return jdbc.query("SELECT name FROM operators WHERE id=? AND isactive=1", rs -> rs.next() ? rs.getString(1) : null, operatorId);

@@ -6,6 +6,7 @@ import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.Size;
 import java.time.Instant;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 public final class ApiModels {
@@ -71,7 +72,10 @@ public final class ApiModels {
 
     public record DefectPage(List<DefectView> items, String nextCursor) {}
     public record DashboardSummary(long openDefects, long criticalDefects, long reportedToday, long closedThisMonth) {}
-    public record CurrentUserView(String organizationName, String displayName, String role) {}
+    public record FleetStatusRow(UUID id, String msnNumber, String tailNumber, String aircraftType, long openDefects) {}
+    public record FleetStatusPage(List<FleetStatusRow> items, int page, int size, long totalElements, int totalPages) {}
+    public record CurrentUserView(String organizationName, String displayName, String role, Set<String> permissions) {}
+    public record NavigationItem(String key, String label, String icon, String section, List<NavigationItem> children) {}
     public record ErrorBody(ErrorDetail error) {}
     public record ErrorDetail(String code, String message) {}
 }

@@ -66,10 +66,11 @@ Base path: `/api/v1`. All operational routes require a validated bearer token an
 
 | Method | Route | Purpose |
 |---|---|---|
-| GET | `/me` | Resolved organization, display name and application role |
+| GET | `/me` | Resolved organization, display name, application role and granted permissions |
+| GET | `/navigation` | Menu and nested submenu items filtered by the authenticated user's permissions |
 | GET | `/dashboard/summary` | Tenant-scoped summary counts |
 | GET | `/reference-data` | Active categories, cabin zones and components for operational forms |
-| GET | `/defects` | Server-paged tenant defect register filtered by status and location |
+| GET | `/defects` | Server-paged tenant search by defect ID, registration, category, component, assigned person, aircraft type, date range, status, location, and current user's reports |
 | POST | `/defects` | Report defect |
 | GET | `/defects/{id}` | Tenant-scoped defect detail |
 | POST | `/defects/{id}/transitions` | Apply allowed general transition |

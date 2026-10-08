@@ -49,12 +49,12 @@ INSERT INTO operator_membership_teams(operator_id, external_user_id, team_name, 
   ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'demo-quality', 'Cabin Quality (DEMO)', 1)
 ON CONFLICT (operator_id, external_user_id, team_name) DO UPDATE SET isactive=1;
 
-INSERT INTO aircraft(id, operator_id, fleet_id, tail_number, aircraft_type, isactive) VALUES
-  ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', (SELECT id FROM fleets WHERE operator_id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' AND name='General Fleet'), 'DEMO-A320-01', 'A320-200', 1),
-  ('cccccccc-cccc-4ccc-8ccc-cccccccccccc', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', (SELECT id FROM fleets WHERE operator_id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' AND name='General Fleet'), 'DEMO-B737-01', 'B737-800', 1),
-  ('dddddddd-dddd-4ddd-8ddd-dddddddddddd', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', (SELECT id FROM fleets WHERE operator_id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' AND name='General Fleet'), 'DEMO-A320-02', 'A320-200', 1)
+INSERT INTO aircraft(id, operator_id, fleet_id, tail_number, aircraft_type, msn_number, isactive) VALUES
+  ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', (SELECT id FROM fleets WHERE operator_id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' AND name='General Fleet'), 'DEMO-A320-01', 'A320-200', 'DEMO-32001', 1),
+  ('cccccccc-cccc-4ccc-8ccc-cccccccccccc', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', (SELECT id FROM fleets WHERE operator_id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' AND name='General Fleet'), 'DEMO-B737-01', 'B737-800', 'DEMO-73701', 1),
+  ('dddddddd-dddd-4ddd-8ddd-dddddddddddd', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', (SELECT id FROM fleets WHERE operator_id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' AND name='General Fleet'), 'DEMO-A320-02', 'A320-200', 'DEMO-32002', 1)
 ON CONFLICT (id) DO UPDATE
-SET fleet_id=EXCLUDED.fleet_id, tail_number=EXCLUDED.tail_number, aircraft_type=EXCLUDED.aircraft_type, isactive=1;
+SET fleet_id=EXCLUDED.fleet_id, tail_number=EXCLUDED.tail_number, aircraft_type=EXCLUDED.aircraft_type, msn_number=EXCLUDED.msn_number, isactive=1;
 
 INSERT INTO defects(id, operator_id, aircraft_id, reference, location, category, zone, row_number, seat_reference, component,
   title, description, severity, status, reported_by, assigned_to, assigned_user_id, due_at, reported_at, updated_at, isactive) VALUES

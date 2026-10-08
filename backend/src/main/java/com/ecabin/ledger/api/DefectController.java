@@ -10,6 +10,7 @@ import com.ecabin.ledger.security.PermissionService;
 import jakarta.validation.Valid;
 import java.util.List;
 import java.util.UUID;
+import java.time.Instant;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -33,17 +34,23 @@ public class DefectController {
     public DefectPage list(JwtAuthenticationToken auth,
         @RequestParam(required = false) String status,
         @RequestParam(required = false) String location,
+        @RequestParam(required = false) String q,
+        @RequestParam(defaultValue = "DEFECT_ID") String searchBy,
+        @RequestParam(required = false) String aircraftType,
+        @RequestParam(required = false) Instant fromDate,
+        @RequestParam(required = false) Instant toDate,
+        @RequestParam(defaultValue = "false") boolean mine,
         @RequestParam(required = false) String cursor,
         @RequestParam(defaultValue = "25") int limit) {
         AuthenticatedUser user = users.require(auth); permissions.require(user, Permission.VIEW);
-        return service.list(user.organizationId(), status, location, cursor, limit);
+        return service.list(user.organizationId(), user.externalUserId(), status, location, q, searchBy, aircraftType, fromDate, toDate, mine, cursor, limit);
     }
 
     @GetMapping("/dashboard/summary")
     public DashboardSummary summary(JwtAuthenticationToken auth) { AuthenticatedUser user=users.require(auth); permissions.require(user, Permission.VIEW); return service.summary(user.organizationId()); }
 
     @GetMapping("/me")
-    public CurrentUserView me(JwtAuthenticationToken auth) { AuthenticatedUser user=users.require(auth); return new CurrentUserView(service.organizationName(user.organizationId()), user.displayName(), user.role().name()); }
+    public CurrentUserView me(JwtAuthenticationToken auth) { AuthenticatedUser user=users.require(auth); return new CurrentUserView(service.organizationName(user.organizationId()), user.displayName(), user.role(), permissions.permissionsFor(user.organizationId(), user.role()).stream().map(Enum::name).collect(java.util.stream.Collectors.toUnmodifiableSet())); }
 
     @PostMapping("/defects") @ResponseStatus(HttpStatus.CREATED)
     public DefectView create(JwtAuthenticationToken auth, @Valid @RequestBody CreateDefectRequest request) {

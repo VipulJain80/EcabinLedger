@@ -22,7 +22,7 @@ public class CurrentUserResolver {
                 "WHERE m.operator_id=? AND m.external_user_id=? AND m.isactive=1 AND o.isactive=1",
                 (rs, row) -> new AuthenticatedUser(organizationId, externalUserId,
                     rs.getString("display_name") == null ? externalUserId : rs.getString("display_name"),
-                    AppRole.valueOf(rs.getString("role"))), organizationId, externalUserId)
+                    rs.getString("role")), organizationId, externalUserId)
                 .stream().findFirst().orElseThrow(() -> new AccessDeniedException("No active organization membership exists for this user."));
         } catch (IllegalArgumentException | NullPointerException ex) {
             throw new AccessDeniedException("The validated token has no valid organization assignment.");

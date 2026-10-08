@@ -8,9 +8,16 @@ import com.ecabin.ledger.service.ConfigurationService;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.Max;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.http.ContentDisposition;
+import org.springframework.http.ResponseEntity;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -20,6 +27,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
 
 /** GET/POST-only tenant administration API. Every operation is organization-scoped and ADMIN-authorized. */
 @RestController
@@ -46,6 +54,40 @@ public class ConfigurationController {
             @RequestParam(defaultValue = "false") boolean includeInactive) {
         AuthenticatedUser user = requireAdmin(auth);
         return configuration.list(user.organizationId(), resource, includeInactive);
+    }
+
+    @GetMapping("/{resource}/table")
+    public ConfigurationService.TablePage table(JwtAuthenticationToken auth, @PathVariable String resource,
+            @RequestParam(defaultValue = "0") @Min(0) int page,
+            @RequestParam(defaultValue = "25") @Min(1) @Max(100) int size,
+            @RequestParam(required = false) String search,
+            @RequestParam(defaultValue = "ACTIVE") String status,
+            @RequestParam(required = false) String role,
+            @RequestParam(required = false) String area,
+            @RequestParam(required = false) String aircraftType,
+            @RequestParam(required = false) String sortBy,
+            @RequestParam(defaultValue = "ASC") String sortDirection) {
+        AuthenticatedUser user = requireAdmin(auth);
+        return configuration.table(user.organizationId(), resource, page, size, search, status, role, area, aircraftType, sortBy, sortDirection);
+    }
+
+    @GetMapping(value = "/{resource}/export", produces = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    public ResponseEntity<StreamingResponseBody> export(JwtAuthenticationToken auth, @PathVariable String resource,
+            @RequestParam(required = false) String search,
+            @RequestParam(defaultValue = "ACTIVE") String status,
+            @RequestParam(required = false) String role,
+            @RequestParam(required = false) String area,
+            @RequestParam(required = false) String aircraftType,
+            @RequestParam(required = false) String sortBy,
+            @RequestParam(defaultValue = "ASC") String sortDirection) {
+        AuthenticatedUser user = requireAdmin(auth);
+        StreamingResponseBody body = output -> configuration.exportExcel(user.organizationId(), resource, search, status, role, area, aircraftType, sortBy, sortDirection, output);
+        String filename = "ecabin-" + resource.replaceAll("[^a-zA-Z0-9-]", "") + ".xlsx";
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.parseMediaType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"));
+        headers.setContentDisposition(ContentDisposition.attachment().filename(filename, StandardCharsets.UTF_8).build());
+        headers.setCacheControl("no-store");
+        return new ResponseEntity<>(body, headers, HttpStatus.OK);
     }
 
     @PostMapping("/{resource}")

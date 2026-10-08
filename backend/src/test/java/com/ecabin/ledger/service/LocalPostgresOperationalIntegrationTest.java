@@ -75,12 +75,16 @@ class LocalPostgresOperationalIntegrationTest {
             .build();
         var principal = users.require(new JwtAuthenticationToken(principalToken));
         assertEquals(orgA, principal.organizationId());
-        assertEquals(AppRole.SUPERVISOR, principal.role());
+        assertEquals(AppRole.SUPERVISOR.name(), principal.role());
 
         String tailNumber = jdbc.queryForObject("SELECT tail_number FROM aircraft WHERE operator_id=?", String.class, orgA);
         DefectView defect = defects.create(orgA, principal.externalUserId(), new CreateDefectRequest(
             tailNumber, "CABIN", "SEAT", "FWD CABIN",
             14, "14A", "Seat", "Seat cover torn", "Cover torn along seam", "MEDIUM"));
+
+        assertEquals(1, defects.list(orgA, "reporter-a", null, null, defect.reference(), "DEFECT_ID", null, null, null, false, null, 25).items().size());
+        assertEquals(1, defects.list(orgA, "reporter-a", null, null, defect.tailNumber(), "AIRCRAFT_REGISTRATION", "A320-200", null, null, false, null, 25).items().size());
+        assertEquals(0, defects.list(orgA, "reporter-b", null, null, null, "ALL", null, null, null, true, null, 25).items().size());
 
         assertEquals(0, defects.list(orgB, null, null, null, 25).items().size());
         assertThrows(ResponseStatusException.class, () -> defects.get(orgB, defect.id()));
