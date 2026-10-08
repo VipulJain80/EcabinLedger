@@ -237,20 +237,19 @@ export default function Home() {
   }
 
   if (process.env.NODE_ENV === "development" && !localSessionEmail && !gatewayAuthAvailable) return <main className="login-shell">
+    <header className="login-airline-brand" aria-label="Skyways Service"><span>SKYWAYS</span><strong>Service</strong></header>
     <section className="login-card" aria-labelledby="login-title">
-      <a className="brand login-brand" href="#home" aria-label="eCabin Ledger"><span className="brand-mark">e</span><span>eCabin <b>Ledger</b></span></a>
-      <div className="login-eyebrow"><span></span> AVIATION CABIN OPERATIONS</div>
-      <h1 id="login-title">Sign in to your workspace</h1>
-      <p className="login-copy">Access the defect register, inspections, and maintenance records for your operator.</p>
+      <div className="login-user-icon" aria-hidden="true"><svg viewBox="0 0 56 56"><circle cx="28" cy="17" r="9"/><path d="M10 43c0-8 7-12 18-12s18 4 18 12c0 5-7 7-18 7s-18-2-18-7Z"/></svg></div>
+      <h1 id="login-title">LOGIN</h1>
       <form className="login-form" onSubmit={loginLocal}>
-        <label htmlFor="login-email">Work email</label>
-        <input id="login-email" type="email" autoComplete="email" autoFocus required placeholder="name@operator.com" value={loginEmail} onChange={(event) => setLoginEmail(event.target.value)} />
+        <label className="login-email-label" htmlFor="login-email">Work email</label>
+        <input id="login-email" type="email" autoComplete="email" autoFocus required placeholder="Enter your work email" value={loginEmail} onChange={(event) => setLoginEmail(event.target.value)} />
         {loginError && <p className="login-error" role="alert">{loginError}</p>}
-        <button type="submit" className="button-primary" disabled={loginLoading}>{loginLoading ? "Signing in…" : "Continue with email"}<span>→</span></button>
+        <button type="submit" className="login-submit" disabled={loginLoading}>{loginLoading ? "Signing in…" : "Continue with email"}<span aria-hidden="true">→</span></button>
       </form>
-      <div className="login-help"><span>i</span><p><b>Local demo access</b><br />Enter <code>abc@gmail.com</code> to explore the demo workspace.</p></div>
-      <p className="login-footer">Production access is provided by your enterprise authentication gateway.</p>
+      <p className="login-help">Local demo access: <b>abc@gmail.com</b></p>
     </section>
+    <p className="login-footer">© 2026 Skyways Service. All Rights Reserved.</p>
   </main>;
 
   return <main className="shell">

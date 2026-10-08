@@ -53,7 +53,7 @@ Next App Router, responsive defect list/create/detail UI, REST DTOs, PostgreSQL/
 - Request ID filter, structured log configuration, Actuator health/Prometheus hooks, Springdoc, Maven Wrapper, workflow/RBAC unit tests and Docker-dependent tenant isolation test.
 - UI identity comes from `/me`; reporting/workflow controls are hidden according to role as a usability hint.
 - V5 adds tenant-scoped configuration masters for cabin zones, defect categories, components and maintenance teams, plus audited GET/POST administration for organization profile, fleets, aircraft and user memberships. Configuration is ADMIN-only, menu metadata comes from the API, and deactivation/reactivation uses reasoned `isactive` changes.
-- Development seed now provides a DEMO-labelled Air India Express tenant, three synthetic aircraft, four sample defects across lifecycle states, memberships, inspections, actions, verification, approval, and seed audit events. The opt-in seed test applied it twice and verified idempotency.
+- Development seed now provides a DEMO-labelled Skyways Service tenant, three synthetic aircraft, four sample defects across lifecycle states, memberships, inspections, actions, verification, approval, and seed audit events. The opt-in seed test applied it twice and verified idempotency.
 
 ## Verification gaps
 

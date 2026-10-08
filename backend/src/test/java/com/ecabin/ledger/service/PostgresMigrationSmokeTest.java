@@ -69,7 +69,7 @@ class PostgresMigrationSmokeTest {
             seed.execute(dataSource);
             seed.execute(dataSource); // The demo fixture must be safe to apply more than once.
             var jdbc = new JdbcTemplate(dataSource);
-            assertEquals("Air India Express (DEMO)", jdbc.queryForObject(
+            assertEquals("Skyways Service (DEMO)", jdbc.queryForObject(
                 "SELECT name FROM operators WHERE id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' AND isactive=1", String.class));
             assertEquals(3, jdbc.queryForObject("SELECT count(*) FROM aircraft WHERE operator_id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' AND isactive=1", Integer.class));
             assertEquals(4, jdbc.queryForObject("SELECT count(*) FROM defects WHERE operator_id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' AND isactive=1", Integer.class));

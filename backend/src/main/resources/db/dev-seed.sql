@@ -1,7 +1,7 @@
 -- Development/demo only. All aircraft registrations and operational data below are synthetic.
--- The Air India Express name is explicitly labelled DEMO at the user's request. Never run in production.
+-- Skyways Service is fictional demo branding. Never run in production.
 INSERT INTO operators(id, name) VALUES
-  ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'Air India Express (DEMO)')
+  ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'Skyways Service (DEMO)')
 ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, isactive=1;
 
 INSERT INTO operator_memberships(operator_id, external_user_id, display_name, role, isactive) VALUES
