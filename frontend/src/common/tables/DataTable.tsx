@@ -18,18 +18,20 @@ type DataTableProps<T extends { id: string }> = {
   search: string;
   loading: boolean;
   error: boolean;
+  errorMessage?: string;
   filters?: ReactNode;
   onPageChange: (page: number) => void;
   onPageSizeChange: (size: number) => void;
   onSortingChange: (sorting: SortingState) => void;
   onSearchChange: (search: string) => void;
   onRetry: () => void;
-  onExport: () => void;
+  onExport: (visibleColumnIds: string[]) => void;
   exporting: boolean;
+  exportable?: boolean;
   selectable?: boolean;
 };
 
-export default function DataTable<T extends { id: string }>({ columns, data, total, page, pageSize, sorting, search, loading, error, filters, onPageChange, onPageSizeChange, onSortingChange, onSearchChange, onRetry, onExport, exporting, selectable = true }: DataTableProps<T>) {
+export default function DataTable<T extends { id: string }>({ columns, data, total, page, pageSize, sorting, search, loading, error, errorMessage, filters, onPageChange, onPageSizeChange, onSortingChange, onSearchChange, onRetry, onExport, exporting, exportable = true, selectable = true }: DataTableProps<T>) {
   const [searchDraft, setSearchDraft] = useState(search);
   const [columnVisibility, setColumnVisibility] = useState<VisibilityState>({});
   const [showColumns, setShowColumns] = useState(false);
@@ -61,6 +63,10 @@ export default function DataTable<T extends { id: string }>({ columns, data, tot
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const visiblePages = [...new Set([0, totalPages - 1, page - 1, page, page + 1].filter((index) => index >= 0 && index < totalPages))].sort((a, b) => a - b);
   const columnCount = table.getVisibleLeafColumns().length + (selectable ? 1 : 0);
+  const exportableColumnIds = () => table.getVisibleLeafColumns()
+    .filter((column) => column.id !== "id" && !["actions", "select", "selection", "expand"].includes(column.id))
+    .filter((column) => (column.columnDef.meta as { exportable?: boolean } | undefined)?.exportable !== false)
+    .map((column) => column.id);
   return <>
     <div className="admin-table-tools">
       <label className="admin-table-page-size">Rows<select value={pageSize} onChange={(event) => onPageSizeChange(Number(event.target.value))}><option value={10}>10</option><option value={25}>25</option><option value={50}>50</option><option value={100}>100</option></select></label>
@@ -68,12 +74,12 @@ export default function DataTable<T extends { id: string }>({ columns, data, tot
       {filters}
       <div className="admin-table-actions">
         <div className="column-picker"><button type="button" className="button-secondary" aria-expanded={showColumns} onClick={() => setShowColumns((open) => !open)}>Columns ▾</button>{showColumns && <div className="column-picker-menu">{table.getAllLeafColumns().filter((column) => column.getCanHide()).map((column) => <label key={column.id}><input type="checkbox" checked={column.getIsVisible()} onChange={column.getToggleVisibilityHandler()} />{String(column.columnDef.header || column.id)}</label>)}</div>}</div>
-        <button type="button" className="button-secondary admin-export" onClick={onExport} disabled={exporting}>{exporting ? "Preparing…" : "Export Excel"}</button>
+        {exportable && <button type="button" className="button-secondary admin-export" onClick={() => onExport(exportableColumnIds())} disabled={exporting}>{exporting ? "Preparing…" : "Export Excel"}</button>}
       </div>
     </div>
     <div className="table-scroll admin-data-table-wrap"><table className="admin-data-table"><thead>{table.getHeaderGroups().map((group) => <tr key={group.id}>{selectable && <th className="selection-cell"><span className="sr-only">#</span><input type="checkbox" checked={table.getIsAllPageRowsSelected()} ref={(element) => { if (element) element.indeterminate = table.getIsSomePageRowsSelected(); }} onChange={table.getToggleAllPageRowsSelectedHandler()} aria-label="Select all rows on this page" /></th>}{group.headers.map((header) => <th key={header.id}>{header.isPlaceholder ? null : <button type="button" className={header.column.getCanSort() ? "sortable-heading" : "sortable-heading static"} onClick={header.column.getToggleSortingHandler()} disabled={!header.column.getCanSort()}>{flexRender(header.column.columnDef.header, header.getContext())}{header.column.getCanSort() && <span aria-hidden="true">{header.column.getIsSorted() === "asc" ? " ↑" : header.column.getIsSorted() === "desc" ? " ↓" : " ↕"}</span>}</button>}</th>)}</tr>)}</thead><tbody>
       {loading && Array.from({ length: Math.min(pageSize, 6) }, (_, index) => <tr key={`loading-${index}`} className="table-skeleton-row"><td colSpan={columnCount}><span /></td></tr>)}
-      {!loading && error && <tr><td colSpan={columnCount} className="table-state-cell"><strong>We couldn’t load these records.</strong><button className="button-secondary" onClick={onRetry}>Retry</button></td></tr>}
+      {!loading && error && <tr><td colSpan={columnCount} className="table-state-cell"><strong>We couldn’t load these records.</strong>{errorMessage && <small role="alert">{errorMessage}</small>}<button className="button-secondary" onClick={onRetry}>Retry</button></td></tr>}
       {!loading && !error && table.getRowModel().rows.map((row) => <tr key={row.id}>{selectable && <td className="selection-cell"><input type="checkbox" checked={row.getIsSelected()} onChange={row.getToggleSelectedHandler()} aria-label={`Select row ${row.original.id}`} /></td>}{row.getVisibleCells().map((cell) => <td key={cell.id}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>)}</tr>)}
       {!loading && !error && table.getRowModel().rows.length === 0 && <tr><td colSpan={columnCount} className="table-state-cell"><span className="empty-art">⌕</span><strong>No records found</strong><small>Adjust the search or filters and try again.</small></td></tr>}
     </tbody></table></div>

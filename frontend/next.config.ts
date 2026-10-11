@@ -3,6 +3,9 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   output: "standalone",
   poweredByHeader: false,
+  async rewrites() {
+    return [{ source: "/aircraft/:aircraftId/defects", destination: "/?aircraft=:aircraftId" }];
+  },
   async headers() {
     return [{ source: "/:path*", headers: [
       { key: "X-Content-Type-Options", value: "nosniff" },

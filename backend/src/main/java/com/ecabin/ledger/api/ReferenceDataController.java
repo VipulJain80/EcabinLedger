@@ -5,10 +5,12 @@ import com.ecabin.ledger.security.CurrentUserResolver;
 import com.ecabin.ledger.security.Permission;
 import com.ecabin.ledger.security.PermissionService;
 import com.ecabin.ledger.service.ConfigurationService;
+import com.ecabin.ledger.api.ApiModels.ConditionOption;
 import java.util.List;
 import java.util.Map;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -30,9 +32,18 @@ public class ReferenceDataController {
         permissions.require(user, Permission.VIEW);
         return Map.of(
             "categories", configuration.list(user.organizationId(), "defect-categories", false),
-            "zones", configuration.list(user.organizationId(), "cabin-zones", false),
+            "areas", configuration.list(user.organizationId(), "areas", false),
             "components", configuration.list(user.organizationId(), "components", false),
+            "severities", configuration.list(user.organizationId(), "severities", false),
+            "fleets", configuration.list(user.organizationId(), "fleets", false),
             "aircraftTypes", configuration.aircraftTypes(user.organizationId())
         );
+    }
+
+    @GetMapping("/components/{componentId}/conditions")
+    public List<ConditionOption> conditionsForComponent(JwtAuthenticationToken auth, @PathVariable java.util.UUID componentId) {
+        AuthenticatedUser user = users.require(auth);
+        permissions.require(user, Permission.VIEW);
+        return configuration.conditionsForComponent(user.organizationId(), componentId);
     }
 }

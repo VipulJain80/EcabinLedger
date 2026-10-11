@@ -1,8 +1,18 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent as ReactKeyboardEvent, useCallback, useEffect, useRef, useState } from "react";
 import ConfigurationPage from "./configuration";
 import FleetStatusPage from "@/common/fleet/FleetStatusPage";
+import AircraftDefectListPage from "@/common/fleet/AircraftDefectListPage";
+import { FleetAircraft } from "@/common/fleet/FleetStatusPage";
+import MaintenanceWorkQueuePage from "@/common/fleet/MaintenanceWorkQueuePage";
+import ReviewerWorkQueuePage from "@/common/fleet/ReviewerWorkQueuePage";
+import DialogPortal from "@/common/dialogs/DialogPortal";
+import OperationalFormRenderer from "@/common/forms/OperationalFormRenderer";
+import { formPurposeForStatus } from "@/common/forms/formResolution";
+import { defectReportPayload, ReportField } from "@/common/forms/defectReportMapping";
+import NotificationBell from "@/common/notifications/NotificationBell";
+import ApiRateLimitsPage from "@/common/configuration/ApiRateLimitsPage";
 import { alert, responseErrorMessage } from "@/common/alerts";
 import { canAdvanceWorkflow, hasPermission } from "@/common/rbac/permissions";
 
@@ -10,22 +20,29 @@ declare global { interface Window { eCabinAuth?: { getAccessToken: () => Promise
 
 type Defect = {
   id: string; reference: string; tailNumber: string; aircraftType: string; location: string; category: string; zone: string;
-  title: string; description: string; severity: string; status: string; reportedBy: string; assignedTo: string | null;
-  dueAt: string | null; activeActionId: string | null; reportedAt: string; updatedAt: string;
+  areaId: string;
+  title: string; description: string; severity: string; severityName?: string; status: string; reportedBy: string; assignedTo: string | null;
+  dueAt: string | null; activeActionId: string | null; conditionName?: string | null; reportedAt: string; updatedAt: string;
 };
 type Page = { items: Defect[]; nextCursor: string | null };
 type Summary = { openDefects: number; criticalDefects: number; reportedToday: number; closedThisMonth: number };
 type Identity = { organizationName: string; displayName: string; role: string; permissions: string[] };
 type NavigationItem = { key: string; label: string; icon: string; section: string; children: NavigationItem[] };
 type SearchFilters = { query: string; aircraftType: string; fromDate: string; toDate: string; mine: boolean };
-type MasterOption = { code: string; name: string };
+type MasterOption = { id?: string; code: string; name: string; areaId?: string };
 type AuditEvent = { id: string; eventType: string; fromStatus: string | null; toStatus: string | null; note: string; evidenceReference: string | null; inspectionOutcome: string | null; actorId: string; occurredAt: string };
+type SelectedReportForm = { id: string; versionId: string; versionNumber: number; name: string; configuration: { fields: ReportField[] } };
 const API = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8080/api/v1";
 let localDevToken: { value: string; expiresAt: number } | null = null;
 let localDevEmail: string | null = null;
 const areas = ["ALL AREAS", "CABIN", "GALLEY", "LAVATORY", "ATTENDANT_SEAT"];
 const statuses = ["ALL STATUS", "REPORTED", "UNDER_REVIEW", "INSPECTION_REQUIRED", "INSPECTION_IN_PROGRESS", "INSPECTION_COMPLETE", "ACTION_ASSIGNED", "IN_PROGRESS", "AWAITING_VERIFICATION", "VERIFIED", "APPROVAL_REQUIRED", "CLOSED", "REOPENED", "REJECTED", "CANCELLED"];
 const human = (value: string) => value.replaceAll("_", " ").toLowerCase().replace(/\b\w/g, (char) => char.toUpperCase());
+
+const aircraftFromBrowserLocation = () => {
+  if (typeof window === "undefined") return "";
+  return new URLSearchParams(window.location.search).get("aircraft") || window.location.pathname.match(/^\/aircraft\/([^/]+)\/defects\/?$/)?.[1] || "";
+};
 async function getAccessToken(refreshLocal = false) {
   let token = await window.eCabinAuth?.getAccessToken();
   if (!token && process.env.NODE_ENV === "development" && localDevEmail) {
@@ -64,6 +81,10 @@ async function configurationFetch(path: string, init: RequestInit = {}) {
   return apiFetch(`${API}${path}`, init);
 }
 
+async function operationalFormFetch(path: string, init: RequestInit = {}) {
+  return apiFetch(`${API}${path}`, init);
+}
+
 async function fleetStatusFetch(path: string, init: RequestInit = {}) {
   return apiFetch(`${API}${path}`, init);
 }
@@ -76,15 +97,31 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [dialog, setDialog] = useState(false);
   const [saving, setSaving] = useState(false);
+  const reportIdempotencyKey = useRef<string | null>(null);
+  const [reviewSubmitting, setReviewSubmitting] = useState(false);
   const [selected, setSelected] = useState<Defect | null>(null);
+  const [selectedAircraftId, setSelectedAircraftId] = useState(aircraftFromBrowserLocation);
+  const [selectedAircraft, setSelectedAircraft] = useState<FleetAircraft | null>(null);
+  const [selectedFormForReport, setSelectedFormForReport] = useState<SelectedReportForm | null>(null);
+  const [reportFormAnswers, setReportFormAnswers] = useState<Record<string, unknown>>({});
+  const [reportFormFiles, setReportFormFiles] = useState<Record<string, File[]>>({});
+  const updateReportFormAnswers = useCallback((answers: Record<string, unknown>) => { reportIdempotencyKey.current = null; setReportFormAnswers(answers); }, []);
+  const updateReportFormFiles = useCallback((files: Record<string, File[]>) => { reportIdempotencyKey.current = null; setReportFormFiles(files); }, []);
+  const [reportFormReady, setReportFormReady] = useState(false);
+  const updateReportFormReady = useCallback((ready: boolean) => setReportFormReady(ready), []);
+  const [initialFormForDefect, setInitialFormForDefect] = useState<{ defectId: string; formId: string; versionId: string; answers: Record<string, unknown>; files?: Record<string, File[]> } | null>(null);
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [summary, setSummary] = useState<Summary>({ openDefects: 0, criticalDefects: 0, reportedToday: 0, closedThisMonth: 0 });
   const [identity, setIdentity] = useState<Identity | null>(null);
+  const [authorizationError, setAuthorizationError] = useState("");
+  const [routeAccessDenied, setRouteAccessDenied] = useState(false);
+  const routeAccessChecked = useRef(false);
   const [navigation, setNavigation] = useState<NavigationItem[]>([]);
   const [openNavigationMenu, setOpenNavigationMenu] = useState<string | null>(null);
   const navigationRef = useRef<HTMLElement | null>(null);
   const profileRef = useRef<HTMLDivElement | null>(null);
   const [profileOpen, setProfileOpen] = useState(false);
+  const [notificationOpen, setNotificationOpen] = useState(false);
   const [configurationKey, setConfigurationKey] = useState(() => new URLSearchParams(typeof window === "undefined" ? "" : window.location.search).get("admin") || "");
   const [currentNavKey, setCurrentNavKey] = useState(() => new URLSearchParams(typeof window === "undefined" ? "" : window.location.search).get("admin") || "home");
   const [searchDraft, setSearchDraft] = useState<SearchFilters>({ query: "", aircraftType: "", fromDate: "", toDate: "", mine: true });
@@ -92,9 +129,8 @@ export default function Home() {
   const [searchBy, setSearchBy] = useState("Defect ID");
   const [appliedSearchBy, setAppliedSearchBy] = useState("DEFECT_ID");
   const [searchExecuted, setSearchExecuted] = useState(false);
-  const [categoryOptions, setCategoryOptions] = useState<MasterOption[]>([]);
-  const [zoneOptions, setZoneOptions] = useState<MasterOption[]>([]);
-  const [componentOptions, setComponentOptions] = useState<MasterOption[]>([]);
+  const [areaMasterOptions, setAreaMasterOptions] = useState<MasterOption[]>([]);
+  const [selectedAreaId, setSelectedAreaId] = useState("");
   const [aircraftTypes, setAircraftTypes] = useState<string[]>([]);
   const [localSessionEmail, setLocalSessionEmail] = useState<string | null>(null);
   const [gatewayAuthAvailable, setGatewayAuthAvailable] = useState(false);
@@ -104,14 +140,25 @@ export default function Home() {
   const [activeSection, setActiveSection] = useState(() => new URLSearchParams(typeof window === "undefined" ? "" : window.location.search).has("admin") ? "configuration" : "defects");
   const currentPageLabel = navigation.flatMap((item) => [item, ...item.children]).find((item) => item.key === currentNavKey)?.label || (currentNavKey === "home" ? "Defect Summary" : "Defect register");
 
-  useEffect(() => { document.title = `${currentPageLabel} | eCabin Ledger`; }, [currentPageLabel]);
+  useEffect(() => { const title = selectedAircraftId ? "Aircraft Defect List" : currentPageLabel; document.title = `${title} | eCabin Ledger`; }, [currentPageLabel, selectedAircraftId]);
+
+  useEffect(() => {
+    const restore = () => setSelectedAircraftId(aircraftFromBrowserLocation());
+    window.addEventListener("popstate", restore);
+    return () => window.removeEventListener("popstate", restore);
+  }, []);
 
   useEffect(() => {
     if (!openNavigationMenu) return;
     const closeOnOutsideClick = (event: PointerEvent) => {
       if (!navigationRef.current?.contains(event.target as Node)) setOpenNavigationMenu(null);
     };
-    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") setOpenNavigationMenu(null); };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      const trigger = navigationRef.current?.querySelector<HTMLButtonElement>(`[data-navigation-trigger="${openNavigationMenu}"]`);
+      setOpenNavigationMenu(null);
+      trigger?.focus();
+    };
     document.addEventListener("pointerdown", closeOnOutsideClick);
     document.addEventListener("keydown", closeOnEscape);
     return () => {
@@ -153,24 +200,69 @@ export default function Home() {
     if (append && after) params.set("cursor", after);
     try {
       const [response, summaryResponse, identityResponse, navigationResponse] = await Promise.all([apiFetch(`${API}/defects?${params}`), apiFetch(`${API}/dashboard/summary`), apiFetch(`${API}/me`), apiFetch(`${API}/navigation`)]);
-      if (!response.ok || !summaryResponse.ok || !identityResponse.ok || !navigationResponse.ok) throw new Error(response.status === 401 || response.status === 403 ? "Sign in through your organization’s enterprise access gateway." : "We couldn’t load the defect register. Try again.");
+      const responses = [response, summaryResponse, identityResponse, navigationResponse];
+      const rejectedResponse = responses.find((candidate) => candidate.status === 401 || candidate.status === 403);
+      if (rejectedResponse) {
+        const expired = rejectedResponse.status === 401;
+        setIdentity(null);
+        setNavigation([]);
+        setItems([]);
+        setSummary({ openDefects: 0, criticalDefects: 0, reportedToday: 0, closedThisMonth: 0 });
+        setSelected(null);
+        setEvents([]);
+        setRouteAccessDenied(false);
+        routeAccessChecked.current = false;
+        if (expired && localSessionEmail) {
+          localDevEmail = null;
+          localDevToken = null;
+          setLocalSessionEmail(null);
+        }
+        throw new Error(expired
+          ? "Your session has expired. Sign in through your organization’s enterprise access gateway."
+          : "Your account is not authorized for this organization or application page. Contact your organization administrator.");
+      }
+      if (!response.ok || !summaryResponse.ok || !identityResponse.ok || !navigationResponse.ok) throw new Error("We couldn’t load the defect register. Try again.");
       const [data, summaryData, identityData, navigationData]: [Page, Summary, Identity, NavigationItem[]] = await Promise.all([response.json(), summaryResponse.json(), identityResponse.json(), navigationResponse.ok ? navigationResponse.json() : Promise.resolve([])]);
       setSummary(summaryData);
       setIdentity(identityData);
       setNavigation(navigationData);
+      setAuthorizationError("");
+      if (!routeAccessChecked.current) {
+        const requestedConfiguration = new URLSearchParams(window.location.search).get("admin");
+        const accessibleItems = navigationData.flatMap((item) => [item, ...item.children]);
+        const accessibleKeys = new Set(accessibleItems.map((item) => item.key));
+        const requestedKey = requestedConfiguration || "home";
+        if (accessibleKeys.has(requestedKey)) {
+          const isConfiguration = requestedKey === "configuration" || Boolean(requestedConfiguration);
+          setActiveSection(isConfiguration ? "configuration" : "defects");
+          setCurrentNavKey(requestedKey);
+          if (isConfiguration) setConfigurationKey(requestedKey === "configuration" ? "" : requestedKey);
+        } else {
+          const fallback = accessibleKeys.has("home") ? "home" : accessibleItems.find((item) => item.children.length === 0)?.key;
+          if (requestedConfiguration) {
+            setAuthorizationError("Your account does not have access to this application page. Contact your organization administrator.");
+            setRouteAccessDenied(true);
+          } else if (fallback) {
+            setActiveSection("defects");
+            setCurrentNavKey(fallback);
+            setConfigurationKey("");
+          } else {
+            setAuthorizationError("Your account does not have access to an application page. Contact your organization administrator.");
+          }
+        }
+        routeAccessChecked.current = true;
+      }
       const referenceResponse = await apiFetch(`${API}/reference-data`);
       if (referenceResponse.ok) {
-        const referenceData: { categories: MasterOption[]; zones: MasterOption[]; components: MasterOption[]; aircraftTypes: string[] } = await referenceResponse.json();
-        setCategoryOptions(referenceData.categories);
-        setZoneOptions(referenceData.zones);
-        setComponentOptions(referenceData.components);
+        const referenceData: { areas: MasterOption[]; aircraftTypes: string[] } = await referenceResponse.json();
+        setAreaMasterOptions(referenceData.areas);
         setAircraftTypes(referenceData.aircraftTypes);
       }
       setItems((previous) => append ? [...previous, ...data.items] : data.items);
       setCursor(data.nextCursor);
-    } catch (error) { const message = error instanceof Error ? error.message : "The service is unavailable."; await alert.error(message); }
+    } catch (error) { const message = error instanceof Error ? error.message : "The service is unavailable."; setAuthorizationError(message); await alert.error(message); }
     finally { setLoading(false); }
-  }, [area, appliedSearchBy, filter, searchFilters]);
+  }, [area, appliedSearchBy, filter, localSessionEmail, searchFilters, setSelected]);
 
   useEffect(() => {
     if (process.env.NODE_ENV === "development" && !localSessionEmail && !gatewayAuthAvailable) {
@@ -199,7 +291,7 @@ export default function Home() {
       });
       if (!response.ok) {
         setLoginError(response.status === 403
-          ? "Local demo access is enabled only for abc@gmail.com."
+          ? "Choose one of the configured local test identities with an active demo membership."
           : "Could not sign in. Check that the backend is running with the local demo profile.");
         return;
       }
@@ -220,10 +312,13 @@ export default function Home() {
     localDevEmail = null;
     localDevToken = null;
     setLocalSessionEmail(null);
+    setLoginEmail("");
+    setLoginError("");
     setIdentity(null);
     setActiveSection("defects");
     setCurrentNavKey("home");
     setNavigation([]);
+    setRouteAccessDenied(false);
     setItems([]);
     setSummary({ openDefects: 0, criticalDefects: 0, reportedToday: 0, closedThisMonth: 0 });
   }
@@ -234,6 +329,7 @@ export default function Home() {
 
   function openNavigation(item: NavigationItem, parentKey?: string) {
     setOpenNavigationMenu(null);
+    if (item.key === "home") leaveAircraft();
     if (item.key === "configuration" || parentKey === "configuration") {
       setActiveSection("configuration");
       setConfigurationKey(item.key === "configuration" ? "" : item.section || item.key);
@@ -249,21 +345,106 @@ export default function Home() {
     setSearchExecuted(action !== "home");
   }
 
+  function handleNavigationKeyDown(event: ReactKeyboardEvent<HTMLElement>) {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+    const trigger = target.closest<HTMLButtonElement>("[data-navigation-trigger]");
+    if (trigger && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+      const menuKey = trigger.dataset.navigationTrigger;
+      if (!menuKey) return;
+      event.preventDefault();
+      setOpenNavigationMenu(menuKey);
+      window.requestAnimationFrame(() => {
+        const entries = navigationRef.current?.querySelectorAll<HTMLButtonElement>(`#navigation-menu-${menuKey} [role='menuitem']`);
+        (event.key === "ArrowUp" ? entries?.[entries.length - 1] : entries?.[0])?.focus();
+      });
+      return;
+    }
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    const menu = target.closest<HTMLElement>("[role='menu']");
+    if (!menu) return;
+    const entries = Array.from(menu.querySelectorAll<HTMLButtonElement>("[role='menuitem']"));
+    const index = entries.indexOf(target as HTMLButtonElement);
+    if (index < 0) return;
+    event.preventDefault();
+    entries[(index + (event.key === "ArrowDown" ? 1 : entries.length - 1)) % entries.length]?.focus();
+  }
+
+  function renderNavigationItem(item: NavigationItem) {
+    const active = currentNavKey === item.key || (item.key === "configuration" && activeSection === "configuration") || item.children.some((child) => child.key === currentNavKey);
+    const label = item.key === "home" ? "Defect Summary" : item.key === "audit" ? "Audit Log" : item.label;
+    if (!item.children.length) {
+      return <button type="button" key={item.key} className={active ? "app-nav-link active" : "app-nav-link"} aria-current={active ? "page" : undefined} onClick={() => openNavigation(item)}><span aria-hidden="true">{item.icon}</span>{label}</button>;
+    }
+    return <div className={`app-nav-group${item.key === "configuration" ? " administration-nav-group" : ""}`} key={item.key}>
+      <button type="button" data-navigation-trigger={item.key} aria-haspopup="true" aria-expanded={openNavigationMenu === item.key} aria-controls={`navigation-menu-${item.key}`} aria-current={active ? "page" : undefined} className={`app-nav-link${active ? " active" : ""}${item.key === "configuration" ? " administration-nav-link" : ""}`} onClick={() => setOpenNavigationMenu((current) => current === item.key ? null : item.key)}>
+        <span aria-hidden="true">{item.icon}</span>{label}<span className="app-nav-caret" aria-hidden="true">⌄</span>
+      </button>
+      {openNavigationMenu === item.key && <div className="app-nav-menu" id={`navigation-menu-${item.key}`} role="menu" aria-label={`${label} menu`}>
+        {item.children.map((child) => <button type="button" role="menuitem" key={`${child.key}-${child.section}`} onClick={() => openNavigation(child, item.key)}>{child.label}</button>)}
+      </div>}
+    </div>;
+  }
+
   async function createDefect(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); setSaving(true);
+    event.preventDefault(); if (saving) return;
+    if (!selectedAircraftId || !selectedAircraft || !selectedFormForReport) {
+      await alert.warning("Select an aircraft, cabin area, and its published operational form before reporting.");
+      return;
+    }
+    setSaving(true);
     const formElement = event.currentTarget;
-    const form = new FormData(formElement);
-    const payload = Object.fromEntries(form.entries());
+    try { defectReportPayload(selectedFormForReport.configuration.fields, reportFormAnswers, areaMasterOptions.find(item=>item.id===selectedAreaId)?.code); }
+    catch (error) { await alert.warning(error instanceof Error ? error.message : "Configure the selected report form before saving."); return; }
+    const payload = { tailNumber: selectedAircraft.tailNumber, areaId: selectedAreaId, aircraftId: selectedAircraftId, formId: selectedFormForReport.id, formVersionId: selectedFormForReport.versionId, formAnswers: reportFormAnswers };
     try {
-      const response = await apiFetch(`${API}/defects`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
+      reportIdempotencyKey.current ||= crypto.randomUUID();
+      const response = await apiFetch(`${API}/defects`, { method: "POST", headers: { "content-type": "application/json", "Idempotency-Key": reportIdempotencyKey.current }, body: JSON.stringify(payload) });
       if (!response.ok) {
         throw new Error(await responseErrorMessage(response, "Could not create the defect. Check your access and the details."));
       }
-      setDialog(false); formElement.reset(); setFilter("ALL STATUS"); setArea("ALL AREAS");
+      const created = await response.json() as Defect;
+      reportIdempotencyKey.current = null; setDialog(false); formElement.reset(); setFilter("ALL STATUS"); setArea("ALL AREAS");
       await load();
-      await alert.success("Defect reported successfully.");
+      await alert.success(`Defect ${created.reference} reported successfully. Complete the published area form to add the report details.`);
+      await openDetail(created, selectedFormForReport || undefined, reportFormAnswers, reportFormFiles);
+      setSelectedFormForReport(null);
+      setReportFormAnswers({});
+      setReportFormFiles({});
     } catch (error) { await alert.error(error instanceof Error ? error.message : "Could not create the defect."); }
     finally { setSaving(false); }
+  }
+
+  function openDefectForm() {
+    reportIdempotencyKey.current = null;
+    setSelectedAreaId(""); setSelectedFormForReport(null); setReportFormAnswers({}); setReportFormFiles({}); setReportFormReady(false);
+    if (!selectedAircraftId) {
+      setActiveSection("defects"); setCurrentNavKey("home");
+      void alert.info("Choose an aircraft from Defect Summary, then select a cabin area and its published form to report a defect.");
+      return;
+    }
+    void alert.info("Choose a cabin area and its published form from the aircraft defect list to start a report.");
+  }
+
+  function selectAircraft(aircraft: FleetAircraft) {
+    reportIdempotencyKey.current = null;
+    setSelectedAreaId(""); setSelectedFormForReport(null); setReportFormAnswers({}); setReportFormFiles({}); setReportFormReady(false); setInitialFormForDefect(null); setDialog(false);
+    setSelectedAircraft(aircraft);
+    setSelectedAircraftId(aircraft.id);
+    window.history.pushState({ aircraft: aircraft.id }, "", `/aircraft/${encodeURIComponent(aircraft.id)}/defects`);
+  }
+
+  function leaveAircraft() {
+    reportIdempotencyKey.current = null;
+    setSelectedAreaId(""); setSelectedFormForReport(null); setReportFormAnswers({}); setReportFormReady(false); setInitialFormForDefect(null); setDialog(false);
+    setSelectedAircraftId(""); setSelectedAircraft(null);
+    window.history.pushState({}, "", "/");
+  }
+
+  function startAircraftDefect(aircraft: FleetAircraft, areaId: string, form: SelectedReportForm) {
+    reportIdempotencyKey.current = null;
+    setSelectedAircraft(aircraft); setSelectedAircraftId(aircraft.id); setSelectedAreaId(areaId);
+    setSelectedFormForReport(form); setReportFormAnswers({}); setReportFormFiles({}); setReportFormReady(false); setDialog(true);
   }
 
   async function advance(defect: Defect) {
@@ -306,12 +487,72 @@ export default function Home() {
     } catch (error) { await alert.error(error instanceof Error ? error.message : "Could not update defect status."); }
   }
 
-  async function openDetail(defect: Defect) {
+  async function openDetail(defect: Defect, form?: SelectedReportForm, answers: Record<string, unknown> = {}, files?:Record<string,File[]>) {
+    setInitialFormForDefect(form ? { defectId: defect.id, formId: form.id, versionId: form.versionId, answers, files } : null);
     setSelected(defect); setEvents([]);
     try {
       const response = await apiFetch(`${API}/defects/${defect.id}/events`);
       if (response.ok) setEvents(await response.json());
     } catch { /* Keep the defect details available if audit history is temporarily unavailable. */ }
+  }
+
+  async function openQueueDefect(defectId: string) {
+    try {
+      const response = await apiFetch(`${API}/defects/${encodeURIComponent(defectId)}`);
+      if (!response.ok) throw new Error(await responseErrorMessage(response, "This defect is no longer assigned to one of your active teams."));
+      await openDetail(await response.json() as Defect);
+    } catch (error) { await alert.error(error instanceof Error ? error.message : "Could not open this defect."); }
+  }
+
+  async function reassignDefect(defect: Defect) {
+    if (!defect.activeActionId) return;
+    try {
+      const assignedTeam = await alert.prompt({ title: "Reassign maintenance team", text: `Current assignment: ${defect.assignedTo || "Unassigned"}. Enter the exact active team name.`, placeholder: "Maintenance team", required: true });
+      if (!assignedTeam) return;
+      const assignedUserId = await alert.prompt({ title: "Optional individual owner", text: "Leave blank to keep the action shared with active members of the team.", placeholder: "Enterprise user ID", required: false });
+      const reason = await alert.prompt({ title: "Reassignment reason", required: true });
+      if (!reason) return;
+      const response = await apiFetch(`${API}/defects/${defect.id}/actions/${defect.activeActionId}/reassign`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ assignedTeam, assignedUserId, reason }) });
+      if (!response.ok) throw new Error(await responseErrorMessage(response, "Could not reassign this corrective action."));
+      setSelected(null);
+      await load();
+      await alert.success("Corrective action reassigned. The former team no longer has current-work access.");
+    } catch (error) { await alert.error(error instanceof Error ? error.message : "Could not reassign this corrective action."); }
+  }
+
+  async function reassignReviewer(defect: Defect) {
+    try {
+      const teamsResponse=await apiFetch(`${API}/reviewer-teams`);
+      if(!teamsResponse.ok)throw new Error(await responseErrorMessage(teamsResponse,"Could not load eligible Reviewer teams."));
+      const teams=await teamsResponse.json() as Array<{id:string;name:string;eligibleMembers:number}>;
+      if(!teams.length)throw new Error("No active Reviewer team has an active member with REVIEW permission.");
+      const teamName=await alert.prompt({title:"Route defect to Reviewer team",text:`Eligible teams: ${teams.map(team=>`${team.name} (${team.eligibleMembers})`).join(", ")}`,placeholder:"Reviewer team name",required:true});
+      if(!teamName)return;
+      const team=teams.find(item=>item.name.toLocaleLowerCase()===teamName.trim().toLocaleLowerCase());
+      if(!team)throw new Error("Choose one of the eligible Reviewer teams listed in the prompt.");
+      const reason=await alert.prompt({title:"Reviewer routing reason",required:true});if(!reason)return;
+      const response=await apiFetch(`${API}/defects/${defect.id}/review-routing`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({teamId:team.id,reason})});
+      if(!response.ok)throw new Error(await responseErrorMessage(response,"Could not update Reviewer routing."));
+      const updated=await response.json() as Defect;setSelected(updated);await openDetail(updated);await load();await alert.success(`Defect routed to ${team.name}.`);
+    } catch(error){await alert.error(error instanceof Error?error.message:"Could not update Reviewer routing.");}
+  }
+
+  async function submitReviewDecision(defect:Defect,decision:"APPROVE"|"REJECT") {
+    if(reviewSubmitting)return;
+    const reason=await alert.prompt({title:decision==="APPROVE"?"Approve defect review":"Reject defect review",text:decision==="APPROVE"?"Approval records the decision and advances the defect to mandatory inspection. Maintenance work remains deferred until inspection passes.":"A rejection reason is required. The defect will remain in the audit history and will not be assigned to maintenance.",placeholder:decision==="REJECT"?"Required rejection reason":"Review rationale",required:true});
+    if(!reason?.trim())return;
+    setReviewSubmitting(true);
+    try{
+      const response=await apiFetch(`${API}/defects/${defect.id}/review-decision`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({decision,reason:reason.trim()})});
+      if(!response.ok)throw new Error(await responseErrorMessage(response,"Could not record the Reviewer decision."));
+      const result=await response.json() as {id:string;status:string};
+      const refreshed=await apiFetch(`${API}/defects/${defect.id}`);
+      if(!refreshed.ok)throw new Error(await responseErrorMessage(refreshed,"Decision recorded, but the updated defect could not be refreshed."));
+      const updated=await refreshed.json() as Defect;
+      await openDetail(updated);await load();
+      await alert.success(decision==="APPROVE"?`Review approved. ${human(result.status)} is next; Cabin Maintenance receives an action after a passing inspection.`:"Review rejected. The decision is recorded and no maintenance action was assigned.");
+    }catch(error){await alert.error(error instanceof Error?error.message:"Could not record the Reviewer decision.");}
+    finally{setReviewSubmitting(false);}
   }
 
   if (process.env.NODE_ENV === "development" && !localSessionEmail && !gatewayAuthAvailable) return <main className="login-shell">
@@ -321,25 +562,50 @@ export default function Home() {
       <h1 id="login-title">LOGIN</h1>
       <form className="login-form" onSubmit={loginLocal}>
         <label className="login-email-label" htmlFor="login-email">Work email</label>
-        <input id="login-email" type="email" autoComplete="email" autoFocus required placeholder="Enter your work email" value={loginEmail} onChange={(event) => setLoginEmail(event.target.value)} />
+        <input id="login-email" type="email" autoComplete="email" autoFocus required list="local-test-identities" placeholder="Enter or select a local test email" value={loginEmail} onChange={(event) => setLoginEmail(event.target.value)} />
+        <datalist id="local-test-identities">
+          <option value="abc@gmail.com" />
+          <option value="admin.test@ecabin.local" />
+          <option value="auditor.test@ecabin.local" />
+          <option value="reviewer.test@ecabin.local" />
+          <option value="maintenance.test@ecabin.local" />
+        </datalist>
         {loginError && <p className="login-error" role="alert">{loginError}</p>}
         <button type="submit" className="login-submit" disabled={loginLoading}>{loginLoading ? "Signing in…" : "Continue with email"}<span aria-hidden="true">→</span></button>
       </form>
-      <p className="login-help">Local demo access: <b>abc@gmail.com</b></p>
+      <p className="login-help">Local test identities: <b>abc@gmail.com</b>, admin.test@ecabin.local, auditor.test@ecabin.local, reviewer.test@ecabin.local, maintenance.test@ecabin.local</p>
     </section>
     <p className="login-footer">© 2026 Skyways Service. All Rights Reserved.</p>
   </main>;
 
+  if (routeAccessDenied) return <main className="authorization-gate" role="alert" aria-live="polite">
+    <section><span className="eyebrow">ECABIN LEDGER ACCESS</span><h1>Access denied</h1><p>{authorizationError}</p><button type="button" className="button-primary" onClick={() => { setRouteAccessDenied(false); setAuthorizationError(""); setConfigurationKey(""); setActiveSection("defects"); setCurrentNavKey("home"); window.history.replaceState({}, "", window.location.pathname); }}>Go to Defect Summary</button></section>
+  </main>;
+
+  if (!identity) return <main className="authorization-gate" role={loading ? "status" : "alert"} aria-live="polite">
+    <section><span className="eyebrow">ECABIN LEDGER ACCESS</span><h1>{loading ? "Verifying access…" : "Access unavailable"}</h1><p>{loading ? "Checking your enterprise identity and organization permissions." : authorizationError || "We could not verify your application access."}</p>{!loading && <button type="button" className="button-primary" onClick={() => void load()}>Try again</button>}</section>
+  </main>;
+
   return <main className="shell app-shell">
-    <header className="app-topbar">
-      <a className="app-logo" href="#home" aria-label="eCabin Ledger Defect Summary"><span>e</span><b>eCabin Ledger</b></a>
-      <div className="app-organization"><small>ORGANIZATION</small><strong>{identity?.organizationName || "Loading…"}</strong></div>
-      <nav ref={navigationRef} className="app-navigation" aria-label="Main navigation">{navigation.map((item) => item.children.length ? <div className="app-nav-group" key={item.key}><button type="button" aria-haspopup="true" aria-expanded={openNavigationMenu === item.key} className={currentNavKey === item.key || (item.key === "configuration" && activeSection === "configuration") || item.children.some((child) => child.key === currentNavKey) ? "app-nav-link active" : "app-nav-link"} onClick={() => setOpenNavigationMenu((current) => current === item.key ? null : item.key)}><span>{item.icon}</span>{item.label}<span className="app-nav-caret" aria-hidden="true">⌄</span></button>{openNavigationMenu === item.key && <div className="app-nav-menu" role="menu">{item.children.map((child) => <button role="menuitem" key={`${child.key}-${child.section}`} onClick={() => openNavigation(child, item.key)}>{child.label}</button>)}</div>}</div> : <button type="button" key={item.key} className={currentNavKey === item.key ? "app-nav-link active" : "app-nav-link"} onClick={() => openNavigation(item)}><span>{item.icon}</span>{item.label}</button>)}</nav>
-      <div className="app-profile" ref={profileRef}><button type="button" className="app-profile-icon" aria-label="Show profile email" aria-expanded={profileOpen} aria-controls="profile-email-popover" onClick={() => setProfileOpen((open) => !open)} title={localSessionEmail || "Profile email"}>{identity?.displayName.split(/\s+/).map((part) => part[0]).slice(0, 2).join("").toUpperCase() || "—"}</button><span className="app-profile-copy"><b>{identity?.displayName || "Enterprise user"}</b></span>{profileOpen && <div className="app-profile-popover" id="profile-email-popover" role="status"><small>EMAIL</small><b>{localSessionEmail || "Email not available"}</b></div>}{localSessionEmail && <button className="app-signout" aria-label="Sign out" onClick={() => void confirmLogout()} title="Sign out">⇥</button>}</div>
-    </header>
+    <div className="app-shell-header">
+      <header className="app-topbar">
+        <a className="app-logo" href="#home" aria-label="eCabin Ledger Defect Summary"><span>e</span><b>eCabin Ledger</b></a>
+        <div className="app-organization"><small>ORGANIZATION</small><strong>{identity?.organizationName || "Loading…"}</strong></div>
+        <div className="app-profile" ref={profileRef}>
+          <NotificationBell request={fleetStatusFetch} onOpenDefect={id => { void openQueueDefect(id); }} open={notificationOpen} onOpenChange={open => { setNotificationOpen(open); if (open) setProfileOpen(false); }} />
+          <button type="button" className="app-profile-icon" aria-label="Show profile email" aria-expanded={profileOpen} aria-controls="profile-email-popover" onClick={() => { setNotificationOpen(false); setProfileOpen(open => !open); }} title={localSessionEmail || "Profile email"}>{identity?.displayName.split(/\s+/).map((part) => part[0]).slice(0, 2).join("").toUpperCase() || "—"}</button>
+          <span className="app-profile-copy"><b>{identity?.displayName || "Enterprise user"}</b></span>
+          {profileOpen && <div className="app-profile-popover" id="profile-email-popover" role="status"><small>EMAIL</small><b>{localSessionEmail || "Email not available"}</b></div>}
+          {localSessionEmail && <button className="app-signout" aria-label="Sign out" onClick={() => void confirmLogout()} title="Sign out"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M10 17l5-5-5-5M15 12H3"/><path d="M12 3h6a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-6"/></svg></button>}
+        </div>
+      </header>
+      <nav ref={navigationRef} className="app-navigation" aria-label="Main navigation" onKeyDown={handleNavigationKeyDown}>
+        <div className="app-navigation-items">{navigation.map(renderNavigationItem)}</div>
+      </nav>
+    </div>
     <section className="workspace" id="home">
-      {activeSection === "configuration" && hasPermission(identity?.permissions, "ADMINISTER_ORGANIZATION") ? <ConfigurationPage key={configurationKey} request={configurationFetch} initialKey={configurationKey} /> : currentNavKey === "home" ? <FleetStatusPage request={fleetStatusFetch} /> : <div className="content" id="defects">
-        <div className="heading"><div><div className="eyebrow"><span></span> CABIN OPERATIONS <em>·</em> FLEET OVERVIEW</div><h1>{currentPageLabel}</h1><p>Search and track cabin findings from initial report through verified closure.</p></div>{hasPermission(identity?.permissions, "REPORT") && <button className="button-primary" onClick={() => setDialog(true)}><span>＋</span> Log a defect</button>}</div>
+      {currentNavKey === "api-rate-limits" && hasPermission(identity?.permissions, "ADMINISTER_ORGANIZATION") ? <ApiRateLimitsPage request={configurationFetch} /> : activeSection === "configuration" && hasPermission(identity?.permissions, "ADMINISTER_ORGANIZATION") ? <ConfigurationPage key={configurationKey} request={configurationFetch} initialKey={configurationKey} /> : currentNavKey === "home" && selectedAircraftId ? <AircraftDefectListPage request={fleetStatusFetch} aircraftId={selectedAircraftId} organizationCacheKey={identity.organizationName} onBack={leaveAircraft} onLogDefect={startAircraftDefect} onOpenDefect={id => { void openQueueDefect(id); }} canReport={hasPermission(identity?.permissions, "REPORT")} /> : currentNavKey === "home" ? <FleetStatusPage request={fleetStatusFetch} onSelectAircraft={selectAircraft} /> : currentNavKey === "corrective-actions" && hasPermission(identity?.permissions, "PERFORM_ACTION") ? <MaintenanceWorkQueuePage request={fleetStatusFetch} onOpen={(defectId) => { void openQueueDefect(defectId); }} /> : currentNavKey === "review-queue" && (hasPermission(identity?.permissions, "REVIEW") || hasPermission(identity?.permissions, "ADMINISTER_ORGANIZATION")) ? <ReviewerWorkQueuePage request={fleetStatusFetch} onOpen={(defectId) => { void openQueueDefect(defectId); }} /> : <div className="content" id="defects">
+        <div className="heading"><div><div className="eyebrow"><span></span> CABIN OPERATIONS <em>·</em> FLEET OVERVIEW</div><h1>{currentPageLabel}</h1><p>Search and track cabin findings from initial report through verified closure.</p></div>{hasPermission(identity?.permissions, "REPORT") && <button className="button-primary" onClick={openDefectForm}><span>＋</span> Log a defect</button>}</div>
         <form className="operational-search" onSubmit={(event) => { event.preventDefault(); setSearchFilters({ ...searchDraft }); setAppliedSearchBy(({ "Defect ID": "DEFECT_ID", "Aircraft registration": "AIRCRAFT_REGISTRATION", Category: "CATEGORY", Component: "COMPONENT", "Assigned person": "ASSIGNED_USER" })[searchBy] || "DEFECT_ID"); setCursor(null); setSearchExecuted(true); }}>
           <label>Search by<div className="search-control-row"><select value={searchBy} onChange={(event) => setSearchBy(event.target.value)} aria-label="Search field"><option>Defect ID</option><option>Aircraft registration</option><option>Category</option><option>Component</option><option>Assigned person</option></select><input value={searchDraft.query} onChange={(event) => setSearchDraft({ ...searchDraft, query: event.target.value })} placeholder={`Enter ${searchBy.toLowerCase()}`} /></div></label>
           <label>Aircraft type<select value={searchDraft.aircraftType} onChange={(event) => setSearchDraft({ ...searchDraft, aircraftType: event.target.value })}><option value="">All types</option>{aircraftTypes.map((type) => <option key={type} value={type}>{type}</option>)}</select></label>
@@ -360,10 +626,10 @@ export default function Home() {
           <div className="table-scroll"><table><thead><tr><th>DEFECT / AIRCRAFT</th><th>LOCATION</th><th>SEVERITY</th><th>STATUS</th><th>REPORTED</th><th>OWNER</th><th></th></tr></thead><tbody>
             {searchExecuted && items.map((defect) => <tr key={defect.id} data-search-row={`${defect.title} ${defect.reference} ${defect.tailNumber} ${defect.zone} ${defect.location}`.toLowerCase()} onClick={() => void openDetail(defect)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") void openDetail(defect); }}>
               <td><div className="defect-name"><span className="defect-icon">{defect.location === "GALLEY" ? "▤" : defect.location === "LAVATORY" ? "◉" : "⌂"}</span><span><b>{defect.title}</b><small>{defect.reference} <i>·</i> {defect.tailNumber} · {defect.zone}</small></span></div></td>
-              <td><span className="location-tag">{human(defect.location)}</span></td><td><span className={`severity ${defect.severity.toLowerCase()}`}><i></i>{human(defect.severity)}</span></td><td><span className={`status ${defect.status.toLowerCase()}`}>{human(defect.status)}</span></td><td className="date">{new Intl.DateTimeFormat(undefined, { month: "short", day: "2-digit" }).format(new Date(defect.reportedAt))}<small>{new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" }).format(new Date(defect.reportedAt))}</small></td><td><span className="owner"><i>{defect.assignedTo ? defect.assignedTo.split(" ").map((name) => name[0]).slice(0, 2).join("") : "—"}</i>{defect.assignedTo || "Unassigned"}</span></td><td>{canAdvanceWorkflow(identity?.permissions, defect.status) && <button className="row-more" aria-label={`Advance ${defect.reference}`} title="Advance workflow" onClick={(event) => { event.stopPropagation(); void advance(defect); }}>···</button>}</td>
+              <td><span className="location-tag">{human(defect.location)}</span></td><td><span className={`severity ${defect.severity.toLowerCase()}`}><i></i>{defect.severityName || human(defect.severity)}</span></td><td><span className={`status ${defect.status.toLowerCase()}`}>{human(defect.status)}</span></td><td className="date">{new Intl.DateTimeFormat(undefined, { month: "short", day: "2-digit" }).format(new Date(defect.reportedAt))}<small>{new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" }).format(new Date(defect.reportedAt))}</small></td><td><span className="owner"><i>{defect.assignedTo ? defect.assignedTo.split(" ").map((name) => name[0]).slice(0, 2).join("") : "—"}</i>{defect.assignedTo || "Unassigned"}</span></td><td>{canAdvanceWorkflow(identity?.permissions, defect.status) && <button className="row-more" aria-label={`Advance ${defect.reference}`} title="Advance workflow" onClick={(event) => { event.stopPropagation(); void advance(defect); }}>···</button>}</td>
             </tr>)}
             {!searchExecuted && <tr><td className="empty" colSpan={7}><span className="empty-art">⌕</span><b>No search performed</b><small>Enter your search criteria above to find cabin defect records.</small></td></tr>}
-            {searchExecuted && !loading && items.length === 0 && <tr><td className="empty" colSpan={7}><span className="empty-art">✧</span><b>No defects in this view</b><small>Try another search, or log a newly discovered cabin defect.</small>{hasPermission(identity?.permissions, "REPORT") && <button onClick={() => setDialog(true)}>Log a defect <span>→</span></button>}</td></tr>}
+            {searchExecuted && !loading && items.length === 0 && <tr><td className="empty" colSpan={7}><span className="empty-art">✧</span><b>No defects in this view</b><small>Try another search, or log a newly discovered cabin defect.</small>{hasPermission(identity?.permissions, "REPORT") && <button onClick={openDefectForm}>Log a defect <span>→</span></button>}</td></tr>}
             {searchExecuted && loading && items.length === 0 && <tr><td className="empty" colSpan={7}>Searching the operator’s defect register…</td></tr>}
           </tbody></table></div>
           <div className="table-foot"><span>Showing <b>{items.length}</b> recent records</span>{cursor && <button className="load-more" onClick={() => void load(cursor, true)}>Load more defects <span>↓</span></button>}<span className="audit-note"><i>✓</i> Changes are recorded in the audit trail</span></div>
@@ -372,13 +638,10 @@ export default function Home() {
       </div>}
     </section>
 
-    {dialog && hasPermission(identity?.permissions, "REPORT") && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setDialog(false); }}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div className="modal-heading"><div><div className="eyebrow">NEW OPERATIONAL RECORD</div><h2 id="modal-title">Log a defect</h2></div><button className="close" onClick={() => setDialog(false)} aria-label="Close">×</button></div><form onSubmit={createDefect}>
-      <label>Aircraft registration<input name="tailNumber" required maxLength={16} placeholder="N482NW" /></label><div className="form-row"><label>Cabin area<select name="location"><option value="CABIN">Cabin</option><option value="GALLEY">Galley</option><option value="LAVATORY">Lavatory</option><option value="ATTENDANT_SEAT">Attendant seat</option></select></label><label>Defect category<select name="category">{(categoryOptions.length ? categoryOptions : [{ code: "SEAT", name: "Passenger seat" }, { code: "CABIN", name: "Cabin" }, { code: "GALLEY", name: "Galley" }, { code: "LAVATORY", name: "Lavatory" }, { code: "ATTENDANT_SEAT", name: "Attendant seat" }, { code: "IFE", name: "In-flight entertainment" }, { code: "LIGHTING", name: "Lighting" }, { code: "OVERHEAD_BIN", name: "Overhead bin" }, { code: "PSU", name: "Passenger service unit" }, { code: "EMERGENCY_EQUIPMENT", name: "Emergency equipment" }, { code: "OTHER", name: "Other" }]).map((item) => <option key={item.code} value={item.code}>{item.name}</option>)}</select></label></div>
-      <div className="form-row"><label>Cabin zone<input name="zone" required maxLength={80} list="cabin-zone-options" placeholder="FWD CABIN / ROW" /><datalist id="cabin-zone-options">{zoneOptions.map((item) => <option key={item.code} value={item.name} />)}</datalist><span className="field-hint">Use a configured cabin zone or enter a row/seat reference.</span></label><label>Row<input name="rowNumber" type="number" min="1" max="200" placeholder="14" /></label></div><div className="form-row"><label>Seat<input name="seatReference" maxLength={8} placeholder="14A" /></label><label>Component<input name="component" maxLength={120} list="cabin-component-options" placeholder="Seat cover / PSU" /><datalist id="cabin-component-options">{componentOptions.map((item) => <option key={item.code} value={item.name} />)}</datalist></label></div>
-      <label>Defect title<input name="title" required maxLength={160} placeholder="Concise description of finding" /></label><label>Details<textarea name="description" required maxLength={4000} rows={3} placeholder="Describe what was found and the inspection context." /></label>
-      <label>Severity<select name="severity"><option value="LOW">Low</option><option value="MEDIUM" selected>Medium</option><option value="HIGH">High</option><option value="CRITICAL">Critical</option></select></label>
-      <div className="modal-note"><span>✓</span> A dated report event will be added to the audit history.</div><div className="modal-actions"><button type="button" className="button-secondary" onClick={() => setDialog(false)}>Cancel</button><button className="button-primary" disabled={saving}>{saving ? "Saving…" : "Save defect →"}</button></div>
-    </form></section></div>}
-    {selected && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setSelected(null); }}><section className="modal detail-modal" role="dialog" aria-modal="true"><div className="modal-heading"><div><div className="eyebrow">{selected.reference} · {selected.tailNumber}</div><h2>{selected.title}</h2></div><button className="close" onClick={() => setSelected(null)} aria-label="Close">×</button></div><p className="detail-description">{selected.description}</p><div className="detail-grid"><span>Location<b>{human(selected.location)} · {selected.zone}</b></span><span>Severity<b>{human(selected.severity)}</b></span><span>Status<b>{human(selected.status)}</b></span><span>Reported by<b>{selected.reportedBy}</b></span></div><h3 className="timeline-heading">Audit history</h3><div className="timeline">{events.map((item) => <div className="timeline-item" key={item.id}><span className="timeline-dot"></span><div><b>{human(item.eventType)}{item.toStatus ? ` · ${human(item.toStatus)}` : ""}{item.inspectionOutcome ? ` · Inspection ${item.inspectionOutcome}` : ""}</b><p>{item.note}{item.evidenceReference ? `\nEvidence: ${item.evidenceReference}` : ""}</p><small>{item.actorId} · {new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(item.occurredAt))}</small></div></div>)}{!events.length && <span className="timeline-empty">Loading history or no recorded events.</span>}</div><p className="modal-note"><span>✓</span> Inspections and closure references are retained in an append-only audit history.</p><div className="modal-actions"><button className="button-secondary" onClick={() => setSelected(null)}>Close</button>{canAdvanceWorkflow(identity?.permissions, selected.status) && <button className="button-primary" onClick={() => { void advance(selected); setSelected(null); }}>Advance workflow →</button>}</div></section></div>}
+    {dialog && hasPermission(identity?.permissions, "REPORT") && <DialogPortal onClose={() => { setDialog(false); setSelectedFormForReport(null); setReportFormAnswers({}); setReportFormFiles({}); setReportFormReady(false); }} labelledBy="modal-title" className="modal report-modal"><div className="modal-heading"><div><div className="eyebrow">NEW OPERATIONAL RECORD</div><h2 id="modal-title">Log a defect</h2></div><button type="button" className="close" onClick={() => { setDialog(false); setSelectedFormForReport(null); setReportFormAnswers({}); setReportFormFiles({}); setReportFormReady(false); }} aria-label="Close">×</button></div><section className="report-system-context" aria-label="System-controlled report context"><span>Aircraft registration<b>{selectedAircraft?.tailNumber || "Unavailable"}</b></span><span>Cabin area<b>{areaMasterOptions.find(item => item.id === selectedAreaId)?.name || "Unavailable"}</b></span></section><form id="defect-report-form" onChange={() => { if(reportIdempotencyKey.current)reportIdempotencyKey.current=null; }} onSubmit={createDefect}>
+      {selectedFormForReport && selectedAreaId ? <><p className="operational-form-preview-note">Complete the configured fields below. The selected published design controls the report fields and their order.</p><OperationalFormRenderer key={`${selectedAircraftId}:${selectedAreaId}:${selectedFormForReport.id}:${selectedFormForReport.versionId}`} request={operationalFormFetch} areaId={selectedAreaId} areaName={areaMasterOptions.find(item => item.id === selectedAreaId)?.name} areaCode={areaMasterOptions.find(item=>item.id===selectedAreaId)?.code} initialFormId={selectedFormForReport.id} initialVersionId={selectedFormForReport.versionId} preparationMode initialAnswers={reportFormAnswers} onAnswersChange={updateReportFormAnswers} onFilesChange={updateReportFormFiles} onPreparationReady={updateReportFormReady} /></> : <p role="alert">Choose an aircraft, cabin area, and published form before reporting.</p>}
+      <div className="modal-note"><span>✓</span> Aircraft and organization identifiers are system-controlled. Answers and evidence are retained against the selected published version.</div><div className="modal-actions"><button type="button" className="button-secondary" onClick={() => { setDialog(false); setSelectedFormForReport(null); setReportFormAnswers({}); setReportFormReady(false); }}>Cancel</button><button className="button-primary" disabled={saving || !selectedFormForReport || !reportFormReady}>{saving ? "Saving…" : "Save defect →"}</button></div>
+    </form></DialogPortal>}
+    {selected && <DialogPortal onClose={() => setSelected(null)} labelledBy="defect-detail-title" className="modal detail-modal"><div className="modal-heading"><div><div className="eyebrow">{selected.reference} · {selected.tailNumber}</div><h2 id="defect-detail-title">{selected.title}</h2></div><button className="close" onClick={() => setSelected(null)} aria-label="Close">×</button></div><p className="detail-description">{selected.description}</p><div className="detail-grid"><span>Location<b>{human(selected.location)} · {selected.zone}</b></span><span>Condition<b>{selected.conditionName || "Not recorded"}</b></span><span>Severity<b>{selected.severityName || human(selected.severity)}</b></span><span>Status<b>{human(selected.status)}</b></span><span>Reported by<b>{selected.reportedBy}</b></span><span>Assigned to<b>{selected.assignedTo || "Unassigned"}</b></span></div>{formPurposeForStatus(selected.status,identity?.permissions) && <OperationalFormRenderer key={`${selected.id}:${formPurposeForStatus(selected.status,identity?.permissions)}:${initialFormForDefect?.formId || ""}:${initialFormForDefect?.versionId || ""}`} request={operationalFormFetch} defectId={selected.id} areaId={selected.areaId} areaName={areaMasterOptions.find(item => item.id === selected.areaId)?.name} areaCode={areaMasterOptions.find(item => item.id === selected.areaId)?.code} purpose={formPurposeForStatus(selected.status,identity?.permissions)!} initialFormId={initialFormForDefect?.defectId === selected.id ? initialFormForDefect.formId : undefined} initialVersionId={initialFormForDefect?.defectId === selected.id ? initialFormForDefect.versionId : undefined} initialAnswers={initialFormForDefect?.defectId === selected.id ? initialFormForDefect.answers : undefined} initialFiles={initialFormForDefect?.defectId===selected.id?initialFormForDefect.files:undefined}/>}<h3 className="timeline-heading">Audit history</h3><div className="timeline">{events.map((item) => <div className="timeline-item" key={item.id}><span className="timeline-dot"></span><div><b>{human(item.eventType)}{item.toStatus ? ` · ${human(item.toStatus)}` : ""}{item.inspectionOutcome ? ` · Inspection ${human(item.inspectionOutcome)}` : ""}</b><p>{item.note}{item.evidenceReference ? `\nEvidence: ${item.evidenceReference}` : ""}</p><small>{item.actorId} · {new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(item.occurredAt))}</small></div></div>)}{!events.length && <span className="timeline-empty">Loading history or no recorded events.</span>}</div><p className="modal-note"><span>✓</span> Form submissions and evidence are retained against the exact published version.</p><div className="modal-actions"><button className="button-secondary" onClick={() => setSelected(null)}>Close</button>{hasPermission(identity?.permissions, "REVIEW") && ["REPORTED","UNDER_REVIEW"].includes(selected.status) && <><button className="button-secondary" disabled={reviewSubmitting} onClick={() => void submitReviewDecision(selected,"REJECT")}>{reviewSubmitting?"Saving…":"Reject review"}</button><button className="button-primary" disabled={reviewSubmitting} onClick={() => void submitReviewDecision(selected,"APPROVE")}>{reviewSubmitting?"Saving…":"Approve review →"}</button></>}{hasPermission(identity?.permissions, "REVIEW") && <button className="button-secondary" onClick={() => void reassignReviewer(selected)}>Reassign Reviewer team</button>}{hasPermission(identity?.permissions, "ASSIGN_ACTION") && selected.activeActionId && ["ACTION_ASSIGNED", "IN_PROGRESS"].includes(selected.status) && <button className="button-secondary" onClick={() => void reassignDefect(selected)}>Reassign maintenance team</button>}{canAdvanceWorkflow(identity?.permissions, selected.status) && <button className="button-primary" onClick={() => { void advance(selected); setSelected(null); }}>Advance workflow →</button>}</div></DialogPortal>}
   </main>;
 }

@@ -3,6 +3,7 @@ package com.ecabin.ledger.api;
 import static com.ecabin.ledger.api.ApiModels.*;
 
 import com.ecabin.ledger.service.DefectService;
+import com.ecabin.ledger.service.OperationalFormService;
 import com.ecabin.ledger.security.AuthenticatedUser;
 import com.ecabin.ledger.security.CurrentUserResolver;
 import com.ecabin.ledger.security.Permission;
@@ -20,6 +21,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
@@ -28,7 +30,8 @@ public class DefectController {
     private final DefectService service;
     private final CurrentUserResolver users;
     private final PermissionService permissions;
-    public DefectController(DefectService service, CurrentUserResolver users, PermissionService permissions) { this.service = service; this.users = users; this.permissions = permissions; }
+    private final OperationalFormService forms;
+    public DefectController(DefectService service, CurrentUserResolver users, PermissionService permissions, OperationalFormService forms) { this.service = service; this.users = users; this.permissions = permissions; this.forms = forms; }
 
     @GetMapping("/defects")
     public DefectPage list(JwtAuthenticationToken auth,
@@ -43,27 +46,69 @@ public class DefectController {
         @RequestParam(required = false) String cursor,
         @RequestParam(defaultValue = "25") int limit) {
         AuthenticatedUser user = users.require(auth); permissions.require(user, Permission.VIEW);
-        return service.list(user.organizationId(), user.externalUserId(), status, location, q, searchBy, aircraftType, fromDate, toDate, mine, cursor, limit);
+        boolean teamScoped = permissions.isMaintenanceTeamScoped(user.organizationId(), user.role());
+        boolean reporterScoped = permissions.isReporterScoped(user.organizationId(), user.role());
+        boolean reviewerScoped=permissions.isReviewerTeamScoped(user.organizationId(),user.role());
+        return service.list(user.organizationId(), user.externalUserId(), status, location, q, searchBy, aircraftType, fromDate, toDate, mine || reporterScoped, teamScoped, reviewerScoped, cursor, limit);
+    }
+
+    @GetMapping("/maintenance-work-queue")
+    public MaintenanceWorkQueuePage maintenanceWorkQueue(JwtAuthenticationToken auth,
+        @RequestParam(defaultValue = "0") int page, @RequestParam(defaultValue = "25") int size,
+        @RequestParam(required = false) String search, @RequestParam(required = false) String actionStatus,
+        @RequestParam(defaultValue = "assignmentDate") String sortBy, @RequestParam(defaultValue = "DESC") String sortDirection) {
+        AuthenticatedUser user=users.require(auth); permissions.require(user, Permission.VIEW); permissions.require(user, Permission.PERFORM_ACTION);
+        return service.maintenanceWorkQueue(user.organizationId(), user.externalUserId(), page, size, search, actionStatus, sortBy, sortDirection);
+    }
+
+    @GetMapping("/aircraft/{aircraftId}")
+    public FleetStatusRow aircraft(JwtAuthenticationToken auth, @PathVariable UUID aircraftId) {
+        AuthenticatedUser user = users.require(auth); permissions.require(user, Permission.VIEW);
+        return service.aircraft(user.organizationId(), user.externalUserId(), aircraftId,
+            permissions.isMaintenanceTeamScoped(user.organizationId(), user.role()), permissions.isReporterScoped(user.organizationId(), user.role()),permissions.isReviewerTeamScoped(user.organizationId(),user.role()));
+    }
+
+    @GetMapping("/aircraft/{aircraftId}/defects")
+    public AircraftDefectPage aircraftDefects(JwtAuthenticationToken auth, @PathVariable UUID aircraftId,
+            @RequestParam(defaultValue = "0") int page, @RequestParam(defaultValue = "25") int size,
+            @RequestParam(required = false) String status, @RequestParam(required = false) String search,
+            @RequestParam(defaultValue = "reportedAt") String sortBy, @RequestParam(defaultValue = "DESC") String sortDirection) {
+        AuthenticatedUser user = users.require(auth); permissions.require(user, Permission.VIEW);
+        return service.aircraftDefects(user.organizationId(), user.externalUserId(), aircraftId,
+            permissions.isMaintenanceTeamScoped(user.organizationId(), user.role()), permissions.isReporterScoped(user.organizationId(), user.role()),permissions.isReviewerTeamScoped(user.organizationId(),user.role()), page, size, status, search, sortBy, sortDirection);
     }
 
     @GetMapping("/dashboard/summary")
-    public DashboardSummary summary(JwtAuthenticationToken auth) { AuthenticatedUser user=users.require(auth); permissions.require(user, Permission.VIEW); return service.summary(user.organizationId()); }
+    public DashboardSummary summary(JwtAuthenticationToken auth) { AuthenticatedUser user=users.require(auth); permissions.require(user, Permission.VIEW); return service.summary(user.organizationId(), user.externalUserId(), permissions.isMaintenanceTeamScoped(user.organizationId(), user.role()), permissions.isReporterScoped(user.organizationId(), user.role()),permissions.isReviewerTeamScoped(user.organizationId(),user.role())); }
 
     @GetMapping("/me")
     public CurrentUserView me(JwtAuthenticationToken auth) { AuthenticatedUser user=users.require(auth); return new CurrentUserView(service.organizationName(user.organizationId()), user.displayName(), user.role(), permissions.permissionsFor(user.organizationId(), user.role()).stream().map(Enum::name).collect(java.util.stream.Collectors.toUnmodifiableSet())); }
 
     @PostMapping("/defects") @ResponseStatus(HttpStatus.CREATED)
-    public DefectView create(JwtAuthenticationToken auth, @Valid @RequestBody CreateDefectRequest request) {
+    public DefectView create(JwtAuthenticationToken auth, @Valid @RequestBody CreateDefectRequest request,
+            @RequestHeader(value="Idempotency-Key",required=false) UUID idempotencyKey) {
         AuthenticatedUser user=users.require(auth); permissions.require(user, Permission.REPORT);
-        return service.create(user.organizationId(), user.externalUserId(), request);
+        if (forms.publishedForArea(user.organizationId(), request.areaId()).isEmpty())
+            throw new org.springframework.web.server.ResponseStatusException(HttpStatus.CONFLICT, "No published operational form is configured for the selected cabin area.");
+        if (request.aircraftId() == null || request.formId() == null || request.formVersionId() == null)
+            throw new IllegalArgumentException("Select an aircraft and a published form version for the chosen cabin area.");
+        var selectedForm = forms.published(user.organizationId(), request.formId(), request.formVersionId());
+        if (!request.areaId().equals(selectedForm.areaId()))
+            throw new IllegalArgumentException("The selected published form is not configured for the chosen cabin area.");
+        var mapped=forms.resolveDefectReport(user.organizationId(),request.areaId(),request.formId(),request.formVersionId(),request.formAnswers());
+        CreateDefectRequest canonical=new CreateDefectRequest(request.tailNumber(),(String)mapped.get("location"),(String)mapped.get("category"),request.areaId(),
+            (UUID)mapped.get("componentId"),(UUID)mapped.get("conditionId"),(String)mapped.get("zone"),(Integer)mapped.get("rowNumber"),(String)mapped.get("seatReference"),null,
+            (String)mapped.get("title"),(String)mapped.get("description"),(String)mapped.get("severity"),request.aircraftId(),request.formId(),request.formVersionId(),request.formAnswers());
+        return service.create(user.organizationId(), user.externalUserId(), canonical,idempotencyKey);
     }
 
     @GetMapping("/defects/{id}")
-    public DefectView get(JwtAuthenticationToken auth, @PathVariable UUID id) { AuthenticatedUser user=users.require(auth); permissions.require(user, Permission.VIEW); return service.get(user.organizationId(), id); }
+    public DefectView get(JwtAuthenticationToken auth, @PathVariable UUID id) { AuthenticatedUser user=users.require(auth); permissions.require(user, Permission.VIEW); return visibleDefect(user, id); }
 
     @PostMapping("/defects/{id}/transitions")
     public DefectView transition(JwtAuthenticationToken auth, @PathVariable UUID id, @Valid @RequestBody TransitionRequest request) {
         AuthenticatedUser user=users.require(auth);
+        visibleDefect(user,id);
         String target=request.status().toUpperCase();
         Permission permission=switch(target) {
             case "UNDER_REVIEW", "INSPECTION_REQUIRED", "REJECTED", "CANCELLED" -> Permission.REVIEW;
@@ -76,11 +121,18 @@ public class DefectController {
             case "REOPENED" -> Permission.REOPEN;
             default -> throw new IllegalArgumentException("Unsupported status.");
         };
-        if (target.equals("INSPECTION_REQUIRED") && "INSPECTION_IN_PROGRESS".equals(service.get(user.organizationId(), id).status())) permission=Permission.INSPECT;
+        if (target.equals("INSPECTION_REQUIRED") && "INSPECTION_IN_PROGRESS".equals(visibleDefect(user, id).status())) permission=Permission.INSPECT;
         permissions.require(user, permission);
         return service.transition(user.organizationId(), id, user.externalUserId(), request);
     }
 
     @GetMapping("/defects/{id}/events")
-    public List<DefectEventView> events(JwtAuthenticationToken auth, @PathVariable UUID id) { AuthenticatedUser user=users.require(auth); permissions.require(user, Permission.AUDIT); return service.events(user.organizationId(), id); }
+    public List<DefectEventView> events(JwtAuthenticationToken auth, @PathVariable UUID id) { AuthenticatedUser user=users.require(auth); if(!permissions.permissionsFor(user.organizationId(),user.role()).contains(Permission.AUDIT))permissions.require(user,Permission.REVIEW); visibleDefect(user, id); return service.events(user.organizationId(), id); }
+
+    private DefectView visibleDefect(AuthenticatedUser user, UUID id) {
+        if (permissions.isMaintenanceTeamScoped(user.organizationId(), user.role())) return service.getForMaintenanceMember(user.organizationId(), user.externalUserId(), id);
+        if (permissions.isReporterScoped(user.organizationId(), user.role())) return service.getForReporter(user.organizationId(), user.externalUserId(), id);
+        if (permissions.isReviewerTeamScoped(user.organizationId(),user.role())) return service.getForReviewerMember(user.organizationId(),user.externalUserId(),id);
+        return service.get(user.organizationId(), id);
+    }
 }

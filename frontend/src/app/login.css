@@ -1,6 +1,6 @@
 /* Replace this single asset (or change --login-background-image) to use another hero image. */
 :root{--login-background-image:url("/images/login-background.svg")}
-.login-shell{position:relative;isolation:isolate;min-height:100svh;display:grid;place-items:center;overflow:hidden;padding:90px 24px 76px;background-color:#283c43;background-image:linear-gradient(180deg,#10242b22 0%,#101d2550 100%),var(--login-background-image);background-size:cover;background-position:center;background-repeat:no-repeat;color:#fff;font-family:Arial,Helvetica,sans-serif}
+.login-shell{position:relative;isolation:isolate;min-height:100svh;display:grid;place-items:center;overflow:hidden;padding:90px 24px 76px;background-color:#283c43;background-image:linear-gradient(180deg,#10242b22 0%,#101d2550 100%),var(--login-background-image);background-size:cover;background-position:center;background-repeat:no-repeat;color:#fff;font-family:var(--sans)}
 .login-airline-brand{position:absolute;top:12%;left:50%;transform:translateX(-50%);display:grid;text-align:center;line-height:.88;color:#ed1b35;letter-spacing:.8px;font-weight:800;text-shadow:0 1px 12px #37221b30}
 .login-airline-brand span{font-size:clamp(15px,1.15vw,23px)}
 .login-airline-brand strong{color:#f15a24;font-size:clamp(29px,2.35vw,46px);font-weight:500;letter-spacing:-2px}
@@ -25,3 +25,7 @@
 @media(max-width:700px){.login-shell{padding:105px 18px 78px;background-position:57% center}.login-airline-brand{top:8%}.login-card{min-height:0;padding:76px 22px 24px;border-radius:12px}.login-user-icon{width:92px;height:92px;top:-39px}.login-user-icon svg{width:52px;height:52px}.login-card h1{margin:0 0 27px}.login-form input{height:51px;font-size:15px}.login-submit{height:58px;margin-top:14px;font-size:17px}.login-help{font-size:12px}.login-footer{bottom:15px}}
 @media(max-height:600px) and (min-width:701px){.login-shell{padding-top:70px;padding-bottom:56px}.login-airline-brand{top:5%}.login-card{min-height:310px;padding-top:76px}.login-card h1{margin-bottom:30px}.login-submit{height:60px}.login-footer{bottom:12px}}
 @media(prefers-reduced-motion:reduce){.login-submit{transition:none}}
+.authorization-gate{min-height:100svh;display:grid;place-items:center;padding:24px;background:#eaf1ff;color:#243247;font-family:var(--sans)}
+.authorization-gate>section{width:min(520px,100%);padding:32px;border:1px solid #e1e8f2;border-radius:16px;background:#fff;box-shadow:0 14px 32px #263d5a1c;text-align:center}
+.authorization-gate h1{margin:10px 0;color:#243247;font-size:24px}
+.authorization-gate p{margin:0 0 20px;color:#667085;line-height:1.6}

@@ -38,6 +38,25 @@ class PermissionServiceTest {
     }
 
     @Test
+    void maintenanceVisibilityComesFromCapabilitiesRatherThanRoleNames() {
+        UUID tenant = UUID.randomUUID();
+        assertTrue(permissions.isMaintenanceTeamScoped(tenant, AppRole.MAINTENANCE_TECHNICIAN.name()));
+        assertFalse(permissions.isMaintenanceTeamScoped(tenant, AppRole.SUPERVISOR.name()));
+        assertFalse(permissions.isMaintenanceTeamScoped(tenant, AppRole.VIEWER.name()));
+        assertDoesNotThrow(() -> permissions.require(user(AppRole.MAINTENANCE_TECHNICIAN), Permission.PERFORM_ACTION));
+        assertThrows(AccessDeniedException.class, () -> permissions.require(user(AppRole.MAINTENANCE_TECHNICIAN), Permission.CLOSE));
+        assertThrows(AccessDeniedException.class, () -> permissions.require(user(AppRole.MAINTENANCE_TECHNICIAN), Permission.ASSIGN_ACTION));
+    }
+
+    @Test
+    void reviewerCapabilitiesAreTeamScopedUnlessExplicitOrganizationAdminIsGranted() {
+        UUID tenant=UUID.randomUUID();
+        assertTrue(permissions.isReviewerTeamScoped(tenant,AppRole.SUPERVISOR.name()));
+        assertFalse(permissions.isReviewerTeamScoped(tenant,AppRole.ADMIN.name()));
+        assertFalse(permissions.isReviewerTeamScoped(tenant,AppRole.VIEWER.name()));
+    }
+
+    @Test
     void navigationIsBuiltFromPermissionsRatherThanFrontendRoleRules() {
         AuthenticatedUser inspector = user(AppRole.INSPECTOR);
         CurrentUserResolver users = new CurrentUserResolver(null) {

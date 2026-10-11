@@ -1,0 +1,65 @@
+package com.ecabin.ledger.api;
+
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Size;
+import java.math.BigDecimal;
+import java.time.Instant;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+
+public final class FormModels {
+    private FormModels() {}
+    public enum FieldType { TEXT, TEXTAREA, NUMBER, DROPDOWN, MULTI_SELECT, DATE, CHECKBOX, FILE_UPLOAD, IMAGE_UPLOAD, SECTION }
+    public enum FormPurpose { DEFECT_REPORT, INSPECTION, CORRECTIVE_ACTION, VERIFICATION, CLOSURE_APPROVAL, REOPEN }
+    public enum WorkflowStage { INITIAL_REPORT, REPORTED, UNDER_REVIEW, INSPECTION_REQUIRED, INSPECTION_IN_PROGRESS, INSPECTION_COMPLETE, ACTION_ASSIGNED, IN_PROGRESS, AWAITING_VERIFICATION, VERIFIED, APPROVAL_REQUIRED, CLOSED, REOPENED }
+    public enum OptionSource { DEFECT_CATEGORIES, DEFECT_SEVERITIES, GALLEY_SEVERITIES, CABIN_AREAS, CABIN_ZONES, COMPONENTS, DEFECT_CONDITIONS, AIRCRAFT, FLEETS, MAINTENANCE_TEAMS }
+    public enum DefectFieldBinding { DEFECT_CATEGORY, COMPONENT_ID, CONDITION_ID, ZONE, ROW_NUMBER, SEAT_REFERENCE, TITLE, DESCRIPTION, REMARKS, SEVERITY, EVIDENCE_ATTACHMENTS }
+    public record TextRules(Integer minLength, Integer maxLength, Boolean alphaOnly, Boolean alphanumeric, String pattern) {}
+    public record NumericRules(BigDecimal min, BigDecimal max, Integer precision) {}
+    public record DateRules(String minDate, String maxDate) {}
+    public record OptionFilter(String areaFieldKey, String componentFieldKey) {}
+    public record FileRules(List<String> extensions, List<String> mimeTypes, Long maxFileSizeBytes, Integer minCount, Integer maxCount) {}
+    public record FieldDefinition(@NotBlank @Size(max=80) String key, @NotBlank @Size(max=120) String label,
+        @NotNull FieldType type, @Size(max=500) String helpText, boolean required, int order,
+        TextRules textRules, NumericRules numericRules, DateRules dateRules, OptionSource optionSource,
+        OptionFilter optionFilter, FileRules fileRules, DefectFieldBinding binding, Boolean visible, Boolean readOnly) {
+        public FieldDefinition(String key,String label,FieldType type,String helpText,boolean required,int order,TextRules textRules,NumericRules numericRules,DateRules dateRules,OptionSource optionSource,OptionFilter optionFilter,FileRules fileRules) {
+            this(key,label,type,helpText,required,order,textRules,numericRules,dateRules,optionSource,optionFilter,fileRules,null,true,false);
+        }
+        public FieldDefinition(String key,String label,FieldType type,String helpText,boolean required,int order,TextRules textRules,NumericRules numericRules,DateRules dateRules,OptionSource optionSource,OptionFilter optionFilter,FileRules fileRules,DefectFieldBinding binding) {
+            this(key,label,type,helpText,required,order,textRules,numericRules,dateRules,optionSource,optionFilter,fileRules,binding,true,false);
+        }
+    }
+    public record FormConfiguration(@NotNull @Size(max=100) List<@NotNull FieldDefinition> fields) {}
+    public record CreateFormRequest(@NotBlank @Size(max=80) String formKey, @NotBlank @Size(max=160) String name, @NotNull UUID areaId, FormPurpose purpose, WorkflowStage workflowStage) {
+        public CreateFormRequest(String formKey,String name,UUID areaId) { this(formKey,name,areaId,FormPurpose.DEFECT_REPORT,WorkflowStage.INITIAL_REPORT); }
+    }
+    public record ReassignFormAreaRequest(@NotNull UUID areaId, @NotBlank @Size(max=2000) String reason) {}
+    public record UpdateFormMappingRequest(@NotNull UUID areaId,@NotNull FormPurpose purpose,@NotNull WorkflowStage workflowStage,@NotBlank @Size(max=2000) String reason) {}
+    public record SaveDraftRequest(@NotNull FormConfiguration configuration) {}
+    public record PublishRequest(@NotNull UUID versionId) {}
+    public record DeactivateRequest(@NotBlank @Size(max=1000) String reason) {}
+    public record FormSummary(UUID id, String formKey, String name, UUID areaId, String areaName, FormPurpose purpose, WorkflowStage workflowStage, int isactive,
+        Integer publishedVersion, UUID publishedVersionId, Integer draftVersion, UUID draftVersionId, Instant updatedAt) {}
+    public record FormTablePage(List<FormSummary> items,int page,int size,long totalElements,int totalPages) {}
+    public record FormVersion(UUID id, UUID formId, int versionNumber, String status, FormConfiguration configuration,
+        String createdBy, Instant createdAt, String publishedBy, Instant publishedAt) {}
+    public record FormForArea(UUID id, String formKey, String name, UUID areaId, FormPurpose purpose, WorkflowStage workflowStage, UUID versionId, int versionNumber,
+        FormConfiguration configuration) {}
+    public record FormOption(UUID id, String code, String label) {}
+    public record FieldBindingDefinition(DefectFieldBinding binding, String stableKey, String name, String domainProperty,
+        String destinationTable, String destinationColumn, String dataType, List<FieldType> supportedFieldTypes,
+        List<String> cabinAreaCodes, List<FormPurpose> formPurposes, String requiredPolicy, OptionSource referenceDataSource,
+        String validation, String classification, boolean multipleAllowed, String dependsOnBinding) {}
+    public record FormDataSnapshot(String defectCategory, UUID componentId, UUID conditionId, String zone,
+        Integer rowNumber, String seatReference, String title, String description, UUID severityId) {}
+    public record SubmitFormRequest(@NotNull UUID formId, @NotNull UUID versionId, FormPurpose purpose, @NotNull Map<String,Object> answers) {
+        public SubmitFormRequest(UUID formId,UUID versionId,Map<String,Object> answers) { this(formId,versionId,null,answers); }
+    }
+    public record FormSubmission(UUID id, UUID defectId, UUID formId, UUID versionId, int versionNumber, FormPurpose purpose, WorkflowStage workflowStage,
+        String submittedBy, FormDataSnapshot snapshot, Instant submittedAt) {}
+    public record AttachmentView(UUID id, UUID defectId, UUID formSubmissionId, String fieldKey, String filename,
+        String mimeType, long sizeBytes, String scanStatus, Instant uploadedAt) {}
+}

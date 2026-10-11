@@ -11,4 +11,5 @@ app:
   security:
     audience: ecabin-ledger-api
   local-auth:
-    email: abc@gmail.com
+    # Fixed local identities only. This profile is loopback-only and must never be deployed.
+    emails: abc@gmail.com,admin.test@ecabin.local,auditor.test@ecabin.local,reviewer.test@ecabin.local,maintenance.test@ecabin.local

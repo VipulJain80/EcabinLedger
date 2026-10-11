@@ -5,6 +5,10 @@ server:
 spring:
   application:
     name: ecabin-ledger-api
+  servlet:
+    multipart:
+      max-file-size: 15MB
+      max-request-size: 16MB
   datasource:
     url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/postgres?connectTimeout=10&sslmode=prefer&currentSchema=ecabin_ledger}
     username: ${SPRING_DATASOURCE_USERNAME:postgres}
@@ -26,12 +30,24 @@ spring:
     schemas: ${DB_SCHEMA:ecabin_ledger}
     default-schema: ${DB_SCHEMA:ecabin_ledger}
     create-schemas: true
+    user: ${SPRING_FLYWAY_USER:${SPRING_DATASOURCE_USERNAME:postgres}}
+    password: ${SPRING_FLYWAY_PASSWORD:${SPRING_DATASOURCE_PASSWORD:root}}
   security:
     oauth2:
       resourceserver:
         jwt:
           issuer-uri: ${SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI}
 app:
+  rate-limit:
+    unauthenticated-per-minute: ${API_RATE_LIMIT_UNAUTHENTICATED_PER_MINUTE:10}
+  attachments:
+    provider: ${ATTACHMENT_STORAGE_PROVIDER:azure}
+    azure-endpoint: ${AZURE_STORAGE_ACCOUNT_URL:}
+    azure-container: ${AZURE_STORAGE_CONTAINER:ecabin-evidence-private}
+    azure-connection-string: ${AZURE_STORAGE_CONNECTION_STRING:}
+    clamav-host: ${CLAMAV_HOST:}
+    clamav-port: ${CLAMAV_PORT:3310}
+    clamav-timeout-ms: ${CLAMAV_TIMEOUT_MS:5000}
   cors:
     allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000}
   security:

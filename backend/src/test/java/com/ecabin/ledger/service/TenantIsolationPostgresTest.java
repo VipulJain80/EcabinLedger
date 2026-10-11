@@ -46,7 +46,12 @@ class TenantIsolationPostgresTest {
 
     @Test
     void organizationCannotReadAnotherOrganizationsDefectsOrAudit() {
-        var request = new CreateDefectRequest("N482NW", "CABIN", "SEAT", "FWD CABIN ROW 14", 14, "14A", "Seat", "Torn seat cover", "Cover torn along seam", "LOW");
+        UUID areaId = jdbc.queryForObject("SELECT id FROM cabin_areas_mst WHERE operator_id=? AND code='CABIN'", UUID.class, organizationA);
+        UUID componentId = jdbc.queryForObject("SELECT id FROM cabin_components_mst WHERE operator_id=? AND code='TRAY_TABLE'", UUID.class, organizationA);
+        UUID conditionId = UUID.randomUUID();
+        jdbc.update("INSERT INTO defect_conditions_mst(id,operator_id,code,name) VALUES(?,?,?,'Torn')", conditionId, organizationA, "TORN_"+conditionId.toString().substring(0,8));
+        jdbc.update("INSERT INTO component_conditions_mst(operator_id,component_id,condition_id) VALUES(?,?,?)", organizationA, componentId, conditionId);
+        var request = new CreateDefectRequest("N482NW", "CABIN", "SEAT", areaId, componentId, conditionId, "FWD CABIN ROW 14", 14, "14A", null, "Torn seat cover", "Cover torn along seam", "LOW");
         var created = defects.create(organizationA, "crew-001", request);
 
         assertEquals(0, defects.list(organizationB, null, null, null, 25).items().size());
@@ -57,9 +62,9 @@ class TenantIsolationPostgresTest {
 
     private UUID createTenant(String suffix) {
         UUID operator=UUID.randomUUID(), fleet=UUID.randomUUID(), aircraft=UUID.randomUUID();
-        jdbc.update("INSERT INTO operators(id,name) VALUES(?,?)", operator, "DEMO " + suffix);
-        jdbc.update("INSERT INTO fleets(id,operator_id,name) VALUES(?,?,?)", fleet, operator, "Fleet " + suffix);
-        jdbc.update("INSERT INTO aircraft(id,operator_id,fleet_id,tail_number,aircraft_type) VALUES(?,?,?,?,?)", aircraft, operator, fleet, "N" + suffix + UUID.randomUUID().toString().substring(0,5), "A320-200");
+        jdbc.update("INSERT INTO operators_mst(id,name) VALUES(?,?)", operator, "DEMO " + suffix);
+        jdbc.update("INSERT INTO fleets_mst(id,operator_id,name) VALUES(?,?,?)", fleet, operator, "Fleet " + suffix);
+        jdbc.update("INSERT INTO aircraft_mst(id,operator_id,fleet_id,tail_number,aircraft_type) VALUES(?,?,?,?,?)", aircraft, operator, fleet, "N" + suffix + UUID.randomUUID().toString().substring(0,5), "A320-200");
         return operator;
     }
 }

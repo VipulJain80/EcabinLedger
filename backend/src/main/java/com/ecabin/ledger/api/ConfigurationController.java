@@ -5,6 +5,7 @@ import com.ecabin.ledger.security.CurrentUserResolver;
 import com.ecabin.ledger.security.Permission;
 import com.ecabin.ledger.security.PermissionService;
 import com.ecabin.ledger.service.ConfigurationService;
+import com.ecabin.ledger.service.ConfigurationImportService;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
@@ -27,6 +28,9 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.RequestPart;
+import org.springframework.web.multipart.MultipartFile;
+import java.util.UUID;
 import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
 
 /** GET/POST-only tenant administration API. Every operation is organization-scoped and ADMIN-authorized. */
@@ -34,13 +38,40 @@ import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBo
 @RequestMapping("/api/v1/configuration")
 public class ConfigurationController {
     public record DeactivateRequest(@NotBlank @Size(max = 1000) String reason) {}
+    public record ImportCommitRequest(@jakarta.validation.constraints.NotNull UUID importId) {}
 
     private final ConfigurationService configuration;
     private final CurrentUserResolver users;
     private final PermissionService permissions;
+    private final ConfigurationImportService imports;
 
-    public ConfigurationController(ConfigurationService configuration, CurrentUserResolver users, PermissionService permissions) {
-        this.configuration = configuration; this.users = users; this.permissions = permissions;
+    public ConfigurationController(ConfigurationService configuration, CurrentUserResolver users, PermissionService permissions, ConfigurationImportService imports) {
+        this.configuration = configuration; this.users = users; this.permissions = permissions; this.imports = imports;
+    }
+
+    @GetMapping(value = "/{resource}/import-template", produces = "text/csv")
+    public ResponseEntity<byte[]> importTemplate(JwtAuthenticationToken auth, @PathVariable String resource) {
+        requireAdmin(auth);
+        ConfigurationImportService.Template template = imports.template(resource);
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(new MediaType("text", "csv", StandardCharsets.UTF_8));
+        headers.setContentDisposition(ContentDisposition.attachment().filename("ecabin-" + resource + "-sample.csv", StandardCharsets.UTF_8).build());
+        headers.setCacheControl("no-store");
+        return ResponseEntity.ok().headers(headers).body(template.sample().getBytes(StandardCharsets.UTF_8));
+    }
+
+    @PostMapping(value = "/{resource}/imports/validate", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ConfigurationImportService.Validation validateImport(JwtAuthenticationToken auth, @PathVariable String resource,
+            @RequestPart("file") MultipartFile file) {
+        AuthenticatedUser user = requireAdmin(auth);
+        return imports.validate(user.organizationId(), user.externalUserId(), resource, file);
+    }
+
+    @PostMapping(value = "/{resource}/imports", consumes = MediaType.APPLICATION_JSON_VALUE)
+    public ConfigurationImportService.ImportResult commitImport(JwtAuthenticationToken auth, @PathVariable String resource,
+            @Valid @RequestBody ImportCommitRequest request) {
+        AuthenticatedUser user = requireAdmin(auth);
+        return imports.commit(user.organizationId(), user.externalUserId(), resource, request.importId());
     }
 
     @GetMapping("/menu")
@@ -79,9 +110,10 @@ public class ConfigurationController {
             @RequestParam(required = false) String area,
             @RequestParam(required = false) String aircraftType,
             @RequestParam(required = false) String sortBy,
-            @RequestParam(defaultValue = "ASC") String sortDirection) {
+            @RequestParam(defaultValue = "ASC") String sortDirection,
+            @RequestParam(required = false) List<String> columns) {
         AuthenticatedUser user = requireAdmin(auth);
-        StreamingResponseBody body = output -> configuration.exportExcel(user.organizationId(), resource, search, status, role, area, aircraftType, sortBy, sortDirection, output);
+        StreamingResponseBody body = output -> configuration.exportExcel(user.organizationId(), resource, search, status, role, area, aircraftType, sortBy, sortDirection, columns, output);
         String filename = "ecabin-" + resource.replaceAll("[^a-zA-Z0-9-]", "") + ".xlsx";
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.parseMediaType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"));

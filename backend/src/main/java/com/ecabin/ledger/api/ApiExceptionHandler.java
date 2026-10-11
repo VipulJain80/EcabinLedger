@@ -9,6 +9,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.multipart.MaxUploadSizeExceededException;
 import org.springframework.web.server.ResponseStatusException;
 
 @RestControllerAdvice
@@ -37,5 +38,10 @@ public class ApiExceptionHandler {
     @ExceptionHandler(DataIntegrityViolationException.class)
     ResponseEntity<ErrorBody> conflict() {
         return ResponseEntity.status(HttpStatus.CONFLICT).body(new ErrorBody(new ErrorDetail("conflict", "This value conflicts with an existing record or is referenced by operational data.")));
+    }
+
+    @ExceptionHandler(MaxUploadSizeExceededException.class)
+    ResponseEntity<ErrorBody> uploadTooLarge() {
+        return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE).body(new ErrorBody(new ErrorDetail("upload_too_large", "CSV files must be 5 MB or smaller.")));
     }
 }

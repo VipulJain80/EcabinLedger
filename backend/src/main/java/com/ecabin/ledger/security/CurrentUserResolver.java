@@ -18,7 +18,7 @@ public class CurrentUserResolver {
             String externalUserId = authentication.getToken().getSubject();
             if (externalUserId == null || externalUserId.isBlank()) throw new AccessDeniedException("The validated token has no subject.");
             return jdbc.query("SELECT o.name AS organization_name, m.display_name, m.role " +
-                "FROM operator_memberships m JOIN operators o ON o.id=m.operator_id " +
+                "FROM operator_memberships_mst m JOIN operators_mst o ON o.id=m.operator_id " +
                 "WHERE m.operator_id=? AND m.external_user_id=? AND m.isactive=1 AND o.isactive=1",
                 (rs, row) -> new AuthenticatedUser(organizationId, externalUserId,
                     rs.getString("display_name") == null ? externalUserId : rs.getString("display_name"),

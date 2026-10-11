@@ -26,6 +26,8 @@ public final class DefectWorkflow {
         return TRANSITIONS.getOrDefault(from, Set.of()).contains(to);
     }
 
+    public static Set<String> validTargets(String from) { return TRANSITIONS.getOrDefault(from, Set.of()); }
+
     public static void requireTransition(String from, String to, String reason) {
         if (!permits(from, to)) throw new IllegalStateException("Cannot move a defect from " + from + " to " + to + ".");
         if (to.equals("REOPENED") && (reason == null || reason.isBlank()))

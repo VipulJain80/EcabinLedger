@@ -4,6 +4,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpMethod;
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
@@ -21,10 +22,23 @@ import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.web.SecurityFilterChain;
 import java.util.Arrays;
 import java.util.List;
+import com.ecabin.ledger.security.Permission;
+import com.ecabin.ledger.security.PermissionAuthorization;
+import jakarta.servlet.DispatcherType;
+import org.springframework.security.oauth2.server.resource.web.authentication.BearerTokenAuthenticationFilter;
+import org.springframework.security.web.access.intercept.AuthorizationFilter;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
 
 @Configuration
 @EnableMethodSecurity
 public class SecurityConfig {
+    @Bean
+    FilterRegistrationBean<ApiRateLimitFilter> rateLimitFilterRegistration(ApiRateLimitFilter filter) {
+        FilterRegistrationBean<ApiRateLimitFilter> registration = new FilterRegistrationBean<>(filter);
+        registration.setEnabled(false);
+        return registration;
+    }
+
     @Bean
     @Profile("!local-auth")
     JwtDecoder jwtDecoder(@Value("${spring.security.oauth2.resourceserver.jwt.issuer-uri}") String issuer,
@@ -50,7 +64,7 @@ public class SecurityConfig {
     }
 
     @Bean
-    SecurityFilterChain apiSecurity(HttpSecurity http) throws Exception {
+    SecurityFilterChain apiSecurity(HttpSecurity http, PermissionAuthorization authorization, ApiRateLimitFilter rateLimitFilter) throws Exception {
         return http
             .cors(Customizer.withDefaults())
             .csrf(csrf -> csrf.disable())
@@ -65,10 +79,51 @@ public class SecurityConfig {
                     response.getWriter().write("{\"error\":{\"code\":\"forbidden\",\"message\":\"You are not authorized to perform this operation.\"}}");
                 }))
             .authorizeHttpRequests(auth -> auth
+                .dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
                 .requestMatchers("/actuator/health", "/actuator/health/**", "/actuator/info").permitAll()
                 .requestMatchers("/api/dev/token").permitAll()
-                .anyRequest().authenticated())
+                .requestMatchers("/actuator/**", "/api-docs", "/api-docs/**", "/swagger-ui", "/swagger-ui/**", "/swagger-ui.html", "/v3/api-docs/**", "/webjars/**").authenticated()
+                .requestMatchers(HttpMethod.GET, "/api/v1/me", "/api/v1/navigation").access(authorization.authenticatedMember())
+                .requestMatchers(HttpMethod.GET, "/api/v1/rate-limits/**").access(authorization.anyOf(Permission.ADMINISTER_ORGANIZATION))
+                .requestMatchers(HttpMethod.POST, "/api/v1/rate-limits/**").access(authorization.anyOf(Permission.ADMINISTER_ORGANIZATION))
+                .requestMatchers(HttpMethod.GET, "/api/v1/maintenance-work-queue").access(authorization.anyOf(Permission.PERFORM_ACTION))
+                .requestMatchers(HttpMethod.GET, "/api/v1/notifications").access(authorization.anyOf(Permission.VIEW))
+                .requestMatchers(HttpMethod.GET, "/api/v1/review-queue").access(authorization.anyOf(Permission.REVIEW, Permission.ADMINISTER_ORGANIZATION))
+                .requestMatchers(HttpMethod.GET, "/api/v1/reviewer-teams").access(authorization.anyOf(Permission.REVIEW))
+                .requestMatchers(HttpMethod.GET, "/api/v1/defects/*/events").access(authorization.anyOf(Permission.AUDIT, Permission.REVIEW))
+                .requestMatchers(HttpMethod.GET, "/api/v1/defects/*/operational-forms").access(authorization.authenticatedMember())
+                .requestMatchers(HttpMethod.GET, "/api/v1/aircraft/**").access(authorization.anyOf(Permission.VIEW))
+                .requestMatchers(HttpMethod.GET, "/api/v1/defects", "/api/v1/defects/*", "/api/v1/dashboard/summary",
+                    "/api/v1/fleet-status/**", "/api/v1/reference-data/**", "/api/v1/areas/*/forms",
+                    "/api/v1/forms/**", "/api/v1/defects/*/form-submissions", "/api/v1/attachments/*/download")
+                    .access(authorization.anyOf(Permission.VIEW))
+                .requestMatchers(HttpMethod.GET, "/api/v1/configuration/**").access(authorization.anyOf(Permission.ADMINISTER_ORGANIZATION))
+                .requestMatchers(HttpMethod.POST, "/api/v1/defects").access(authorization.anyOf(Permission.REPORT))
+                .requestMatchers(HttpMethod.POST, "/api/v1/notifications/**").access(authorization.anyOf(Permission.VIEW))
+                .requestMatchers(HttpMethod.POST, "/api/v1/defects/*/transitions").access(authorization.anyOf(
+                    Permission.REVIEW, Permission.INSPECT, Permission.ASSIGN_ACTION, Permission.PERFORM_ACTION,
+                    Permission.VERIFY, Permission.APPROVE, Permission.CLOSE, Permission.REOPEN))
+                .requestMatchers(HttpMethod.POST, "/api/v1/defects/*/review-decision", "/api/v1/defects/*/review-routing").access(authorization.anyOf(Permission.REVIEW))
+                .requestMatchers(HttpMethod.POST, "/api/v1/defects/*/inspections").access(authorization.anyOf(Permission.INSPECT))
+                .requestMatchers(HttpMethod.POST, "/api/v1/defects/*/actions").access(authorization.anyOf(Permission.ASSIGN_ACTION))
+                .requestMatchers(HttpMethod.POST, "/api/v1/defects/*/actions/*/reassign").access(authorization.anyOf(Permission.ASSIGN_ACTION))
+                .requestMatchers(HttpMethod.POST, "/api/v1/defects/*/actions/*/start", "/api/v1/defects/*/actions/*/complete")
+                    .access(authorization.anyOf(Permission.PERFORM_ACTION))
+                .requestMatchers(HttpMethod.POST, "/api/v1/defects/*/verifications").access(authorization.anyOf(Permission.VERIFY))
+                .requestMatchers(HttpMethod.POST, "/api/v1/defects/*/approvals").access(authorization.anyOf(Permission.APPROVE))
+                .requestMatchers(HttpMethod.POST, "/api/v1/defects/*/form-submissions").access(authorization.anyOf(
+                    Permission.REPORT, Permission.INSPECT, Permission.PERFORM_ACTION, Permission.VERIFY, Permission.APPROVE, Permission.REOPEN))
+                .requestMatchers(HttpMethod.POST, "/api/v1/defects/*/forms/*/versions/*/fields/*/attachments")
+                    .access(authorization.anyOf(Permission.REPORT, Permission.INSPECT, Permission.PERFORM_ACTION, Permission.VERIFY, Permission.APPROVE, Permission.REOPEN))
+                .requestMatchers(HttpMethod.POST, "/api/v1/attachments/*/remove").access(authorization.anyOf(Permission.REPORT, Permission.INSPECT, Permission.PERFORM_ACTION, Permission.VERIFY, Permission.APPROVE, Permission.REOPEN))
+                .requestMatchers(HttpMethod.POST, "/api/v1/configuration/**").access(authorization.anyOf(Permission.ADMINISTER_ORGANIZATION))
+                // All current API routes are explicitly classified above; new routes require an authorization rule.
+                .requestMatchers("/api/v1/**").denyAll()
+                .anyRequest().denyAll())
             .oauth2ResourceServer(oauth -> oauth.jwt(Customizer.withDefaults()))
+            // Apply limits only after authentication and endpoint authorization, so
+            // unauthorized calls neither consume tenant quota nor mask a 401/403.
+            .addFilterAfter(rateLimitFilter, AuthorizationFilter.class)
             .build();
     }
 }

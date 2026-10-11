@@ -1,20 +1,36 @@
 package com.ecabin.ledger.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.ecabin.ledger.api.ApiModels.ActionCompletionRequest;
 import com.ecabin.ledger.api.ApiModels.ApprovalRequest;
 import com.ecabin.ledger.api.ApiModels.CreateDefectRequest;
 import com.ecabin.ledger.api.ApiModels.CorrectiveActionRequest;
+import com.ecabin.ledger.api.ApiModels.CorrectiveActionReassignmentRequest;
 import com.ecabin.ledger.api.ApiModels.DefectView;
 import com.ecabin.ledger.api.ApiModels.InspectionRequest;
 import com.ecabin.ledger.api.ApiModels.TransitionRequest;
 import com.ecabin.ledger.api.ApiModels.VerificationRequest;
+import com.ecabin.ledger.api.ApiModels.ReviewerDecisionRequest;
+import com.ecabin.ledger.api.FormModels.CreateFormRequest;
+import com.ecabin.ledger.api.FormModels.FieldDefinition;
+import com.ecabin.ledger.api.FormModels.FieldType;
+import com.ecabin.ledger.api.FormModels.FormConfiguration;
+import com.ecabin.ledger.api.FormModels.SubmitFormRequest;
+import com.ecabin.ledger.api.FormModels.TextRules;
+import com.ecabin.ledger.api.FormModels.OptionSource;
+import com.ecabin.ledger.api.FormModels.OptionFilter;
+import com.ecabin.ledger.api.FormModels.DefectFieldBinding;
 import com.ecabin.ledger.service.ConfigurationService.SaveRequest;
 import com.ecabin.ledger.security.AppRole;
 import com.ecabin.ledger.security.CurrentUserResolver;
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
@@ -26,10 +42,23 @@ import org.springframework.security.oauth2.server.resource.authentication.JwtAut
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
+import org.springframework.test.web.servlet.MockMvc;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
+import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.not;
+import org.springframework.http.MediaType;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import static org.mockito.BDDMockito.given;
 import org.springframework.test.annotation.Rollback;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
+import org.springframework.mock.web.MockMultipartFile;
 
 /** Runs against the explicitly supplied ecabin_ledger schema; all test rows are rolled back. */
 @EnabledIfEnvironmentVariable(named = "ECABIN_DB_VERIFY", matches = "(?i)true")
@@ -39,6 +68,7 @@ import org.springframework.security.oauth2.jwt.JwtDecoder;
     "spring.flyway.schemas=ecabin_ledger",
     "spring.flyway.default-schema=ecabin_ledger"
 })
+@AutoConfigureMockMvc
 class LocalPostgresOperationalIntegrationTest {
     @DynamicPropertySource
     static void database(DynamicPropertyRegistry registry) {
@@ -52,7 +82,208 @@ class LocalPostgresOperationalIntegrationTest {
     @Autowired DefectService defects;
     @Autowired ConfigurationService configuration;
     @Autowired OperationalWorkflowService workflow;
+    @Autowired OperationalFormService forms;
     @Autowired CurrentUserResolver users;
+    @Autowired ConfigurationImportService imports;
+    @Autowired ReviewerQueueService reviewerQueue;
+    @Autowired com.ecabin.ledger.security.PermissionService resolvedPermissions;
+    @Autowired MockMvc mockMvc;
+    @Autowired ObjectMapper objectMapper;
+
+    @Test
+    @Transactional
+    @Rollback
+    void permissionCatalogIsAdminReadableButImmutableAndOrdinaryRolesCannotAssignAdminAuthority() throws Exception {
+        UUID org=createTenant("PERMISSION-CATALOG");
+        addMember(org,"permission-admin","ADMIN");
+        addMember(org,"permission-viewer","VIEWER");
+        given(jwtDecoder.decode("permission-admin-token")).willReturn(testJwt("permission-admin",org));
+        given(jwtDecoder.decode("permission-viewer-token")).willReturn(testJwt("permission-viewer",org));
+        mockMvc.perform(get("/api/v1/configuration/permissions").header("Authorization","Bearer permission-admin-token"))
+            .andExpect(status().isOk()).andExpect(content().string(containsString("ADMINISTER_ORGANIZATION")));
+        mockMvc.perform(get("/api/v1/configuration/role-permissions").header("Authorization","Bearer permission-admin-token"))
+            .andExpect(status().isOk()).andExpect(content().string(containsString("VIEW")));
+        mockMvc.perform(get("/api/v1/configuration/permissions").header("Authorization","Bearer permission-viewer-token"))
+            .andExpect(status().isForbidden());
+        mockMvc.perform(post("/api/v1/configuration/permissions").header("Authorization","Bearer permission-admin-token")
+            .contentType(MediaType.APPLICATION_JSON).content("{}"))
+            .andExpect(status().isForbidden());
+        mockMvc.perform(post("/api/v1/configuration/role-permissions").header("Authorization","Bearer permission-admin-token")
+            .contentType(MediaType.APPLICATION_JSON).content("{}"))
+            .andExpect(status().isForbidden());
+        assertThrows(IllegalArgumentException.class,()->configuration.save(org,"permission-admin","roles",new SaveRequest(null,java.util.Map.of(
+            "roleKey","CUSTOM_ADMIN","name","Custom Admin","description","Attempted privilege escalation.","permissions","VIEW|ADMINISTER_ORGANIZATION"))));
+    }
+
+    @Test
+    @Transactional
+    @Rollback
+    void tenantRateLimitPolicyIsAuditedEnforcedImmediatelyAndIsolated() throws Exception {
+        UUID orgA=createTenant("RATE-LIMIT-A"), orgB=createTenant("RATE-LIMIT-B");
+        addMember(orgA,"rate-admin-a","ADMIN"); addMember(orgA,"rate-viewer-a","VIEWER"); addMember(orgB,"rate-admin-b","ADMIN");
+        given(jwtDecoder.decode("rate-admin-a-token")).willReturn(testJwt("rate-admin-a",orgA));
+        given(jwtDecoder.decode("rate-viewer-a-token")).willReturn(testJwt("rate-viewer-a",orgA));
+        given(jwtDecoder.decode("rate-admin-b-token")).willReturn(testJwt("rate-admin-b",orgB));
+
+        String request="""
+            {"routeKey":"ORDINARY_READS","name":"Tenant read override","description":"Integration policy","scopeType":"TENANT","maxRequests":1,"windowSeconds":60,"reason":"Verify runtime limit update"}
+            """;
+        var created=mockMvc.perform(post("/api/v1/rate-limits/policies").header("Authorization","Bearer rate-admin-a-token")
+            .contentType(MediaType.APPLICATION_JSON).content(request)).andExpect(status().isOk()).andReturn();
+        UUID policyId=UUID.fromString(objectMapper.readTree(created.getResponse().getContentAsString()).get("id").asText());
+        assertNotNull(policyId);
+        assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM api_rate_limit_policy_events_dtl WHERE operator_id=? AND policy_id=? AND event_type='CREATED' AND reason='Verify runtime limit update'",Integer.class,orgA,policyId));
+        mockMvc.perform(get("/api/v1/rate-limits/policies").header("Authorization","Bearer rate-admin-a-token")).andExpect(status().isOk());
+        mockMvc.perform(get("/api/v1/rate-limits/policies").header("Authorization","Bearer rate-admin-a-token")).andExpect(status().isTooManyRequests()).andExpect(header().exists("Retry-After"));
+        String update="""
+            {"routeKey":"ORDINARY_READS","name":"Tenant read override","description":"Updated integration policy","scopeType":"TENANT","maxRequests":3,"windowSeconds":60,"reason":"Raise test limit immediately"}
+            """;
+        mockMvc.perform(post("/api/v1/rate-limits/policies/"+policyId).header("Authorization","Bearer rate-admin-a-token")
+            .contentType(MediaType.APPLICATION_JSON).content(update)).andExpect(status().isOk());
+        mockMvc.perform(get("/api/v1/rate-limits/policies").header("Authorization","Bearer rate-admin-a-token")).andExpect(status().isOk());
+        mockMvc.perform(get("/api/v1/rate-limits/policies").header("Authorization","Bearer rate-admin-a-token")).andExpect(status().isTooManyRequests());
+        mockMvc.perform(get("/api/v1/rate-limits/policies/"+policyId).header("Authorization","Bearer rate-admin-b-token")).andExpect(status().isNotFound());
+        mockMvc.perform(get("/api/v1/rate-limits/policies").header("Authorization","Bearer rate-viewer-a-token")).andExpect(status().isForbidden());
+        mockMvc.perform(post("/api/v1/rate-limits/policies").header("Authorization","Bearer rate-viewer-a-token")
+            .contentType(MediaType.APPLICATION_JSON).content(request)).andExpect(status().isForbidden());
+        assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM api_rate_limit_policy_events_dtl WHERE operator_id=? AND policy_id=? AND event_type='UPDATED' AND reason='Raise test limit immediately'",Integer.class,orgA,policyId));
+        assertTrue(jdbc.queryForObject("SELECT count(*) FROM api_rate_limit_usage_dtl WHERE operator_id=? AND policy_id=? AND rejected_count>0",Integer.class,orgA,policyId)>0);
+    }
+
+    @Test
+    @Transactional
+    @Rollback
+    void severityMasterCrudIsTenantScopedAndExistingDefectsKeepTheirSeveritySnapshot() {
+        UUID orgA=createTenant("SEVERITY-A"),orgB=createTenant("SEVERITY-B");
+        assertEquals(7,jdbc.queryForObject("SELECT count(*) FROM defect_severities_mst WHERE operator_id=? AND isactive=1",Integer.class,orgA),"New organizations receive the four base severities and three additive Galley labels.");
+        jdbc.update("INSERT INTO navigation_menu_items_mst(operator_id,menu_key,label,required_permissions,icon,route_key,display_order) VALUES(?,'configuration','Administration','ADMINISTER_ORGANIZATION','⚙','configuration',50)",orgA);
+        assertEquals(3,jdbc.queryForObject("SELECT count(*) FROM navigation_menu_items_mst WHERE operator_id=? AND parent_id=(SELECT id FROM navigation_menu_items_mst WHERE operator_id=? AND menu_key='configuration') AND menu_key IN ('severities','permissions','role-permissions')",Integer.class,orgA,orgA),"New Administration roots receive the severity and permission views.");
+        var saved=configuration.save(orgA,"severity-admin","severities",new SaveRequest(null,java.util.Map.of(
+            "code","CABIN_PRIORITY","name","Cabin priority","description","Organization-defined display label, not an airworthiness threshold.","sortOrder","5")));
+        configuration.save(orgB,"other-severity-admin","severities",new SaveRequest(null,java.util.Map.of(
+            "code","ORG_B_ONLY","name","Organization B only","description","Must remain in organization B.","sortOrder","50")));
+        String severityId=String.valueOf(saved.get("id"));
+        assertEquals(1,configuration.list(orgA,"severities",false).stream().filter(row->"CABIN_PRIORITY".equals(row.get("code"))).count());
+        assertEquals(0,configuration.list(orgB,"severities",false).stream().filter(row->"CABIN_PRIORITY".equals(row.get("code"))).count());
+        UUID area=jdbc.queryForObject("SELECT id FROM cabin_areas_mst WHERE operator_id=? AND code='CABIN'",UUID.class,orgA);
+        UUID component=jdbc.queryForObject("SELECT id FROM cabin_components_mst WHERE operator_id=? AND code='TRAY_TABLE'",UUID.class,orgA);
+        UUID condition=createCondition(orgA,component);
+        String tail=jdbc.queryForObject("SELECT tail_number FROM aircraft_mst WHERE operator_id=?",String.class,orgA);
+        DefectView defect=defects.create(orgA,"severity-reporter",new CreateDefectRequest(tail,"CABIN","SEAT",area,component,condition,"FWD CABIN",12,"12A",null,"Custom severity finding","Preserve the configured severity reference.","CABIN_PRIORITY"));
+        assertEquals("Cabin priority",defect.severityName());
+        assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM defects_dtl WHERE operator_id=? AND id=? AND severity_id=? AND severity='CABIN_PRIORITY'",Integer.class,orgA,defect.id(),UUID.fromString(severityId)));
+        assertThrows(IllegalArgumentException.class,()->defects.create(orgA,"severity-reporter",new CreateDefectRequest(tail,"CABIN","SEAT",area,component,condition,"FWD CABIN",13,"13A",null,"Foreign severity","Must reject a severity that exists only for another tenant.","ORG_B_ONLY")));
+        configuration.deactivate(orgA,"severity-admin","severities",severityId,"Retired for the integration check.");
+        assertThrows(IllegalArgumentException.class,()->defects.create(orgA,"severity-reporter",new CreateDefectRequest(tail,"CABIN","SEAT",area,component,condition,"FWD CABIN",14,"14A",null,"Inactive severity","Inactive tenant severity must be rejected.","CABIN_PRIORITY")));
+        assertEquals("Cabin priority",defects.get(orgA,defect.id()).severityName(),"Soft-deactivation must not erase the historical human-readable severity.");
+        configuration.activate(orgA,"severity-admin","severities",severityId,"Re-enabled for the integration check.");
+        assertEquals(3,jdbc.queryForObject("SELECT count(*) FROM defect_events_dtl WHERE operator_id=? AND entity_type='SEVERITIES' AND entity_id=?",Integer.class,orgA,UUID.fromString(severityId)));
+        assertThrows(RuntimeException.class,()->configuration.save(orgA,"severity-admin","severities",new SaveRequest(null,java.util.Map.of(
+            "code","CABIN_PRIORITY","name","Duplicate","description","Duplicate unique code check.","sortOrder","6"))));
+    }
+
+    @Test
+    @Transactional
+    @Rollback
+    void aircraftDefectListRouteAllowsAuthorizedAuditorAndKeepsTenantAndPermissionFailuresDistinct() throws Exception {
+        UUID org=createTenant("AIRCRAFT-HTTP"),other=createTenant("AIRCRAFT-HTTP-OTHER");
+        jdbc.update("INSERT INTO operator_roles_mst(operator_id,role_key,name,permissions,system_role) VALUES(?, 'AUDITOR','Test Auditor','VIEW|REPORT|AUDIT',false),(?, 'AUDIT_ONLY','Audit Only','AUDIT',false)",org,org);
+        addMember(org,"http-auditor","AUDITOR");addMember(org,"no-view","AUDIT_ONLY");
+        UUID area=jdbc.queryForObject("SELECT id FROM cabin_areas_mst WHERE operator_id=? AND code='CABIN'",UUID.class,org);
+        UUID component=jdbc.queryForObject("SELECT id FROM cabin_components_mst WHERE operator_id=? AND code='TRAY_TABLE'",UUID.class,org);
+        UUID condition=createCondition(org,component);String tail=jdbc.queryForObject("SELECT tail_number FROM aircraft_mst WHERE operator_id=?",String.class,org);
+        DefectView defect=defects.create(org,"http-auditor",new CreateDefectRequest(tail,"CABIN","SEAT",area,component,condition,"FWD CABIN",14,"14A",null,"Seat finding","Reported for HTTP route coverage.","LOW"));
+        DefectView anotherReport=defects.create(org,"another-reporter",new CreateDefectRequest(tail,"CABIN","SEAT",area,component,condition,"AFT CABIN",15,"15A",null,"Other seat finding","Must remain outside the report-only user's list.","LOW"));
+        UUID aircraft=jdbc.queryForObject("SELECT id FROM aircraft_mst WHERE operator_id=?",UUID.class,org);
+        UUID foreignAircraft=jdbc.queryForObject("SELECT id FROM aircraft_mst WHERE operator_id=?",UUID.class,other);
+        given(jwtDecoder.decode("auditor-token")).willReturn(testJwt("http-auditor",org));
+        given(jwtDecoder.decode("no-view-token")).willReturn(testJwt("no-view",org));
+        assertTrue(new com.ecabin.ledger.security.PermissionService(jdbc).permissionsFor(org,"AUDITOR").contains(com.ecabin.ledger.security.Permission.VIEW));
+        assertEquals("AUDITOR",users.require(new JwtAuthenticationToken(testJwt("http-auditor",org))).role());
+        assertTrue(resolvedPermissions.permissionsFor(org,"AUDITOR").contains(com.ecabin.ledger.security.Permission.VIEW));
+        mockMvc.perform(get("/api/v1/me").header("Authorization","Bearer auditor-token")).andExpect(status().isOk());
+
+        mockMvc.perform(get("/api/v1/aircraft/{id}/defects",aircraft).header("Authorization","Bearer auditor-token"))
+            .andExpect(status().isOk()).andExpect(content().string(containsString(defect.reference()))).andExpect(content().string(not(containsString(anotherReport.reference()))));
+        mockMvc.perform(get("/api/v1/aircraft/{id}/defects",foreignAircraft).header("Authorization","Bearer auditor-token"))
+            .andExpect(status().isNotFound());
+        mockMvc.perform(get("/api/v1/aircraft/{id}/defects",aircraft).header("Authorization","Bearer no-view-token"))
+            .andExpect(status().isForbidden());
+        mockMvc.perform(get("/api/v1/aircraft/{id}/defects",aircraft)).andExpect(status().isUnauthorized());
+
+        var form=forms.create(org,"http-admin",new CreateFormRequest("HTTP_REPORT_"+UUID.randomUUID().toString().substring(0,8).toUpperCase(),"Local observation form",area));
+        var draft=forms.saveDraft(org,"http-admin",form.id(),form.draftVersionId(),reportConfiguration());
+        var published=forms.publish(org,"http-admin",form.id(),draft.id());
+        mockMvc.perform(get("/api/v1/areas/{areaId}/forms",area).header("Authorization","Bearer auditor-token"))
+            .andExpect(status().isOk()).andExpect(content().string(containsString(form.id().toString()))).andExpect(content().string(containsString(published.id().toString())));
+        mockMvc.perform(get("/api/v1/forms/{formId}/versions/{versionId}/definition",form.id(),published.id()).header("Authorization","Bearer auditor-token"))
+            .andExpect(status().isOk()).andExpect(content().string(containsString("\"name\":\"Local observation form\""))).andExpect(content().string(containsString("\"label\":\"Location\""))).andExpect(content().string(containsString("\"type\":\"TEXT\"")));
+        var reportAnswers=reportAnswers(org,component,condition,"FWD CABIN / ROW 16","API report","Defect created through the authenticated report API.");
+        CreateDefectRequest reportRequest=new CreateDefectRequest(tail,"CABIN","SEAT",area,component,condition,"FWD CABIN / ROW 16 / SEAT 16A",null,null,null,"API report","Defect created through the authenticated report API.","MEDIUM",aircraft,form.id(),published.id(),reportAnswers);
+        var reportResponse=mockMvc.perform(post("/api/v1/defects").header("Authorization","Bearer auditor-token").contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(reportRequest))).andExpect(status().isCreated()).andReturn();
+        DefectView apiCreated=objectMapper.readValue(reportResponse.getResponse().getContentAsString(),DefectView.class);
+        var submittedAnswers=new java.util.HashMap<String,Object>(reportAnswers);
+        var submittedForm=new SubmitFormRequest(form.id(),published.id(),com.ecabin.ledger.api.FormModels.FormPurpose.DEFECT_REPORT,submittedAnswers);
+        mockMvc.perform(post("/api/v1/defects/{id}/form-submissions",apiCreated.id()).header("Authorization","Bearer auditor-token").contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(submittedForm))).andExpect(status().isCreated());
+        assertEquals(1,forms.submissions(org,apiCreated.id()).size());
+        var wrongRegistration=new CreateDefectRequest("N999ZZ","CABIN","SEAT",area,component,condition,"FWD CABIN / ROW 17 / SEAT 17A",null,null,null,"Wrong aircraft","Registration cannot replace the selected aircraft.","MEDIUM",aircraft,form.id(),published.id(),reportAnswers(org,component,condition,"FWD CABIN / ROW 17 / SEAT 17A","Wrong aircraft","Registration cannot replace the selected aircraft."));
+        mockMvc.perform(post("/api/v1/defects").header("Authorization","Bearer auditor-token").contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(wrongRegistration))).andExpect(status().isBadRequest());
+        var foreignAircraftReport=new CreateDefectRequest(tail,"CABIN","SEAT",area,component,condition,"FWD CABIN / ROW 18 / SEAT 18A",null,null,null,"Foreign aircraft","Aircraft identifiers remain tenant-scoped.","MEDIUM",foreignAircraft,form.id(),published.id(),reportAnswers(org,component,condition,"FWD CABIN / ROW 18 / SEAT 18A","Foreign aircraft","Aircraft identifiers remain tenant-scoped."));
+        mockMvc.perform(post("/api/v1/defects").header("Authorization","Bearer auditor-token").contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(foreignAircraftReport))).andExpect(status().isNotFound());
+        UUID otherArea=jdbc.queryForObject("SELECT id FROM cabin_areas_mst WHERE operator_id=? AND code='GALLEY'",UUID.class,org);
+        var galleyForm=forms.create(org,"http-admin",new CreateFormRequest("HTTP_GALLEY_"+UUID.randomUUID().toString().substring(0,8).toUpperCase(),"Galley observation form",otherArea));
+        var galleyDraft=forms.saveDraft(org,"http-admin",galleyForm.id(),galleyForm.draftVersionId(),reportConfiguration());
+        var galleyPublished=forms.publish(org,"http-admin",galleyForm.id(),galleyDraft.id());
+        var wrongFormArea=new CreateDefectRequest(tail,"CABIN","SEAT",area,component,condition,"FWD CABIN",19,"19A",null,"Wrong form mapping","A form published for another area cannot be selected.","MEDIUM",aircraft,galleyForm.id(),galleyPublished.id());
+        mockMvc.perform(post("/api/v1/defects").header("Authorization","Bearer auditor-token").contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(wrongFormArea))).andExpect(status().isBadRequest());
+    }
+
+    private Jwt testJwt(String subject,UUID org){return Jwt.withTokenValue("mocked").header("alg","RS256").subject(subject).claim("operator_id",org.toString()).issuedAt(Instant.now()).expiresAt(Instant.now().plusSeconds(300)).build();}
+
+    @Test
+    @Transactional
+    @Rollback
+    void auditorReportReviewerDecisionAndDeferredMaintenanceAssignmentPreserveWorkflow() {
+        UUID org=createTenant("REVIEW-FLOW");
+        jdbc.update("INSERT INTO operator_roles_mst(operator_id,role_key,name,permissions,system_role) VALUES(?, 'AUDITOR','Test Auditor','VIEW|REPORT|AUDIT',false),(?, 'REVIEWER','Test Reviewer','VIEW|REVIEW',false)",org,org);
+        addMember(org,"auditor.test@ecabin.local","AUDITOR");addMember(org,"reviewer.test@ecabin.local","REVIEWER");addMember(org,"maintenance.test@ecabin.local","MAINTENANCE_TECHNICIAN");addMember(org,"inspector.test@ecabin.local","INSPECTOR");
+        jdbc.update("INSERT INTO maintenance_teams_mst(operator_id,name,team_type) VALUES(?, 'Cabin Review','REVIEWER'),(?, 'Cabin Maintenance','MAINTENANCE')",org,org);
+        jdbc.update("INSERT INTO operator_membership_teams_mst(operator_id,external_user_id,team_name) VALUES(?,?,?),(?,?,?)",org,"reviewer.test@ecabin.local","Cabin Review",org,"maintenance.test@ecabin.local","Cabin Maintenance");
+        UUID reviewerTeam=jdbc.queryForObject("SELECT id FROM maintenance_teams_mst WHERE operator_id=? AND name='Cabin Review'",UUID.class,org);
+        jdbc.update("UPDATE operators_mst SET default_reviewer_team_id=? WHERE id=?",reviewerTeam,org);
+        UUID area=UUID.randomUUID();jdbc.update("INSERT INTO cabin_areas_mst(id,operator_id,code,name) VALUES(?,?,?,'Cabin')",area,org,"FLOW_"+area.toString().substring(0,8));
+        UUID component=UUID.randomUUID();jdbc.update("INSERT INTO cabin_components_mst(id,operator_id,area_id,code,name) VALUES(?,?,?,?,?)",component,org,area,"FLOW_CMP_"+component.toString().substring(0,8),"Seat assembly");
+        UUID condition=createCondition(org,component);String tail=jdbc.queryForObject("SELECT tail_number FROM aircraft_mst WHERE operator_id=?",String.class,org);
+        UUID reportRetryKey=UUID.randomUUID();
+        CreateDefectRequest reportPayload=new CreateDefectRequest(tail,"CABIN","SEAT",area,component,condition,"FWD CABIN",14,"14A",null,"Seat finding","Reported by local Auditor.","HIGH");
+        DefectView approved=defects.create(org,"auditor.test@ecabin.local",reportPayload,reportRetryKey);
+        assertEquals(approved.id(),defects.create(org,"auditor.test@ecabin.local",reportPayload,reportRetryKey).id(),"A timed-out report retry must return the existing defect.");
+        assertThrows(ResponseStatusException.class,()->defects.create(org,"reviewer.test@ecabin.local",reportPayload,reportRetryKey),"A retry key cannot be reused by another actor.");
+        assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM defects_dtl WHERE operator_id=? AND report_idempotency_key=?",Integer.class,org,reportRetryKey));
+        assertEquals(reviewerTeam,jdbc.queryForObject("SELECT reviewer_team_id FROM defects_dtl WHERE operator_id=? AND id=?",UUID.class,org,approved.id()));
+        assertTrue(reviewerQueue.queue(org,"reviewer.test@ecabin.local",false,0,25,"ALL",null,"reportedAt","DESC").items().stream().anyMatch(row->row.id().equals(approved.id())));
+        assertThrows(org.springframework.web.server.ResponseStatusException.class,()->reviewerQueue.decide(org,approved.id(),"maintenance.test@ecabin.local",new ReviewerDecisionRequest("APPROVE","should be denied")));
+        var approval=reviewerQueue.decide(org,approved.id(),"reviewer.test@ecabin.local",new ReviewerDecisionRequest("APPROVE","Inspection required before repair."));
+        assertEquals("INSPECTION_REQUIRED",approval.status());
+        assertEquals(0,jdbc.queryForObject("SELECT count(*) FROM corrective_actions_dtl WHERE operator_id=? AND defect_id=? AND isactive=1",Integer.class,org,approved.id()));
+        assertEquals(0,jdbc.queryForObject("SELECT count(*) FROM defects_dtl WHERE operator_id=? AND id=? AND assigned_team IS NOT NULL",Integer.class,org,approved.id()),"Maintenance assignment fields must remain empty until inspection passes.");
+        assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM defect_events_dtl WHERE operator_id=? AND defect_id=? AND event_type='REVIEW_APPROVED' AND actor_id='reviewer.test@ecabin.local' AND note='Inspection required before repair.'",Integer.class,org,approved.id()));
+        assertThrows(org.springframework.web.server.ResponseStatusException.class,()->reviewerQueue.decide(org,approved.id(),"reviewer.test@ecabin.local",new ReviewerDecisionRequest("REJECT","conflicting retry")));
+        defects.transition(org,approved.id(),"inspector.test@ecabin.local",new TransitionRequest("INSPECTION_IN_PROGRESS","Inspection started.",null,null));
+        var inspection=workflow.completeInspection(org,approved.id(),"inspector.test@ecabin.local",new InspectionRequest("PASS","Seat inspected.",null));
+        assertEquals("ACTION_ASSIGNED",inspection.status());
+        assertEquals(1,defects.maintenanceWorkQueue(org,"maintenance.test@ecabin.local",0,25,null,null,"assignmentDate","DESC").totalElements());
+        assertEquals("Cabin Maintenance",jdbc.queryForObject("SELECT assigned_team FROM corrective_actions_dtl WHERE operator_id=? AND defect_id=? AND isactive=1",String.class,org,approved.id()));
+        assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM notifications_dtl WHERE operator_id=? AND defect_id=? AND recipient_user_id='maintenance.test@ecabin.local' AND notification_type='ACTION_ASSIGNED'",Integer.class,org,approved.id()));
+
+        DefectView rejected=defects.create(org,"auditor.test@ecabin.local",new CreateDefectRequest(tail,"CABIN","SEAT",area,component,condition,"AFT CABIN",15,"15A",null,"Duplicate finding","Rejected by review.","LOW"));
+        var rejection=reviewerQueue.decide(org,rejected.id(),"reviewer.test@ecabin.local",new ReviewerDecisionRequest("REJECT","Not a defect; duplicate report."));
+        assertEquals("REJECTED",rejection.status());
+        assertTrue(reviewerQueue.queue(org,"reviewer.test@ecabin.local",false,0,25,"ALL",null,"reportedAt","DESC").items().stream().noneMatch(row->row.id().equals(rejected.id())));
+        assertEquals(0,jdbc.queryForObject("SELECT count(*) FROM corrective_actions_dtl WHERE operator_id=? AND defect_id=? AND isactive=1",Integer.class,org,rejected.id()));
+        assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM defect_events_dtl WHERE operator_id=? AND defect_id=? AND event_type='REVIEW_REJECTED' AND note='Not a defect; duplicate report.'",Integer.class,org,rejected.id()));
+        assertThrows(org.springframework.web.server.ResponseStatusException.class,()->reviewerQueue.decide(org,rejected.id(),"reviewer.test@ecabin.local",new ReviewerDecisionRequest("APPROVE","must conflict")));
+    }
 
     @Test
     @Transactional
@@ -77,10 +308,15 @@ class LocalPostgresOperationalIntegrationTest {
         assertEquals(orgA, principal.organizationId());
         assertEquals(AppRole.SUPERVISOR.name(), principal.role());
 
-        String tailNumber = jdbc.queryForObject("SELECT tail_number FROM aircraft WHERE operator_id=?", String.class, orgA);
+        String tailNumber = jdbc.queryForObject("SELECT tail_number FROM aircraft_mst WHERE operator_id=?", String.class, orgA);
+        UUID areaId = jdbc.queryForObject("SELECT id FROM cabin_areas_mst WHERE operator_id=? AND code='CABIN'", UUID.class, orgA);
+        UUID componentId = jdbc.queryForObject("SELECT id FROM cabin_components_mst WHERE operator_id=? AND code='TRAY_TABLE'", UUID.class, orgA);
+        UUID conditionId = createCondition(orgA, componentId);
         DefectView defect = defects.create(orgA, principal.externalUserId(), new CreateDefectRequest(
-            tailNumber, "CABIN", "SEAT", "FWD CABIN",
-            14, "14A", "Seat", "Seat cover torn", "Cover torn along seam", "MEDIUM"));
+            tailNumber, "CABIN", "SEAT", areaId, componentId, conditionId, "FWD CABIN",
+            14, "14A", null, "Seat cover torn", "Cover torn along seam", "MEDIUM"));
+        UUID entryAreaId = jdbc.queryForObject("SELECT id FROM cabin_areas_mst WHERE operator_id=? AND code='ENTRY_AREA'",UUID.class,orgA);
+        assertThrows(ResponseStatusException.class, () -> configuration.save(orgA,"reporter-a","components",new SaveRequest(componentId.toString(),java.util.Map.of("code","TRAY_TABLE","name","Tray Table","areaId",entryAreaId.toString()))));
 
         assertEquals(1, defects.list(orgA, "reporter-a", null, null, defect.reference(), "DEFECT_ID", null, null, null, false, null, 25).items().size());
         assertEquals(1, defects.list(orgA, "reporter-a", null, null, defect.tailNumber(), "AIRCRAFT_REGISTRATION", "A320-200", null, null, false, null, 25).items().size());
@@ -104,9 +340,114 @@ class LocalPostgresOperationalIntegrationTest {
         defects.transition(orgA, defect.id(), "reporter-a", new TransitionRequest("APPROVAL_REQUIRED", "Quality verified", null, null));
         workflow.approve(orgA, defect.id(), "approver-c", new ApprovalRequest("APPROVED", "Closure reviewed", "CLOSURE-DEMO-001"));
         assertEquals("CLOSED", defects.get(orgA, defect.id()).status());
-        assertEquals(11, defects.events(orgA, defect.id()).size());
-        jdbc.update("UPDATE defects SET isactive=2 WHERE operator_id=? AND id=?", orgA, defect.id());
+        var defectEvents = defects.events(orgA, defect.id());
+        assertEquals(12, defectEvents.size());
+        assertTrue(defectEvents.stream().anyMatch(event -> "REVIEW_ROUTING_FAILED".equals(event.eventType())));
+        jdbc.update("UPDATE defects_dtl SET isactive=2 WHERE operator_id=? AND id=?", orgA, defect.id());
         assertThrows(ResponseStatusException.class, () -> defects.get(orgA, defect.id()));
+    }
+
+    @Test
+    @Transactional
+    @Rollback
+    void sharedTeamQueueAndReassignmentFollowCurrentActiveMembership() {
+        UUID org = createTenant("TEAM-QUEUE");
+        UUID otherOrg = createTenant("TEAM-QUEUE-OTHER");
+        addMember(org, "team-reviewer", "SUPERVISOR");
+        addMember(org, "team-inspector", "INSPECTOR");
+        addMember(org, "team-tech-a", "MAINTENANCE_TECHNICIAN");
+        addMember(org, "team-tech-b", "MAINTENANCE_TECHNICIAN");
+        addMember(org, "team-multi", "MAINTENANCE_TECHNICIAN");
+        addMember(org, "team-outsider", "MAINTENANCE_TECHNICIAN");
+        String teamA = "Cabin Team A";
+        String teamB = "Cabin Team B";
+        jdbc.update("INSERT INTO maintenance_teams_mst(operator_id,name) VALUES(?,?),(?,?)", org, teamA, org, teamB);
+        jdbc.update("INSERT INTO operator_membership_teams_mst(operator_id,external_user_id,team_name) VALUES(?,?,?),(?,?,?),(?,?,?),(?,?,?)",
+            org, "team-tech-a", teamA, org, "team-multi", teamA, org, "team-tech-b", teamB, org, "team-multi", teamB);
+
+        UUID area = UUID.randomUUID();
+        jdbc.update("INSERT INTO cabin_areas_mst(id,operator_id,code,name) VALUES(?,?,?,'Forward cabin')", area, org, "TEAM_AREA_" + area.toString().substring(0, 8));
+        UUID component = UUID.randomUUID();
+        jdbc.update("INSERT INTO cabin_components_mst(id,operator_id,area_id,code,name) VALUES(?,?,?,?,?)", component, org, area, "TEAM_CMP_" + component.toString().substring(0, 8), "Seat assembly");
+        UUID condition = createCondition(org, component);
+        String tail = jdbc.queryForObject("SELECT tail_number FROM aircraft_mst WHERE operator_id=?", String.class, org);
+        DefectView defect = defects.create(org, "team-reviewer", new CreateDefectRequest(tail, "CABIN", "SEAT", area, component, condition, "FWD CABIN", 14, "14A", null, "Seat finding", "Team assignment test finding.", "MEDIUM"));
+        defects.transition(org, defect.id(), "team-reviewer", new TransitionRequest("UNDER_REVIEW", "Reviewed.", null, null));
+        defects.transition(org, defect.id(), "team-reviewer", new TransitionRequest("INSPECTION_REQUIRED", "Inspection requested.", null, null));
+        defects.transition(org, defect.id(), "team-inspector", new TransitionRequest("INSPECTION_IN_PROGRESS", "Inspection started.", null, null));
+        workflow.completeInspection(org, defect.id(), "team-inspector", new InspectionRequest("PASS", "Condition inspected.", null));
+        var assigned = workflow.assignAction(org, defect.id(), "team-reviewer", new CorrectiveActionRequest(null, teamA, "Replace seat cushion.", "MEDIUM", Instant.now().plusSeconds(86400)));
+
+        assertEquals(1, defects.maintenanceWorkQueue(org, "team-tech-a", 0, 10, null, null, null, null).totalElements());
+        assertEquals(1, defects.maintenanceWorkQueue(org, "team-multi", 0, 10, null, null, null, null).items().size(), "membership in two teams must not duplicate the current assignment");
+        assertEquals(0, defects.maintenanceWorkQueue(org, "team-outsider", 0, 10, null, null, null, null).totalElements());
+        assertEquals(0, defects.maintenanceWorkQueue(otherOrg, "team-tech-a", 0, 10, null, null, null, null).totalElements());
+        assertEquals(defect.id(), defects.getForMaintenanceMember(org, "team-tech-a", defect.id()).id());
+        assertThrows(ResponseStatusException.class, () -> defects.getForMaintenanceMember(org, "team-outsider", defect.id()));
+        UUID aircraftId = jdbc.queryForObject("SELECT id FROM aircraft_mst WHERE operator_id=? AND tail_number=?", UUID.class, org, tail);
+        assertEquals(1, defects.aircraftDefects(org, "team-tech-a", aircraftId, true, false, 0, 10, null, null, "reportedAt", "DESC").totalElements());
+        assertEquals(0, defects.aircraftDefects(org, "team-outsider", aircraftId, true, false, 0, 10, null, null, "reportedAt", "DESC").totalElements());
+        assertEquals(1, defects.fleetDefectSummary(org, "team-tech-a", true, false).inMaintenance());
+        assertEquals(1, jdbc.queryForObject("SELECT count(*) FROM notifications_dtl WHERE operator_id=? AND defect_id=? AND recipient_user_id='team-multi' AND notification_type='ACTION_ASSIGNED'", Integer.class, org, defect.id()));
+
+        var reassigned = workflow.reassignAction(org, defect.id(), assigned.id(), "team-reviewer", new CorrectiveActionReassignmentRequest(teamB, null, "Specialist team requested."));
+        assertEquals(0, defects.maintenanceWorkQueue(org, "team-tech-a", 0, 10, null, null, null, null).totalElements());
+        assertEquals(1, defects.maintenanceWorkQueue(org, "team-tech-b", 0, 10, null, null, null, null).totalElements());
+        assertEquals(1, defects.maintenanceWorkQueue(org, "team-multi", 0, 10, null, null, null, null).totalElements());
+        assertEquals(2, jdbc.queryForObject("SELECT count(*) FROM notifications_dtl WHERE operator_id=? AND defect_id=? AND recipient_user_id='team-multi' AND notification_type='ACTION_ASSIGNED'", Integer.class, org, defect.id()), "one in-app notification is created for the member per assignment, not per duplicate team row");
+        assertEquals("CANCELLED", jdbc.queryForObject("SELECT status FROM corrective_actions_dtl WHERE operator_id=? AND id=?", String.class, org, assigned.id()));
+        assertEquals(1, jdbc.queryForObject("SELECT count(*) FROM defect_events_dtl WHERE operator_id=? AND defect_id=? AND event_type='ACTION_REASSIGNED' AND previous_state->>'team'=? AND new_state->>'team'=?", Integer.class, org, defect.id(), teamA, teamB));
+        assertThrows(IllegalStateException.class, () -> workflow.startAction(org, defect.id(), assigned.id(), "team-tech-a"));
+
+        jdbc.update("UPDATE operator_membership_teams_mst SET isactive=2 WHERE operator_id=? AND external_user_id='team-tech-b' AND team_name=?", org, teamB);
+        assertEquals(0, defects.maintenanceWorkQueue(org, "team-tech-b", 0, 10, null, null, null, null).totalElements());
+        assertThrows(ResponseStatusException.class, () -> defects.getForMaintenanceMember(org, "team-tech-b", defect.id()));
+        jdbc.update("UPDATE operator_membership_teams_mst SET isactive=1 WHERE operator_id=? AND external_user_id='team-tech-b' AND team_name=?", org, teamB);
+        jdbc.update("UPDATE operator_memberships_mst SET isactive=2 WHERE operator_id=? AND external_user_id='team-tech-b'", org);
+        assertEquals(0, defects.maintenanceWorkQueue(org, "team-tech-b", 0, 10, null, null, null, null).totalElements());
+        assertThrows(ResponseStatusException.class, () -> defects.getForMaintenanceMember(org, "team-tech-b", defect.id()));
+        jdbc.update("UPDATE operator_memberships_mst SET isactive=1 WHERE operator_id=? AND external_user_id='team-tech-b'", org);
+        workflow.startAction(org, defect.id(), reassigned.id(), "team-tech-b");
+        workflow.completeAction(org, defect.id(), reassigned.id(), "team-tech-b", new ActionCompletionRequest("Replacement complete."));
+        assertEquals(0, defects.maintenanceWorkQueue(org, "team-tech-b", 0, 10, null, null, null, null).totalElements());
+    }
+
+    @Test
+    @Transactional
+    @Rollback
+    void versionsFormsImmutablyAndSubmitsTenantBoundAnswersAgainstPublishedVersion() {
+        UUID orgA=createTenant("FORM_A"),orgB=createTenant("FORM_B");
+        UUID area=jdbc.queryForObject("SELECT id FROM cabin_areas_mst WHERE operator_id=? AND code='CABIN' AND isactive=1",UUID.class,orgA);
+        UUID component=UUID.randomUUID();jdbc.update("INSERT INTO cabin_components_mst(id,operator_id,area_id,code,name) VALUES(?,?,?,?,?)",component,orgA,area,"CMP_"+component.toString().substring(0,8),"Seat assembly");
+        UUID condition=createCondition(orgA,component);
+        String tail=jdbc.queryForObject("SELECT tail_number FROM aircraft_mst WHERE operator_id=?",String.class,orgA);
+        DefectView defect=defects.create(orgA,"form-reporter",new CreateDefectRequest(tail,"CABIN","SEAT",area,component,condition,"FWD CABIN / ROW 14 / SEAT 14A",null,null,null,"Test title","Test defect description","MEDIUM"));
+
+        var created=forms.create(orgA,"form-admin",new CreateFormRequest("CABIN_CHECK_"+UUID.randomUUID().toString().substring(0,8).toUpperCase(),"Cabin check",area));
+        var definition=reportConfiguration();
+        var draft=forms.saveDraft(orgA,"form-admin",created.id(),created.draftVersionId(),definition);
+        var published=forms.publish(orgA,"form-admin",created.id(),draft.id());
+        assertEquals("PUBLISHED",published.status());
+        assertThrows(org.springframework.web.server.ResponseStatusException.class,()->forms.saveDraft(orgA,"form-admin",created.id(),published.id(),definition));
+        assertEquals(1,forms.publishedForArea(orgA,area).stream().filter(form->form.id().equals(created.id())&&form.purpose()==com.ecabin.ledger.api.FormModels.FormPurpose.DEFECT_REPORT&&form.workflowStage()==com.ecabin.ledger.api.FormModels.WorkflowStage.INITIAL_REPORT).count());
+        var inspectionForm=forms.create(orgA,"form-admin",new CreateFormRequest("CABIN_INSPECT_"+UUID.randomUUID().toString().substring(0,8).toUpperCase(),"Cabin inspection",area,com.ecabin.ledger.api.FormModels.FormPurpose.INSPECTION,com.ecabin.ledger.api.FormModels.WorkflowStage.INSPECTION_REQUIRED));
+        var inspectionDraft=forms.saveDraft(orgA,"form-admin",inspectionForm.id(),inspectionForm.draftVersionId(),new FormConfiguration(List.of(
+            new FieldDefinition("evidence","Inspection evidence",FieldType.FILE_UPLOAD,null,false,0,null,null,null,null,null,
+                new com.ecabin.ledger.api.FormModels.FileRules(List.of("pdf"),List.of("application/pdf"),5L*1024*1024,0,3),DefectFieldBinding.EVIDENCE_ATTACHMENTS))));
+        forms.publish(orgA,"form-admin",inspectionForm.id(),inspectionDraft.id());
+        assertEquals(inspectionForm.id(),forms.publishedForArea(orgA,area,com.ecabin.ledger.api.FormModels.FormPurpose.INSPECTION,com.ecabin.ledger.api.FormModels.WorkflowStage.INSPECTION_REQUIRED).get(0).id());
+        assertThrows(IllegalArgumentException.class,()->forms.publishedForDefect(orgA,defect.id(),com.ecabin.ledger.api.FormModels.FormPurpose.INSPECTION),"A form mapping cannot override a defect's actual REPORTED status.");
+        var result=forms.submit(orgA,"form-reporter",defect.id(),new SubmitFormRequest(created.id(),published.id(),reportAnswers(orgA,component,condition,"FWD CABIN / ROW 14 / SEAT 14A","Test title","Test defect description")));
+        assertEquals(published.id(),result.versionId());
+        assertEquals(com.ecabin.ledger.api.FormModels.FormPurpose.DEFECT_REPORT,result.purpose());
+        assertEquals(com.ecabin.ledger.api.FormModels.WorkflowStage.INITIAL_REPORT,result.workflowStage());
+        assertEquals(created.id(),result.formId());
+        assertEquals(published.id(),result.versionId());
+        assertEquals("FWD CABIN / ROW 14 / SEAT 14A",result.snapshot().zone());
+        assertEquals(1,forms.submissions(orgA,defect.id()).size());
+        assertThrows(ResponseStatusException.class,()->forms.submissions(orgB,defect.id()));
+        assertThrows(IllegalArgumentException.class,()->forms.submit(orgA,"form-reporter",defect.id(),new SubmitFormRequest(created.id(),published.id(),java.util.Map.of("finding","OK","component",component.toString(),"condition",UUID.randomUUID().toString()))));
+        assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM defect_events_dtl WHERE operator_id=? AND entity_type='FORM_SUBMISSION' AND entity_id=?",Integer.class,orgA,result.id()));
     }
 
     @Test
@@ -129,27 +470,202 @@ class LocalPostgresOperationalIntegrationTest {
         var category = configuration.save(orgA, "config-admin", "defect-categories", new SaveRequest(null, java.util.Map.of(
             "code", "CABIN_FIXTURE", "name", "Cabin fixture", "description", "Demo category")));
         String categoryId = category.get("id").toString();
-        configuration.deactivate(orgA, "config-admin", "defect-categories", categoryId, "Retired in integration fixture");
+        var categoryAuditId = UUID.fromString(categoryId);
+        assertThrows(IllegalArgumentException.class, () -> configuration.save(orgA, "config-admin", "defect-categories", new SaveRequest(categoryId,
+            java.util.Map.of("code","CABIN_FIXTURE","name","Cabin fixture","created_by","spoofed-actor"))));
+        configuration.deactivate(orgA, "config-deactivator", "defect-categories", categoryId, "Retired in integration fixture");
         assertEquals(0, configuration.list(orgA, "defect-categories", false).stream().filter(row -> categoryId.equals(row.get("id").toString())).count());
         assertEquals(1, configuration.list(orgA, "defect-categories", true).stream().filter(row -> categoryId.equals(row.get("id").toString())).count());
-        var categoryAuditId = UUID.fromString(categoryId);
-        assertEquals(2, jdbc.queryForObject("SELECT count(*) FROM defect_events WHERE operator_id=? AND entity_type='DEFECT_CATEGORIES' AND entity_id=?", Integer.class, orgA, categoryAuditId));
+        var metadata = jdbc.queryForMap("SELECT created_by,created_at,updated_by,updated_at FROM defect_categories_mst WHERE operator_id=? AND id=?", orgA, categoryAuditId);
+        assertEquals("config-admin", metadata.get("created_by"));
+        assertEquals("config-deactivator", metadata.get("updated_by"));
+        assertNotNull(metadata.get("created_at"));
+        assertNotNull(metadata.get("updated_at"));
+        assertEquals(2, jdbc.queryForObject("SELECT count(*) FROM defect_events_dtl WHERE operator_id=? AND entity_type='DEFECT_CATEGORIES' AND entity_id=?", Integer.class, orgA, categoryAuditId));
+    }
+
+    @Test
+    @Transactional
+    @Rollback
+    void userTeamMembershipsUseActiveTenantTeamIdsAndPreserveMembershipHistory() {
+        UUID orgA = createTenant("USER-TEAM-A");
+        UUID orgB = createTenant("USER-TEAM-B");
+        addMember(orgA, "team-admin", "ADMIN");
+        var maintenance = configuration.save(orgA, "team-admin", "maintenance-teams", new SaveRequest(null,
+            java.util.Map.of("name", "Cabin Maintenance", "teamType", "MAINTENANCE")));
+        var reviewer = configuration.save(orgA, "team-admin", "maintenance-teams", new SaveRequest(null,
+            java.util.Map.of("name", "Reviewer Team", "teamType", "REVIEWER")));
+        var foreignTeam = configuration.save(orgB, "other-admin", "maintenance-teams", new SaveRequest(null,
+            java.util.Map.of("name", "Other Organization Team", "teamType", "MAINTENANCE")));
+        String maintenanceId = String.valueOf(maintenance.get("id"));
+        String reviewerId = String.valueOf(reviewer.get("id"));
+        String foreignTeamId = String.valueOf(foreignTeam.get("id"));
+        var inactiveTeam = configuration.save(orgA, "team-admin", "maintenance-teams", new SaveRequest(null,
+            java.util.Map.of("name", "Retired Team", "teamType", "MAINTENANCE")));
+        String inactiveTeamId = String.valueOf(inactiveTeam.get("id"));
+        configuration.deactivate(orgA, "team-admin", "maintenance-teams", inactiveTeamId, "No longer used in this test.");
+
+        var created = configuration.save(orgA, "team-admin", "users", new SaveRequest(null, java.util.Map.of(
+            "externalUserId", "multi-team-user", "displayName", "Multi Team User", "role", "INSPECTOR",
+            "teamIds", maintenanceId + "|" + reviewerId)));
+        assertEquals("INSPECTOR", created.get("role"), "team membership must not grant or replace an application role");
+        assertEquals(java.util.Set.of(maintenanceId, reviewerId), java.util.Set.of(String.valueOf(created.get("teamIds")).split("\\|")));
+        assertEquals("Cabin Maintenance|Reviewer Team", created.get("teamNames"));
+        assertEquals(2, jdbc.queryForObject("SELECT count(*) FROM operator_membership_teams_mst WHERE operator_id=? AND external_user_id=? AND isactive=1", Integer.class, orgA, "multi-team-user"));
+        assertEquals(2, jdbc.queryForObject("SELECT count(*) FROM defect_events_dtl WHERE operator_id=? AND entity_type='TEAM_MEMBERSHIP' AND event_type='TEAM_MEMBERSHIP_ADDED'", Integer.class, orgA));
+
+        assertThrows(IllegalArgumentException.class, () -> configuration.save(orgA, "team-admin", "users", new SaveRequest("multi-team-user", java.util.Map.of(
+            "displayName", "Multi Team User", "role", "INSPECTOR", "teamIds", foreignTeamId))));
+        assertThrows(IllegalArgumentException.class, () -> configuration.save(orgA, "team-admin", "users", new SaveRequest("multi-team-user", java.util.Map.of(
+            "displayName", "Multi Team User", "role", "INSPECTOR", "teamIds", UUID.randomUUID().toString()))));
+        assertThrows(IllegalArgumentException.class, () -> configuration.save(orgA, "team-admin", "users", new SaveRequest("multi-team-user", java.util.Map.of(
+            "displayName", "Multi Team User", "role", "INSPECTOR", "teamIds", inactiveTeamId))));
+
+        var updated = configuration.save(orgA, "team-admin", "users", new SaveRequest("multi-team-user", java.util.Map.of(
+            "displayName", "Multi Team User", "role", "INSPECTOR", "teamIds", reviewerId)));
+        assertEquals(reviewerId, updated.get("teamIds"));
+        assertEquals(2, jdbc.queryForObject("SELECT isactive FROM operator_membership_teams_mst WHERE operator_id=? AND external_user_id=? AND team_name='Cabin Maintenance'", Integer.class, orgA, "multi-team-user"));
+        assertEquals(1, jdbc.queryForObject("SELECT isactive FROM operator_membership_teams_mst WHERE operator_id=? AND external_user_id=? AND team_name='Reviewer Team'", Integer.class, orgA, "multi-team-user"));
+        assertEquals(1, jdbc.queryForObject("SELECT count(*) FROM defect_events_dtl WHERE operator_id=? AND entity_type='TEAM_MEMBERSHIP' AND event_type='TEAM_MEMBERSHIP_REMOVED'", Integer.class, orgA));
+        assertEquals(2, jdbc.queryForObject("SELECT count(*) FROM defect_events_dtl WHERE operator_id=? AND entity_type='TEAM_MEMBERSHIP' AND event_type='TEAM_MEMBERSHIP_ADDED'", Integer.class, orgA), "unchanged memberships should not be re-added");
+
+        configuration.save(orgA, "team-admin", "users", new SaveRequest("multi-team-user", java.util.Map.of(
+            "displayName", "Multi Team User", "role", "INSPECTOR", "teamIds", "")));
+        assertEquals(0, jdbc.queryForObject("SELECT count(*) FROM operator_membership_teams_mst WHERE operator_id=? AND external_user_id=? AND isactive=1", Integer.class, orgA, "multi-team-user"));
+        assertEquals(2, jdbc.queryForObject("SELECT count(*) FROM defect_events_dtl WHERE operator_id=? AND entity_type='TEAM_MEMBERSHIP' AND event_type='TEAM_MEMBERSHIP_REMOVED'", Integer.class, orgA));
+    }
+
+    @Test
+    @Transactional
+    @Rollback
+    void componentsRequireAnActiveAreaFromTheSameTenantAndKeepAreaUseSafe() {
+        UUID orgA = createTenant("AREA-A");
+        UUID orgB = createTenant("AREA-B");
+        UUID cabinA = jdbc.queryForObject("SELECT id FROM cabin_areas_mst WHERE operator_id=? AND code='CABIN'", UUID.class, orgA);
+        UUID cabinB = jdbc.queryForObject("SELECT id FROM cabin_areas_mst WHERE operator_id=? AND code='CABIN'", UUID.class, orgB);
+        var activeAreaPage=configuration.table(orgA,"areas",0,25,"Cabin","ACTIVE",null,null,null,"name","ASC");
+        assertTrue(activeAreaPage.items().stream().anyMatch(row->cabinA.equals(row.get("id"))));
+        assertFalse(activeAreaPage.items().stream().anyMatch(row->cabinB.equals(row.get("id"))),"Area Master results must never cross organization boundaries.");
+        var extraArea=configuration.save(orgA,"admin-a","areas",new SaveRequest(null,java.util.Map.of("code","TABLE_TEST_AREA","name","Table test area","description","Area Master table regression fixture")));
+        assertEquals(1,configuration.table(orgA,"areas",0,25,"Table test area","ACTIVE",null,null,null,"name","ASC").totalElements());
+        configuration.deactivate(orgA,"admin-a","areas",String.valueOf(extraArea.get("id")),"Remove the unused table fixture");
+        assertEquals(0,configuration.table(orgA,"areas",0,25,"Table test area","ACTIVE",null,null,null,"name","ASC").totalElements());
+        assertEquals(1,configuration.table(orgA,"areas",0,25,"Table test area","INACTIVE",null,null,null,"name","ASC").totalElements());
+        var component = configuration.save(orgA, "admin-a", "components", new SaveRequest(null,
+            java.util.Map.of("code","SEAT_COVER_TEST","name","Seat Cover","areaId",cabinA.toString(),"description","Synthetic integration fixture")));
+        assertEquals(cabinA, component.get("areaId"));
+        assertThrows(ResponseStatusException.class, () -> configuration.deactivate(orgA,"admin-a","areas",cabinA.toString(),"Area is still in use"));
+        assertThrows(IllegalArgumentException.class, () -> configuration.save(orgA, "admin-a", "components", new SaveRequest(null,
+            java.util.Map.of("code","CROSS_TENANT_TEST","name","Cross Tenant","areaId",cabinB.toString()))));
+
+        UUID entryArea = jdbc.queryForObject("SELECT id FROM cabin_areas_mst WHERE operator_id=? AND code='ENTRY_AREA'", UUID.class, orgA);
+        UUID aircraftArea = jdbc.queryForObject("SELECT area_id FROM cabin_components_mst WHERE operator_id=? AND code='TRAY_TABLE'", UUID.class, orgA);
+        UUID aircraftId = jdbc.queryForObject("SELECT id FROM aircraft_mst WHERE operator_id=?", UUID.class, orgA);
+        String tail = jdbc.queryForObject("SELECT tail_number FROM aircraft_mst WHERE id=?", String.class, aircraftId);
+        UUID trayTableId = jdbc.queryForObject("SELECT id FROM cabin_components_mst WHERE operator_id=? AND code='TRAY_TABLE'",UUID.class,orgA);
+        UUID conditionId = createCondition(orgA, trayTableId);
+        var invalidDefect = new CreateDefectRequest(tail,"CABIN","SEAT",entryArea,trayTableId,conditionId,"FWD CABIN",14,"14A",null,"Invalid component area","Must be rejected","LOW");
+        assertNotEquals(entryArea, aircraftArea);
+        assertThrows(IllegalArgumentException.class, () -> defects.create(orgA,"reporter",invalidDefect));
+    }
+
+    @Test
+    @Transactional
+    @Rollback
+    void conditionMasterIsTenantScopedAndBoundToActiveComponents() {
+        UUID orgA = createTenant("CONDITION-A");
+        UUID orgB = createTenant("CONDITION-B");
+        UUID componentA = jdbc.queryForObject("SELECT id FROM cabin_components_mst WHERE operator_id=? AND code='TRAY_TABLE'", UUID.class, orgA);
+        UUID componentB = jdbc.queryForObject("SELECT id FROM cabin_components_mst WHERE operator_id=? AND code='TRAY_TABLE'", UUID.class, orgB);
+        var condition = configuration.save(orgA, "condition-admin", "defect-conditions", new SaveRequest(null, java.util.Map.of(
+            "code", "SURFACE_TEST", "name", "Surface damage", "description", "Synthetic fixture", "componentIds", componentA.toString())));
+        UUID conditionId = UUID.fromString(condition.get("id").toString());
+        assertEquals(1, configuration.conditionsForComponent(orgA, componentA).stream().filter(option -> option.id().equals(conditionId)).count());
+        assertEquals(0, configuration.conditionsForComponent(orgB, componentB).stream().filter(option -> option.code().equals("SURFACE_TEST")).count());
+        assertThrows(IllegalArgumentException.class, () -> configuration.save(orgB, "condition-admin", "defect-conditions", new SaveRequest(null, java.util.Map.of(
+            "code", "CROSS_TENANT", "name", "Must fail", "componentIds", componentA.toString()))));
+
+        UUID aircraftId = jdbc.queryForObject("SELECT id FROM aircraft_mst WHERE operator_id=?", UUID.class, orgA);
+        String tail = jdbc.queryForObject("SELECT tail_number FROM aircraft_mst WHERE id=?", String.class, aircraftId);
+        UUID area = jdbc.queryForObject("SELECT area_id FROM cabin_components_mst WHERE id=?", UUID.class, componentA);
+        var created = defects.create(orgA, "reporter", new CreateDefectRequest(tail, "CABIN", "SEAT", area, componentA, conditionId,
+            "FWD CABIN", 2, "2A", null, "Surface finding", "Synthetic fixture only", "LOW"));
+        assertEquals("Surface damage", created.conditionName());
+        assertThrows(IllegalArgumentException.class, () -> defects.create(orgA, "reporter", new CreateDefectRequest(tail, "CABIN", "SEAT", area,
+            componentA, UUID.randomUUID(), "FWD CABIN", 2, "2A", null, "Unknown condition", "Must fail", "LOW")));
+
+        String csv = "condition_code,condition_name,description,applicable_component_codes\r\nCSV_DAMAGE,Surface damage,Demo observation only,TRAY_TABLE\r\n";
+        var file = new MockMultipartFile("file", "conditions.csv", "text/csv", csv.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        var preview = imports.validate(orgA, "condition-admin", "defect-conditions", file);
+        assertEquals(1, preview.validRows());
+        assertEquals(1, imports.commit(orgA, "condition-admin", "defect-conditions", preview.importId()).created());
+        assertEquals(1, jdbc.queryForObject("SELECT count(*) FROM component_conditions_mst m JOIN defect_conditions_mst c ON c.operator_id=m.operator_id AND c.id=m.condition_id WHERE m.operator_id=? AND c.code='CSV_DAMAGE' AND m.component_id=? AND m.isactive=1", Integer.class, orgA, componentA));
+    }
+
+    @Test
+    @Transactional
+    @Rollback
+    void csvPreviewDoesNotWriteUntilConfirmationAndCommitIsIdempotentAndAudited() {
+        UUID operator = createTenant("IMPORT");
+        String csv = "area_code,area_name,description\r\n"+
+            "IMPORT_AREA,\"Entry, forward\",\"Text with \"\"quoted\"\" words\"\r\n"+
+            "IMPORT_AREA,Duplicate,Duplicate code in file\r\n"+
+            "CABIN,Existing,Already exists\r\n"+
+            "EXTRA,Unexpected,Too,Many\r\n";
+        var file = new MockMultipartFile("file","areas.csv","text/csv",csv.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        var preview = imports.validate(operator,"admin-importer","areas",file);
+        assertEquals(1, preview.validRows());
+        assertEquals(3, preview.rejectedRows());
+        assertEquals(0, jdbc.queryForObject("SELECT count(*) FROM cabin_areas_mst WHERE operator_id=? AND code='IMPORT_AREA'",Integer.class,operator));
+        var committed = imports.commit(operator,"admin-importer","areas",preview.importId());
+        assertEquals(1, committed.created());
+        assertEquals(3, committed.rejected());
+        assertEquals(1, jdbc.queryForObject("SELECT count(*) FROM cabin_areas_mst WHERE operator_id=? AND code='IMPORT_AREA' AND name='Entry, forward'",Integer.class,operator));
+        assertEquals(1, jdbc.queryForObject("SELECT count(*) FROM defect_events_dtl WHERE operator_id=? AND entity_type='AREAS' AND event_type='MASTER_DATA_CREATED'",Integer.class,operator));
+        assertEquals(committed, imports.commit(operator,"admin-importer","areas",preview.importId()));
+        assertEquals(1, jdbc.queryForObject("SELECT count(*) FROM cabin_areas_mst WHERE operator_id=? AND code='IMPORT_AREA'",Integer.class,operator));
     }
 
     private UUID createTenant(String suffix) {
         UUID org = UUID.randomUUID();
         UUID fleet = UUID.randomUUID();
         UUID aircraft = UUID.randomUUID();
-        jdbc.update("INSERT INTO operators(id,name) VALUES(?,?)", org, "Integration Demo " + suffix);
-        jdbc.update("INSERT INTO fleets(id,operator_id,name) VALUES(?,?,?)", fleet, org, "Fleet " + suffix);
-        jdbc.update("INSERT INTO aircraft(id,operator_id,fleet_id,tail_number,aircraft_type) VALUES(?,?,?,?,?)",
+        jdbc.update("INSERT INTO operators_mst(id,name) VALUES(?,?)", org, "Integration Demo " + suffix);
+        jdbc.update("INSERT INTO fleets_mst(id,operator_id,name) VALUES(?,?,?)", fleet, org, "Fleet " + suffix);
+        jdbc.update("INSERT INTO aircraft_mst(id,operator_id,fleet_id,tail_number,aircraft_type) VALUES(?,?,?,?,?)",
             aircraft, org, fleet, "N" + UUID.randomUUID().toString().substring(0, 5).toUpperCase(), "A320-200");
         return org;
     }
 
+    private FormConfiguration reportConfiguration() {
+        return new FormConfiguration(List.of(
+            new FieldDefinition("category_ref","Defect Category",FieldType.DROPDOWN,null,true,0,null,null,null,OptionSource.DEFECT_CATEGORIES,null,null,DefectFieldBinding.DEFECT_CATEGORY),
+            new FieldDefinition("component_ref","Component",FieldType.DROPDOWN,null,true,1,null,null,null,OptionSource.COMPONENTS,null,null,DefectFieldBinding.COMPONENT_ID),
+            new FieldDefinition("condition_ref","Defect Condition",FieldType.DROPDOWN,null,true,2,null,null,null,OptionSource.DEFECT_CONDITIONS,new OptionFilter(null,"component_ref"),null,DefectFieldBinding.CONDITION_ID),
+            new FieldDefinition("zone","Location",FieldType.TEXT,null,true,3,new TextRules(1,80,false,false,null),null,null,null,null,null,DefectFieldBinding.ZONE),
+            new FieldDefinition("title","Finding",FieldType.TEXT,null,true,4,new TextRules(1,160,false,false,null),null,null,null,null,null,DefectFieldBinding.TITLE),
+            new FieldDefinition("description","Details",FieldType.TEXTAREA,null,true,5,new TextRules(1,4000,false,false,null),null,null,null,null,null,DefectFieldBinding.DESCRIPTION),
+            new FieldDefinition("severity_ref","Severity",FieldType.DROPDOWN,null,true,6,null,null,null,OptionSource.DEFECT_SEVERITIES,null,null,DefectFieldBinding.SEVERITY)));
+    }
+
+    private java.util.Map<String,Object> reportAnswers(UUID org,UUID component,UUID condition,String zone,String title,String description) {
+        UUID category=jdbc.query("SELECT id FROM defect_categories_mst WHERE operator_id=? AND code='SEAT' AND isactive=1",rs->rs.next()?rs.getObject("id",UUID.class):null,org);
+        if(category==null){category=UUID.randomUUID();jdbc.update("INSERT INTO defect_categories_mst(id,operator_id,code,name) VALUES(?,?,'SEAT','Passenger seat')",category,org);}
+        UUID severity=jdbc.queryForObject("SELECT id FROM defect_severities_mst WHERE operator_id=? AND severity_code='MEDIUM' AND isactive=1",UUID.class,org);
+        return java.util.Map.of("category_ref",category.toString(),"component_ref",component.toString(),"condition_ref",condition.toString(),"zone",zone,"title",title,"description",description,"severity_ref",severity.toString());
+    }
+
     private void addMember(UUID org, String userId, String role) {
-        jdbc.update("INSERT INTO operator_memberships(operator_id,external_user_id,display_name,role) VALUES(?,?,?,?)",
+        jdbc.update("INSERT INTO operator_memberships_mst(operator_id,external_user_id,display_name,role) VALUES(?,?,?,?)",
             org, userId, userId + " (DEMO)", role);
+    }
+
+    private UUID createCondition(UUID org, UUID componentId) {
+        UUID id = UUID.randomUUID();
+        String code = "TEST_" + id.toString().substring(0, 8).toUpperCase();
+        jdbc.update("INSERT INTO defect_conditions_mst(id,operator_id,code,name) VALUES(?,?,?,'Test condition')", id, org, code);
+        jdbc.update("INSERT INTO component_conditions_mst(operator_id,component_id,condition_id) VALUES(?,?,?)", org, componentId, id);
+        return id;
     }
 
     private static String requiredEnv(String key) {
