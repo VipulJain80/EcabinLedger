@@ -1,8 +1,8 @@
-export type DefectBinding = "DEFECT_CATEGORY" | "COMPONENT_ID" | "CONDITION_ID" | "ZONE" | "ROW_NUMBER" | "SEAT_REFERENCE" | "TITLE" | "DESCRIPTION" | "REMARKS" | "SEVERITY" | "EVIDENCE_ATTACHMENTS";
+export type DefectBinding = "DEFECT_CATEGORY" | "COMPONENT_ID" | "CONDITION_ID" | "ZONE" | "ROW_NUMBER" | "SEAT_REFERENCE" | "TITLE" | "DESCRIPTION" | "REMARKS" | "SEVERITY" | "EVIDENCE_ATTACHMENTS" | "AIRCRAFT_ID";
 export type ReportField = { key: string; label: string; type: string; required: boolean; visible?: boolean | null; readOnly?: boolean | null; optionSource?: string | null; binding?: DefectBinding | null; optionFilter?: { componentFieldKey?: string | null } | null; fileRules?: { minCount?: number; extensions?: string[]; mimeTypes?: string[]; maxFileSizeBytes?: number } | null };
 
 type PersistedDefectBinding = Exclude<DefectBinding, "EVIDENCE_ATTACHMENTS">;
-const mandatory: PersistedDefectBinding[] = ["DEFECT_CATEGORY", "COMPONENT_ID", "CONDITION_ID", "ZONE", "TITLE", "DESCRIPTION", "SEVERITY"];
+const mandatory: PersistedDefectBinding[] = ["DEFECT_CATEGORY", "COMPONENT_ID", "CONDITION_ID", "ZONE", "TITLE", "DESCRIPTION", "SEVERITY", "AIRCRAFT_ID"];
 
 export function defectReportBindingIssue(fields: readonly ReportField[], areaCode?: string): string {
   const unsupported = fields.find(field => field.type !== "SECTION" && !field.binding);
@@ -13,7 +13,7 @@ export function defectReportBindingIssue(fields: readonly ReportField[], areaCod
   if (lockedRequired) return `Required field “${lockedRequired.label}” must be editable.`;
   const bound = fields.filter(field => field.binding);
   const galley = areaCode === "GALLEY";
-  const required: DefectBinding[] = galley ? ["COMPONENT_ID", "CONDITION_ID", "ZONE", "SEVERITY", "EVIDENCE_ATTACHMENTS"] : mandatory;
+  const required: DefectBinding[] = galley ? ["COMPONENT_ID", "CONDITION_ID", "ZONE", "SEVERITY", "EVIDENCE_ATTACHMENTS", "AIRCRAFT_ID"] : mandatory;
   const missing = required.filter(binding => {
     const matches = bound.filter(field => field.binding === binding);
     return matches.length !== 1 || !matches[0].required;
@@ -21,7 +21,7 @@ export function defectReportBindingIssue(fields: readonly ReportField[], areaCod
   if (missing.length) {
     const labels: Record<DefectBinding, string> = {
       DEFECT_CATEGORY: "Defect category", COMPONENT_ID: "Component", CONDITION_ID: "Condition", ZONE: "Location",
-      ROW_NUMBER: "Row number", SEAT_REFERENCE: "Seat reference", TITLE: "Title", DESCRIPTION: "Description", REMARKS: "Remarks", SEVERITY: "Severity", EVIDENCE_ATTACHMENTS: "Evidence image upload",
+      ROW_NUMBER: "Row number", SEAT_REFERENCE: "Seat reference", TITLE: "Title", DESCRIPTION: "Description", REMARKS: "Remarks", SEVERITY: "Severity", EVIDENCE_ATTACHMENTS: "Evidence image upload", AIRCRAFT_ID: "Aircraft Registration",
     };
     return galley
       ? `Galley Area requires these fields: ${missing.map(binding => labels[binding]).join(", ")}.`
@@ -29,7 +29,7 @@ export function defectReportBindingIssue(fields: readonly ReportField[], areaCod
   }
   const expected: Partial<Record<DefectBinding, [string, string?]>> = {
     DEFECT_CATEGORY: ["DROPDOWN", "DEFECT_CATEGORIES"], COMPONENT_ID: ["DROPDOWN", "COMPONENTS"],
-    CONDITION_ID: ["DROPDOWN", "DEFECT_CONDITIONS"], SEVERITY: ["DROPDOWN", galley ? "GALLEY_SEVERITIES" : "DEFECT_SEVERITIES"],
+    CONDITION_ID: ["DROPDOWN", "DEFECT_CONDITIONS"], SEVERITY: ["DROPDOWN", galley ? "GALLEY_SEVERITIES" : "DEFECT_SEVERITIES"], AIRCRAFT_ID: ["AIRCRAFT_SELECT", "AIRCRAFT"],
     ZONE: ["TEXT"], ROW_NUMBER: ["NUMBER"], SEAT_REFERENCE: ["TEXT"], TITLE: ["TEXT"], DESCRIPTION: ["TEXTAREA"], REMARKS: ["TEXTAREA"],
   };
   for (const field of bound.filter(field => field.binding !== "EVIDENCE_ATTACHMENTS")) {

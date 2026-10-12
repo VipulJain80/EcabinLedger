@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { defectReportBindingIssue, defectReportPayload, fieldIdentityMetadata } from "./defectReportMapping.ts";
 
 const fields = [
+  { key: "aircraftId", label: "Aircraft Registration", type: "AIRCRAFT_SELECT", optionSource: "AIRCRAFT", required: true, binding: "AIRCRAFT_ID" },
   { key: "category_ref", label: "Defect Category", type: "DROPDOWN", optionSource: "DEFECT_CATEGORIES", required: true, binding: "DEFECT_CATEGORY" },
   { key: "component_ref", label: "Component", type: "DROPDOWN", optionSource: "COMPONENTS", required: true, binding: "COMPONENT_ID" },
   { key: "condition_ref", label: "Defect Condition", type: "DROPDOWN", optionSource: "DEFECT_CONDITIONS", optionFilter: { componentFieldKey: "component_ref" }, required: true, binding: "CONDITION_ID" },
@@ -30,15 +31,15 @@ test("missing or misconfigured mandatory backend properties block reporting", ()
 });
 
 test("a remarks-only published form explains that a new bound version is required", () => {
-  const issue = defectReportBindingIssue([{ key: "remarks", label: "Remarks", type: "TEXTAREA", required: true }]);
-  assert.match(issue, /Defect category, Component, Condition, Location, Title, Description, Severity/);
+  const issue = defectReportBindingIssue([{ key: "remarks", label: "Remarks", type: "TEXTAREA", required: true, binding: "REMARKS" }]);
+  assert.match(issue, /Defect category, Component, Condition, Location, Title, Description, Severity, Aircraft Registration/);
   assert.match(issue, /create a new version/);
   assert.match(issue, /publish it/);
 });
 
 test("designer metadata describes internal key, type and required state without repeating the label", () => {
-  assert.deepEqual(fieldIdentityMetadata(fields[0]), { key: "category_ref", type: "dropdown", required: true });
-  assert.equal(Object.values(fieldIdentityMetadata(fields[0])).includes(fields[0].label), false);
+  assert.deepEqual(fieldIdentityMetadata(fields[1]), { key: "category_ref", type: "dropdown", required: true });
+  assert.equal(Object.values(fieldIdentityMetadata(fields[1])).includes(fields[1].label), false);
 });
 
 test("hidden and read-only required fields cannot bypass defect validation", () => {
@@ -46,8 +47,9 @@ test("hidden and read-only required fields cannot bypass defect validation", () 
   assert.match(defectReportBindingIssue(fields.map(field => field.binding === "TITLE" ? { ...field, readOnly: true } : field)), /must be editable/i);
 });
 
-test("Galley Area form uses its six configured fields and keeps its evidence and severity choices constrained", () => {
+test("Galley Area form uses its configured fields and keeps its evidence and severity choices constrained", () => {
   const galley = [
+    { key: "aircraftId", label: "Aircraft Registration", type: "AIRCRAFT_SELECT", optionSource: "AIRCRAFT", required: true, binding: "AIRCRAFT_ID" },
     { key: "location", label: "Galley Number / Location", type: "TEXT", required: true, binding: "ZONE" },
     { key: "component", label: "Component", type: "DROPDOWN", optionSource: "COMPONENTS", required: true, binding: "COMPONENT_ID" },
     { key: "condition", label: "Defect Condition", type: "DROPDOWN", optionSource: "DEFECT_CONDITIONS", optionFilter: { componentFieldKey: "component" }, required: true, binding: "CONDITION_ID" },
@@ -59,5 +61,5 @@ test("Galley Area form uses its six configured fields and keeps its evidence and
   assert.deepEqual(defectReportPayload(galley, { location: "Galley 2", component: "component-id", condition: "condition-id", severity: "severity-id", remarks: "Latch loose" }, "GALLEY"), { componentId: "component-id", conditionId: "condition-id", zone: "Galley 2", severity: "severity-id", remarks: "Latch loose" });
   assert.match(defectReportBindingIssue(galley.filter(field => field.binding !== "EVIDENCE_ATTACHMENTS"), "GALLEY"), /Evidence image upload/);
   assert.match(defectReportBindingIssue(galley.map(field => field.binding === "REMARKS" ? { ...field, required: true } : field), "GALLEY"), /Remarks must be optional/);
-  assert.match(defectReportBindingIssue(galley.map(field => field.binding === "SEVERITY" ? { ...field, optionSource: "DEFECT_SEVERITIES" } : field), "GALLEY"), /GALLEY SEVERITIES/);
+  assert.match(defectReportBindingIssue(galley.map(field => field.binding === "SEVERITY" ? { ...field, optionSource: "DEFECT_SEVERITIES" } : field), "GALLEY"), /galley severities/i);
 });

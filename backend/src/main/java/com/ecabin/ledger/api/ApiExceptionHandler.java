@@ -32,7 +32,8 @@ public class ApiExceptionHandler {
     @ExceptionHandler(ResponseStatusException.class)
     ResponseEntity<ErrorBody> status(ResponseStatusException ex) {
         var status = HttpStatus.valueOf(ex.getStatusCode().value());
-        return ResponseEntity.status(status).body(new ErrorBody(new ErrorDetail(status == HttpStatus.NOT_FOUND ? "not_found" : "request_error", ex.getReason() == null ? status.getReasonPhrase() : ex.getReason())));
+        String code=status==HttpStatus.NOT_FOUND?"not_found":status==HttpStatus.PAYLOAD_TOO_LARGE?"upload_too_large":"request_error";
+        return ResponseEntity.status(status).body(new ErrorBody(new ErrorDetail(code, ex.getReason() == null ? status.getReasonPhrase() : ex.getReason())));
     }
 
     @ExceptionHandler(DataIntegrityViolationException.class)
@@ -42,6 +43,6 @@ public class ApiExceptionHandler {
 
     @ExceptionHandler(MaxUploadSizeExceededException.class)
     ResponseEntity<ErrorBody> uploadTooLarge() {
-        return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE).body(new ErrorBody(new ErrorDetail("upload_too_large", "CSV files must be 5 MB or smaller.")));
+        return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE).body(new ErrorBody(new ErrorDetail("upload_too_large", "The upload exceeds the request or per-file size limit. Images must be 5 MB or smaller per file.")));
     }
 }

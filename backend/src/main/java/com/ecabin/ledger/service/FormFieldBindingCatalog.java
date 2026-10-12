@@ -27,7 +27,8 @@ public final class FormFieldBindingCatalog {
         binding(DefectFieldBinding.DESCRIPTION,"Defect description","description","defects_dtl","description","varchar(4000)",List.of(FieldType.TEXTAREA),List.of("CABIN","GALLEY","LAVATORY","ENTRY_AREA","ATTENDANT_SEAT"),"REQUIRED",null,"Non-blank text up to 4000 characters.",true,null),
         binding(DefectFieldBinding.REMARKS,"Remarks","remarks","defects_dtl","description","varchar(4000)",List.of(FieldType.TEXTAREA),List.of("GALLEY"),"CONFIGURABLE",null,"Optional remarks are combined with the required condition description when creating a Galley defect.",false,null),
         binding(DefectFieldBinding.SEVERITY,"Severity","severityId","defects_dtl","severity_id","uuid",List.of(FieldType.DROPDOWN),DEFECT_AREAS,"REQUIRED","DEFECT_SEVERITIES","Active severity belonging to the authenticated organization.",true,null),
-        binding(DefectFieldBinding.EVIDENCE_ATTACHMENTS,"Evidence attachments","attachments","attachments_dtl","object_key","private object reference",List.of(FieldType.FILE_UPLOAD,FieldType.IMAGE_UPLOAD),List.of("CABIN","GALLEY","LAVATORY","ENTRY_AREA","ATTENDANT_SEAT"),"CONFIGURABLE",null,"Private object storage; metadata is tenant-scoped and file must pass validation and malware scan.",true,null)
+        binding(DefectFieldBinding.EVIDENCE_ATTACHMENTS,"Evidence attachments","attachments","attachments_dtl","object_key","private object reference",List.of(FieldType.FILE_UPLOAD,FieldType.IMAGE_UPLOAD),List.of("CABIN","GALLEY","LAVATORY","ENTRY_AREA","ATTENDANT_SEAT"),"CONFIGURABLE",null,"Private object storage; metadata is tenant-scoped and file must pass validation and malware scan.",true,null),
+        binding(DefectFieldBinding.AIRCRAFT_ID,"Aircraft registration","aircraftId","aircraft_mst","id","uuid",List.of(FieldType.AIRCRAFT_SELECT),DEFECT_AREAS,"REQUIRED","AIRCRAFT","Select an active aircraft from the authenticated tenant. The submitted UUID is resolved and validated by the defect service; it is not stored as a form answer.",false,null)
     );
 
     private static FieldBindingDefinition binding(DefectFieldBinding key, String name, String property, String table,
@@ -36,9 +37,9 @@ public final class FormFieldBindingCatalog {
         OptionSource optionSource = source == null ? null : OptionSource.valueOf(source);
         List<FormPurpose> purposes = key==DefectFieldBinding.EVIDENCE_ATTACHMENTS
             ? List.of(FormPurpose.values()) : List.of(FormPurpose.DEFECT_REPORT);
-        return new FieldBindingDefinition(key,key.name().toLowerCase(java.util.Locale.ROOT),name,property,table,column,dataType,
+        return new FieldBindingDefinition(key,key==DefectFieldBinding.AIRCRAFT_ID?"aircraftId":key.name().toLowerCase(java.util.Locale.ROOT),name,property,table,column,dataType,
             types,areas,purposes,required,optionSource,validation,
-            key==DefectFieldBinding.EVIDENCE_ATTACHMENTS?"SYSTEM_MANAGED_REFERENCE":"USER_EDITABLE",multiple,dependency);
+            key==DefectFieldBinding.EVIDENCE_ATTACHMENTS?"SYSTEM_MANAGED_REFERENCE":key==DefectFieldBinding.AIRCRAFT_ID?"SYSTEM_CONTROLLED_SELECTION":"USER_EDITABLE",multiple,dependency);
     }
 
     public List<FieldBindingDefinition> all() { return FIELDS; }

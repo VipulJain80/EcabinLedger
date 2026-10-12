@@ -27,6 +27,7 @@ class DefectReportBindingRulesTest {
 
     @Test void compactGalleyDesignRequiresSixFieldsAndCleanEvidenceConfiguration() {
         var fields=List.of(
+            field("aircraftId","Aircraft Registration",FieldType.AIRCRAFT_SELECT,OptionSource.AIRCRAFT,null,DefectFieldBinding.AIRCRAFT_ID,true),
             field("location","Galley Number / Location",FieldType.TEXT,null,null,DefectFieldBinding.ZONE,true),
             field("component","Component",FieldType.DROPDOWN,OptionSource.COMPONENTS,null,DefectFieldBinding.COMPONENT_ID,true),
             field("condition","Defect Condition",FieldType.DROPDOWN,OptionSource.DEFECT_CONDITIONS,new OptionFilter(null,"component"),DefectFieldBinding.CONDITION_ID,true),
@@ -34,14 +35,28 @@ class DefectReportBindingRulesTest {
             field("remarks","Remarks",FieldType.TEXTAREA,null,null,DefectFieldBinding.REMARKS,false),
             new FieldDefinition("evidence","Evidence Image Upload",FieldType.IMAGE_UPLOAD,null,true,5,null,null,null,null,null,new FileRules(List.of("jpg","jpeg","png","webp"),List.of("image/jpeg","image/png","image/webp"),5_242_880L,1,1),DefectFieldBinding.EVIDENCE_ATTACHMENTS));
         var mapped=DefectReportBindingRules.requireGalleyReport(fields);
-        assertEquals(6,mapped.size());
+        assertEquals(7,mapped.size());
         assertFalse(mapped.get(DefectFieldBinding.REMARKS).required());
         assertThrows(IllegalArgumentException.class,()->DefectReportBindingRules.requireGalleyReport(fields.stream().filter(field->field.binding()!=DefectFieldBinding.EVIDENCE_ATTACHMENTS).toList()));
         var requiredRemarks=fields.stream().map(field->field.binding()==DefectFieldBinding.REMARKS?new FieldDefinition(field.key(),field.label(),field.type(),field.helpText(),true,field.order(),field.textRules(),field.numericRules(),field.dateRules(),field.optionSource(),field.optionFilter(),field.fileRules(),field.binding()):field).toList();
         assertThrows(IllegalArgumentException.class,()->DefectReportBindingRules.requireGalleyReport(requiredRemarks));
     }
 
+    @Test void missingGalleyAircraftBindingNamesTheConfiguredAircraftRegistrationSelector() {
+        var missingAircraft=List.of(
+            field("location","Galley Number / Location",FieldType.TEXT,null,null,DefectFieldBinding.ZONE,true),
+            field("component","Component",FieldType.DROPDOWN,OptionSource.COMPONENTS,null,DefectFieldBinding.COMPONENT_ID,true),
+            field("condition","Defect Condition",FieldType.DROPDOWN,OptionSource.DEFECT_CONDITIONS,new OptionFilter(null,"component"),DefectFieldBinding.CONDITION_ID,true),
+            field("severity","Severity",FieldType.DROPDOWN,OptionSource.GALLEY_SEVERITIES,null,DefectFieldBinding.SEVERITY,true),
+            field("remarks","Remarks",FieldType.TEXTAREA,null,null,DefectFieldBinding.REMARKS,false),
+            new FieldDefinition("evidence","Evidence Image Upload",FieldType.IMAGE_UPLOAD,null,true,5,null,null,null,null,null,new FileRules(List.of("jpg"),List.of("image/jpeg"),5_242_880L,1,1),DefectFieldBinding.EVIDENCE_ATTACHMENTS));
+        var error=assertThrows(IllegalArgumentException.class,()->DefectReportBindingRules.requireGalleyReport(missingAircraft));
+        assertTrue(error.getMessage().contains("Aircraft Registration selector"));
+        assertTrue(error.getMessage().contains("AIRCRAFT_SELECT"));
+    }
+
     private List<FieldDefinition> complete(){return List.of(
+        field("aircraftId","Aircraft Registration",FieldType.AIRCRAFT_SELECT,OptionSource.AIRCRAFT,null,DefectFieldBinding.AIRCRAFT_ID,true),
         field("category","Category",FieldType.DROPDOWN,OptionSource.DEFECT_CATEGORIES,null,DefectFieldBinding.DEFECT_CATEGORY,true),
         field("component","Component",FieldType.DROPDOWN,OptionSource.COMPONENTS,null,DefectFieldBinding.COMPONENT_ID,true),
         field("condition","Condition",FieldType.DROPDOWN,OptionSource.DEFECT_CONDITIONS,new OptionFilter(null,"component"),DefectFieldBinding.CONDITION_ID,true),

@@ -40,7 +40,6 @@ public class ConfigurationImportService {
     private record Staged(int rowNumber, Map<String,String> fields) {}
 
     private static final Map<String, Definition> DEFINITIONS = Map.ofEntries(
-        Map.entry("organizations", new Definition("Organizations", List.of("organization_name"), List.of("Demo Operator"), "name")),
         Map.entry("fleets", new Definition("Fleets", List.of("fleet_name"), List.of("Main Fleet"), "name")),
         Map.entry("aircraft", new Definition("Aircraft", List.of("msn_number","registration","aircraft_type","fleet_name"), List.of("MSN-001","VT-ABC","A320-200","Main Fleet"), "tailNumber")),
         Map.entry("areas", new Definition("Area Master", List.of("area_code","area_name","description"), List.of("ENTRY_AREA","Entry Area","Aircraft entry area"), "code")),
@@ -62,6 +61,7 @@ public class ConfigurationImportService {
     }
 
     public Template template(String resource) {
+        if (resource.equals("organizations")) throw new IllegalArgumentException("Organizations are provisioned through operator onboarding and cannot be imported.");
         Definition definition = definition(resource);
         return new Template(resource, definition.label(), definition.headers(), csv(List.of(definition.headers(), definition.sample())));
     }

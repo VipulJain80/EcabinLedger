@@ -8,7 +8,9 @@ spring:
   servlet:
     multipart:
       max-file-size: 15MB
-      max-request-size: 16MB
+      # Keep request capacity above ten individual 5 MiB images plus multipart overhead.
+      # Per-file size enforcement remains in AttachmentService.
+      max-request-size: 64MB
   datasource:
     url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/postgres?connectTimeout=10&sslmode=prefer&currentSchema=ecabin_ledger}
     username: ${SPRING_DATASOURCE_USERNAME:postgres}
@@ -42,6 +44,7 @@ app:
     unauthenticated-per-minute: ${API_RATE_LIMIT_UNAUTHENTICATED_PER_MINUTE:10}
   attachments:
     provider: ${ATTACHMENT_STORAGE_PROVIDER:azure}
+    local-path: ${ATTACHMENT_LOCAL_PATH:/Users/vipuljain/Desktop/EcabinLedger/uploadimages}
     azure-endpoint: ${AZURE_STORAGE_ACCOUNT_URL:}
     azure-container: ${AZURE_STORAGE_CONTAINER:ecabin-evidence-private}
     azure-connection-string: ${AZURE_STORAGE_CONNECTION_STRING:}

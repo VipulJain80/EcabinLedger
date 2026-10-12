@@ -1,11 +1,12 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import Image from "next/image";
 import { useQuery } from "@tanstack/react-query";
 import { alert, responseErrorMessage } from "@/common/alerts";
-import { isPublishedFormForArea, orderedPublishedFields, unsupportedPublishedField } from "./publishedFormDefinition";
+import { isPublishedFormForArea, orderedOperationalFields, unsupportedPublishedField } from "./publishedFormDefinition";
 import { defectReportBindingIssue } from "./defectReportMapping";
+import EvidenceUploadField from "./EvidenceUploadField";
+import { partitionEvidenceFiles, validateEvidenceFile } from "./evidenceFileRules";
 
 type Request = (path: string, init?: RequestInit) => Promise<Response>;
 type Field = {
@@ -28,10 +29,15 @@ type Field = {
 type Purpose = "DEFECT_REPORT" | "INSPECTION" | "CORRECTIVE_ACTION" | "VERIFICATION" | "CLOSURE_APPROVAL" | "REOPEN";
 type Definition = { id: string; name: string; areaId: string; purpose: Purpose; workflowStage: string; versionId: string; versionNumber: number; configuration: { fields: Field[] } };
 type Choice = { id: string; label: string; code: string };
-type Uploaded = { id: string; filename: string; scanStatus: string };
+type AircraftOption = { id:string; tailNumber:string; msnNumber:string|null; aircraftType:string };
+type AircraftOptionPage = { items:AircraftOption[]; page:number; size:number; totalElements:number; totalPages:number };
+type Uploaded = { id: string; filename: string; sizeBytes?: number; scanStatus: string };
 type Submission = { id: string; versionNumber: number; submittedBy: string; submittedAt: string; snapshot: { defectCategory: string; componentId: string; conditionId: string; zone: string; rowNumber: number | null; seatReference: string | null; title: string; description: string; severityId: string } | null };
 
-export default function OperationalFormRenderer({ request, defectId, areaId, areaName, areaCode, initialFormId, initialVersionId, purpose = "DEFECT_REPORT", workflowStage = "INITIAL_REPORT", previewOnly = false, preparationMode = false, initialAnswers, initialFiles, onAnswersChange, onFilesChange, onPreparationReady }: {
+function fileIdentity(file: File) { return `${file.name}:${file.size}:${file.lastModified}`; }
+const EMPTY_FILES: File[] = [];
+
+export default function OperationalFormRenderer({ request, defectId, areaId, areaName, areaCode, initialFormId, initialVersionId, purpose = "DEFECT_REPORT", workflowStage = "INITIAL_REPORT", previewOnly = false, preparationMode = false, initialAnswers, initialFiles, onAnswersChange, onFilesChange, onPreparationReady, onAircraftSelected, aircraftOptionsCacheKey = "" }: {
   request: Request;
   defectId?: string;
   areaId: string;
@@ -48,19 +54,26 @@ export default function OperationalFormRenderer({ request, defectId, areaId, are
   onAnswersChange?: (answers: Record<string, unknown>) => void;
   onFilesChange?: (files: Record<string, File[]>) => void;
   onPreparationReady?: (ready: boolean) => void;
+  onAircraftSelected?: (aircraft: AircraftOption | null) => void;
+  aircraftOptionsCacheKey?: string;
 }) {
   const [formId, setFormId] = useState(initialFormId || "");
   const [values, setValues] = useState<Record<string, unknown>>(initialAnswers || {});
   const [files, setFiles] = useState<Record<string, Uploaded[]>>({});
   const [pendingFiles, setPendingFiles] = useState<Record<string, File[]>>(initialFiles || {});
-  const [previews, setPreviews] = useState<Record<string, string[]>>({});
-  const previewUrls = useRef<string[]>([]);
+  const [uploadErrors, setUploadErrors] = useState<Record<string, Record<string, string>>>({});
   const [uploading, setUploading] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState("");
   const [options, setOptions] = useState<Record<string, Choice[]>>({});
+  const [aircraftSearch,setAircraftSearch]=useState("");
+  const [debouncedAircraftSearch,setDebouncedAircraftSearch]=useState("");
+  const [aircraftPage,setAircraftPage]=useState(0);
+  const [selectedAircraftId,setSelectedAircraftId]=useState("");
+  const [selectedAircraft,setSelectedAircraft]=useState<AircraftOption|null>(null);
   const submissionGuard = useRef(false);
   const initialUploadsStarted = useRef(false);
+  const previousSelectionContext = useRef<string | null>(null);
 
   const available = useQuery<Definition[]>({
     queryKey: ["area-operational-forms", areaId, defectId || "new", purpose, workflowStage],
@@ -85,8 +98,17 @@ export default function OperationalFormRenderer({ request, defectId, areaId, are
   const availableForms = available.data || [];
   const selectedFormId = initialFormId || formId || (availableForms.length === 1 ? availableForms[0].id : "");
   const selected = initialFormId ? initialDefinition.data : availableForms.find(form => form.id === selectedFormId);
-  const selectedFields = useMemo(() => orderedPublishedFields(selected?.configuration.fields || []).filter(field => field.visible !== false), [selected]);
+  const selectionContext = `${areaId}:${defectId || "new"}:${purpose}:${workflowStage}:${selectedFormId}:${selected?.versionId || ""}`;
+  const selectedFields = useMemo(() => orderedOperationalFields(selected?.configuration.fields || []).filter(field => field.visible !== false), [selected]);
   const unsupportedField = unsupportedPublishedField(selectedFields);
+  const hasAircraftSelector=selectedFields.some(field=>field.type==="AIRCRAFT_SELECT"&&field.binding==="AIRCRAFT_ID");
+  const aircraftOptionsQuery=useQuery<AircraftOptionPage>({
+    queryKey:["reporting-aircraft-options",aircraftOptionsCacheKey,areaId,selected?.id,selected?.versionId,debouncedAircraftSearch,aircraftPage],
+    enabled:preparationMode&&hasAircraftSelector&&!previewOnly,
+    queryFn:async({signal})=>{const params=new URLSearchParams({search:debouncedAircraftSearch,page:String(aircraftPage),size:"20"});const response=await request(`/aircraft/options?${params}`,{signal});if(!response.ok)throw new Error(await responseErrorMessage(response,"Could not load active aircraft for this organization."));return response.json();},
+    staleTime:30_000,
+  });
+  useEffect(()=>{const timer=window.setTimeout(()=>setDebouncedAircraftSearch(aircraftSearch),250);return()=>window.clearTimeout(timer);},[aircraftSearch]);
   const reportBindingIssue = preparationMode && selected ? defectReportBindingIssue(selectedFields, areaCode) : "";
   const definitionIssue = selected && !isPublishedFormForArea(selected, areaId)
     ? "The published form does not belong to the selected cabin area. Contact your administrator."
@@ -130,7 +152,15 @@ export default function OperationalFormRenderer({ request, defectId, areaId, are
     return () => { alive = false; };
   }, [selected, selectedFields, request, values, options, areaId]);
 
-  useEffect(() => { const createdUrls=previewUrls.current; return()=>createdUrls.forEach(url=>URL.revokeObjectURL(url)); }, []);
+  useEffect(() => {
+    if (!selected) return;
+    if (previousSelectionContext.current !== null && previousSelectionContext.current !== selectionContext) {
+      setValues(initialAnswers || {}); setFiles({}); setPendingFiles(initialFiles || {}); setUploadErrors({}); setOptions({}); setMessage("");
+      setAircraftSearch("");setAircraftPage(0);setSelectedAircraftId("");setSelectedAircraft(null);onAircraftSelected?.(null);
+      submissionGuard.current = false; initialUploadsStarted.current = false;
+    }
+    previousSelectionContext.current = selectionContext;
+  }, [selectionContext, selected, initialAnswers, initialFiles, onAircraftSelected]);
 
   function changeValue(field: Field, value: unknown) {
     const next = { ...values, [field.key]: value };
@@ -141,8 +171,13 @@ export default function OperationalFormRenderer({ request, defectId, areaId, are
     if (preparationMode) onAnswersChange?.(next);
   }
 
-  const upload = useCallback(async (field: Field, file: File) => {
-    if (!selected || !defectId) return;
+  const upload = useCallback(async (field: Field, file: File): Promise<boolean> => {
+    if (!selected || !defectId) return false;
+    const validationIssue = validateEvidenceFile(file, field);
+    if (validationIssue) {
+      setMessage(validationIssue); void alert.error(validationIssue);
+      return false;
+    }
     setUploading(field.key); setMessage("");
     try {
       const body = new FormData(); body.append("file", file);
@@ -151,8 +186,16 @@ export default function OperationalFormRenderer({ request, defectId, areaId, are
       const uploaded = await response.json() as Uploaded;
       setFiles(old => ({ ...old, [field.key]: [...(old[field.key] || []), uploaded] }));
       setPendingFiles(old=>({...old,[field.key]:(old[field.key]||[]).filter(item=>item!==file)}));
+      setUploadErrors(old=>{const next={...old,[field.key]:{...(old[field.key]||{})}};delete next[field.key][fileIdentity(file)];return next;});
       if (uploaded.scanStatus !== "CLEAN") setMessage(`${uploaded.filename} is ${uploaded.scanStatus.toLowerCase()}; submission is blocked until evidence passes the configured scan.`);
-    } catch (error) { setMessage(error instanceof Error ? error.message : "Evidence upload failed."); }
+      return true;
+    } catch (error) {
+      const failure=error instanceof Error ? error.message : "Evidence upload failed.";
+      setMessage(failure); void alert.error(failure);
+      setPendingFiles(old=>({...old,[field.key]:(old[field.key]||[]).some(item=>item===file)?old[field.key]:[...(old[field.key]||[]),file]}));
+      setUploadErrors(old=>({...old,[field.key]:{...(old[field.key]||{}),[fileIdentity(file)]:failure}}));
+      return false;
+    }
     finally { setUploading(null); }
   }, [defectId, request, selected]);
 
@@ -168,18 +211,41 @@ export default function OperationalFormRenderer({ request, defectId, areaId, are
 
   async function uploadMany(field: Field, incoming: File[]) {
     const rules = field.fileRules;
-    const remaining = Math.max(0, (rules?.maxCount || 1) - (files[field.key]?.length || 0));
-    if (incoming.length > remaining) { setMessage(`Select no more than ${remaining} additional file(s) for ${field.label}.`); return; }
+    if (!rules) return;
+    const existing=pendingFiles[field.key]||[];
+    const alreadyCounted=(files[field.key]||[]).length+existing.length;
+    let remaining=Math.max(0,rules.maxCount-alreadyCounted);
+    const partition=partitionEvidenceFiles(incoming,field);const valid:File[]=[];const errors=partition.rejected.map(item=>item.message);
+    for(const file of partition.accepted){
+      if(remaining<=0){errors.push(`Select no more than ${rules.maxCount} file(s) for ${field.label}.`);continue;}
+      valid.push(file);remaining--;
+    }
+    if(errors.length){
+      const rejectedErrors = Object.fromEntries(partition.rejected.map(item => [fileIdentity(item.file), item.message]));
+      const countError = errors.slice(partition.rejected.length);
+      if (countError.length) rejectedErrors["__count"] = countError.join(" ");
+      setUploadErrors(old => {
+        const previous = old[field.key] || {};
+        const retryable = Object.fromEntries(Object.entries(previous).filter(([key]) => existing.some(file => fileIdentity(file) === key)));
+        return { ...old, [field.key]: { ...retryable, ...rejectedErrors } };
+      });
+      setMessage(errors.join(" ")); void alert.error(errors[0]);
+    }
+    if(!valid.length)return;
     if (!defectId && preparationMode) {
-      const existing=pendingFiles[field.key]||[];
-      if(incoming.length+existing.length>(rules?.maxCount||1)){setMessage(`Select no more than ${rules?.maxCount||1} image(s) for ${field.label}.`);return;}
-      for(const file of incoming){const ext=file.name.split(".").pop()?.toLowerCase()||"";if(file.size>(rules?.maxFileSizeBytes||0)){setMessage(`${file.name} exceeds the configured file-size limit.`);return;}if(!rules?.extensions.some(value=>value.toLowerCase()===ext)||!rules.mimeTypes.includes(file.type)){setMessage(`${file.name} is not an allowed image type for ${field.label}.`);return;}}
-      const urls=incoming.map(file=>{const url=URL.createObjectURL(file);previewUrls.current.push(url);return url;});const next={...pendingFiles,[field.key]:[...existing,...incoming]};setPendingFiles(next);setPreviews(current=>({...current,[field.key]:[...(current[field.key]||[]),...urls]}));onFilesChange?.(next);setMessage("");return;
+      const next={...pendingFiles,[field.key]:[...existing,...valid]};
+      setPendingFiles(next);setUploadErrors(old=>{const nextErrors={...old,[field.key]:{...(old[field.key]||{})}};for(const file of valid)delete nextErrors[field.key][fileIdentity(file)];return nextErrors;});onFilesChange?.(next);
+      if(!errors.length)setMessage("");return;
     }
-    for (const file of incoming) {
-      if (file.size > (rules?.maxFileSizeBytes || 0)) { setMessage(`${file.name} exceeds the configured file-size limit.`); return; }
-      await upload(field, file);
-    }
+    if(!defectId)return;
+    for (const file of valid) await upload(field, file);
+  }
+
+  function removePendingFile(field:Field,file:File){
+    const next={...pendingFiles,[field.key]:(pendingFiles[field.key]||[]).filter(item=>item!==file)};
+    setPendingFiles(next);setUploadErrors(old=>{const nextErrors={...old,[field.key]:{...(old[field.key]||{})}};delete nextErrors[field.key][fileIdentity(file)];return nextErrors;});
+    if(preparationMode)onFilesChange?.(next);
+    setMessage("");
   }
 
   async function removeFile(field: Field, file: Uploaded) {
@@ -204,7 +270,7 @@ export default function OperationalFormRenderer({ request, defectId, areaId, are
       const response = await request(`/defects/${defectId}/form-submissions`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ formId: selected.id, versionId: selected.versionId, purpose: selected.purpose, answers }) });
       if (!response.ok) throw new Error(await responseErrorMessage(response, "Form submission failed validation."));
       await alert.success("Operational form submitted and added to the defect audit trail.");
-      setValues({}); setFiles({}); await submissions.refetch();
+      setValues({}); setFiles({}); setPendingFiles({}); setUploadErrors({}); await submissions.refetch();
     } catch (error) { setMessage(error instanceof Error ? error.message : "Form submission failed."); }
     finally { submissionGuard.current = false; setSubmitting(false); }
   }
@@ -219,11 +285,11 @@ export default function OperationalFormRenderer({ request, defectId, areaId, are
     {requestPending && <p role="status">Loading the selected published form…</p>}
     {requestFailed && <p role="alert">{requestError instanceof Error ? requestError.message : "Could not load the selected published form."}</p>}
     {noForms && <p role="status">{purpose === "DEFECT_REPORT" ? "No published operational form is configured for this cabin area. Please contact your administrator." : `No published ${purpose.replaceAll("_", " ").toLowerCase()} form is configured for this workflow stage. Please contact your administrator.`}</p>}
-    {!initialFormId && !requestPending && !requestFailed && availableForms.length > 1 && <label>Published form<select value={formId} onChange={event => { setFormId(event.target.value); setValues({}); setFiles({}); setOptions({}); setMessage(""); }}><option value="">Choose a form…</option>{availableForms.map(form => <option key={`${form.id}:${form.versionId}`} value={form.id}>{form.name} · v{form.versionNumber}</option>)}</select></label>}
+    {!initialFormId && !requestPending && !requestFailed && availableForms.length > 1 && <label>Published form<select value={formId} onChange={event => { setFormId(event.target.value); setValues({}); setFiles({}); setPendingFiles({}); setUploadErrors({}); setOptions({}); setMessage(""); initialUploadsStarted.current=false; }}><option value="">Choose a form…</option>{availableForms.map(form => <option key={`${form.id}:${form.versionId}`} value={form.id}>{form.name} · v{form.versionNumber}</option>)}</select></label>}
     {selected && <>
       {definitionIssue ? <p role="alert">{definitionIssue}</p> : <>
         {reportBindingIssue && <p className="configuration-field-error" role="alert">{reportBindingIssue}</p>}
-        {previewOnly || preparationMode ? <div className="operational-form-fields" aria-readonly={previewOnly || undefined}>{selectedFields.map(field => renderField(field, previewOnly))}</div> : <>
+        {previewOnly || preparationMode ? <div className="operational-form-fields" aria-readonly={previewOnly || undefined}>{selectedFields.map(field => renderField(field, previewOnly))}{preparationMode&&message&&<p className="configuration-field-error" role="alert">{message}</p>}</div> : <>
         {defectId && <form onSubmit={submit} className="operational-form-fields">{selectedFields.map(field => renderField(field, false))}{message && <p className="configuration-field-error" role="alert">{message}</p>}<button className="button-primary" disabled={submitting || Boolean(uploading) || Object.values(files).flat().some(file => file.scanStatus !== "CLEAN")}>{submitting ? "Submitting…" : `Submit ${selected.purpose.replaceAll("_", " ").toLowerCase()} form`}</button></form>}
         {defectId && <div className="operational-form-history"><h4>Submitted forms</h4>{submissions.isPending ? <p>Loading submission history…</p> : submissions.isError ? <p role="alert">{submissions.error.message}</p> : !submissions.data?.length ? <p>No forms have been submitted for this defect.</p> : submissions.data.map(item => <details key={item.id}><summary>Version {item.versionNumber} · {new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(item.submittedAt))} · {item.submittedBy}</summary>{item.snapshot?<dl className="form-submission-snapshot"><dt>Category</dt><dd>{item.snapshot.defectCategory}</dd><dt>Component</dt><dd>{item.snapshot.componentId}</dd><dt>Condition</dt><dd>{item.snapshot.conditionId}</dd><dt>Location</dt><dd>{item.snapshot.zone}</dd><dt>Row / Seat</dt><dd>{[item.snapshot.rowNumber,item.snapshot.seatReference].filter(Boolean).join(" / ")||"—"}</dd><dt>Title</dt><dd>{item.snapshot.title}</dd><dt>Description</dt><dd>{item.snapshot.description}</dd><dt>Severity reference</dt><dd>{item.snapshot.severityId}</dd></dl>:<p>Evidence or workflow submission recorded against the published version.</p>}</details>)}</div>}
       </>}
@@ -241,12 +307,44 @@ export default function OperationalFormRenderer({ request, defectId, areaId, are
     const uploaded = files[field.key] || [];
     const disabled = readOnly || Boolean(field.readOnly) || (Boolean(areaKey && !currentArea || componentKey && !currentComponent));
     if (field.type === "SECTION") return <div className="operational-form-section" key={field.key}><h4>{field.label}</h4>{field.helpText && <p>{field.helpText}</p>}</div>;
+    if(field.type==="AIRCRAFT_SELECT"){
+      const aircraft=aircraftOptionsQuery.data?.items||[];
+      const page=aircraftOptionsQuery.data;
+      return <div className="dynamic-aircraft-select" key={field.key}>
+        <label htmlFor={`${id}-search`}><span className="dynamic-form-field-label">{field.label}{field.required&&<span className="dynamic-form-required" aria-hidden="true">*</span>}</span>{field.helpText&&<small>{field.helpText}</small>}</label>
+        {preparationMode&&!readOnly? <>
+          <input id={`${id}-search`} type="search" value={aircraftSearch} aria-label="Search aircraft registration or MSN" placeholder="Search registration or MSN" onChange={event=>{setAircraftSearch(event.target.value);setAircraftPage(0);setSelectedAircraftId("");setSelectedAircraft(null);onAircraftSelected?.(null);}} />
+          <select id={id} form="defect-report-form" required={field.required} value={selectedAircraftId} disabled={aircraftOptionsQuery.isPending||aircraftOptionsQuery.isError||!aircraft.length} onChange={event=>{const option=aircraft.find(item=>item.id===event.target.value)||null;setSelectedAircraftId(option?.id||"");setSelectedAircraft(option);onAircraftSelected?.(option);}}>
+            <option value="">{aircraftOptionsQuery.isPending?"Loading aircraft…":aircraftOptionsQuery.isError?"Aircraft unavailable":aircraft.length?"Choose an aircraft…":"No active aircraft found"}</option>
+            {aircraft.map(item=><option key={item.id} value={item.id}>{item.tailNumber} — MSN {item.msnNumber||"—"}</option>)}
+          </select>
+          {aircraftOptionsQuery.isPending&&<p role="status">Loading active aircraft…</p>}
+          {aircraftOptionsQuery.isError&&<p role="alert">{aircraftOptionsQuery.error.message}<button type="button" className="button-secondary" onClick={()=>void aircraftOptionsQuery.refetch()}>Retry</button></p>}
+          {aircraftOptionsQuery.isSuccess&&!aircraft.length&&<p role="status">No active aircraft match this search.</p>}
+          {page&&page.totalPages>1&&<div className="aircraft-option-pagination"><button type="button" className="button-secondary" disabled={aircraftPage<=0} onClick={()=>setAircraftPage(value=>Math.max(0,value-1))}>Previous</button><span>Page {page.page+1} of {page.totalPages}</span><button type="button" className="button-secondary" disabled={aircraftPage+1>=page.totalPages} onClick={()=>setAircraftPage(value=>value+1)}>Next</button></div>}
+          {selectedAircraft&&<p className="selected-aircraft-context" role="status">Selected aircraft: <strong>{selectedAircraft.tailNumber}</strong> · MSN <strong>{selectedAircraft.msnNumber||"—"}</strong> · {selectedAircraft.aircraftType}</p>}
+        </>:<p className="selected-aircraft-context" role="status">Aircraft identity is controlled by the defect record and cannot be changed here.</p>}
+      </div>;
+    }
+    if(field.type.includes("UPLOAD")){
+      const pending=pendingFiles[field.key]||EMPTY_FILES;
+      const fileRules=field.fileRules;
+      const accept=[...(fileRules?.mimeTypes||[]),...(fileRules?.extensions||[]).map(extension=>`.${extension.replace(/^\./,"")}`)].join(",");
+      return <div key={field.key} className="operational-upload-control">
+        <label htmlFor={`evidence-${field.key}`}><span className="dynamic-form-field-label">{field.label}{field.required&&<span className="dynamic-form-required" aria-hidden="true">*</span>}</span></label>
+        {field.helpText&&<small>{field.helpText}</small>}
+        <EvidenceUploadField fieldKey={field.key} label={field.label} type={field.type} required={field.required} disabled={disabled||(!defectId&&!preparationMode)}
+          accept={accept} multiple={(fileRules?.maxCount||1)>1} maxCount={fileRules?.maxCount||1} minCount={fileRules?.minCount||0} pendingFiles={pending} errors={uploadErrors[field.key]||{}} uploaded={uploaded}
+          uploading={uploading===field.key} form={preparationMode?"defect-report-form":undefined} onSelect={chosen=>void uploadMany(field,chosen)}
+          onRemovePending={file=>removePendingFile(field,file)} onRetry={file=>void upload(field,file)} onRemoveUploaded={file=>void removeFile(field,file)}
+          onDismissError={errorKey=>setUploadErrors(old=>{const next={...old,[field.key]:{...(old[field.key]||{})}};delete next[field.key][errorKey];return next;})} />
+      </div>;
+    }
     return <label key={field.key} htmlFor={id}><span className="dynamic-form-field-label">{field.label}{field.required && <span className="dynamic-form-required" aria-hidden="true">*</span>}</span>{field.helpText && <small>{field.helpText}</small>}
       {field.type === "TEXTAREA" ? <textarea id={id} form={preparationMode ? "defect-report-form" : undefined} required={field.required && !readOnly} disabled={disabled} value={String(values[field.key] || "")} minLength={field.textRules?.minLength ?? undefined} maxLength={field.textRules?.maxLength ?? undefined} onChange={event => changeValue(field, event.target.value)} />
         : field.type === "DROPDOWN" || field.type === "MULTI_SELECT" ? <select id={id} form={preparationMode ? "defect-report-form" : undefined} required={field.required && !readOnly} disabled={disabled} multiple={field.type === "MULTI_SELECT"} value={field.type === "MULTI_SELECT" ? (Array.isArray(values[field.key]) ? values[field.key] as string[] : []) : String(values[field.key] || "")} onChange={event => changeValue(field, field.type === "MULTI_SELECT" ? Array.from(event.target.selectedOptions).map(option => option.value) : event.target.value)}><option value="">Choose…</option>{choices.map(option => <option key={option.id} value={option.id}>{option.label}</option>)}</select>
           : field.type === "CHECKBOX" ? <input id={id} form={preparationMode ? "defect-report-form" : undefined} type="checkbox" disabled={disabled} checked={Boolean(values[field.key])} onChange={event => changeValue(field, event.target.checked)} />
-            : field.type.includes("UPLOAD") ? <><input id={id} form={preparationMode ? "defect-report-form" : undefined} type="file" required={preparationMode&&field.required&&(pendingFiles[field.key]?.length||0)<(field.fileRules?.minCount||0)} disabled={disabled || (!defectId&&!preparationMode)} accept={(field.fileRules?.mimeTypes || []).join(",")} multiple={(field.fileRules?.maxCount || 1) > 1} onChange={event => { void uploadMany(field, Array.from(event.target.files || [])); event.target.value = ""; }} /><small>Maximum {Math.round((field.fileRules?.maxFileSizeBytes || 0) / 1048576)} MB per file · {field.fileRules?.minCount}–{field.fileRules?.maxCount} files</small>{preparationMode&&previews[field.key]?.map((url,index)=><Image unoptimized width={360} height={220} className="operational-evidence-preview" key={url} src={url} alt={`${field.label} preview ${index+1}`} />)}{!defectId && !preparationMode && !readOnly && <small>Save the defect before uploading evidence.</small>}{uploading === field.key && <small role="status">Uploading and scanning…</small>}{uploaded.map(file => <small className="operational-uploaded-file" key={file.id}>{file.filename} · {file.scanStatus}<button type="button" className="button-secondary" disabled={uploading === field.key} onClick={() => void removeFile(field, file)}>Remove</button></small>)}</>
-              : <input id={id} form={preparationMode ? "defect-report-form" : undefined} type={field.type === "NUMBER" ? "number" : field.type === "DATE" ? "date" : "text"} required={field.required && !readOnly} disabled={disabled} value={String(values[field.key] ?? "")} min={field.type === "NUMBER" ? field.numericRules?.min ?? undefined : field.type === "DATE" ? field.dateRules?.minDate ?? undefined : undefined} max={field.type === "NUMBER" ? field.numericRules?.max ?? undefined : field.type === "DATE" ? field.dateRules?.maxDate ?? undefined : undefined} step={field.type === "NUMBER" ? 1 / 10 ** (field.numericRules?.precision ?? 0) : undefined} minLength={field.type === "TEXT" ? field.textRules?.minLength ?? undefined : undefined} maxLength={field.type === "TEXT" ? field.textRules?.maxLength ?? undefined : undefined} pattern={field.type === "TEXT" ? field.textRules?.pattern || undefined : undefined} onChange={event => changeValue(field, event.target.value)} />}
+            : <input id={id} form={preparationMode ? "defect-report-form" : undefined} type={field.type === "NUMBER" ? "number" : field.type === "DATE" ? "date" : "text"} required={field.required && !readOnly} disabled={disabled} value={String(values[field.key] ?? "")} min={field.type === "NUMBER" ? field.numericRules?.min ?? undefined : field.type === "DATE" ? field.dateRules?.minDate ?? undefined : undefined} max={field.type === "NUMBER" ? field.numericRules?.max ?? undefined : field.type === "DATE" ? field.dateRules?.maxDate ?? undefined : undefined} step={field.type === "NUMBER" ? 1 / 10 ** (field.numericRules?.precision ?? 0) : undefined} minLength={field.type === "TEXT" ? field.textRules?.minLength ?? undefined : undefined} maxLength={field.type === "TEXT" ? field.textRules?.maxLength ?? undefined : undefined} pattern={field.type === "TEXT" ? field.textRules?.pattern || undefined : undefined} onChange={event => changeValue(field, event.target.value)} />}
     </label>;
   }
 }

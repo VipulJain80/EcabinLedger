@@ -5,6 +5,9 @@ import com.azure.identity.DefaultAzureCredentialBuilder;
 import com.azure.storage.blob.BlobContainerClient;
 import com.azure.storage.blob.BlobServiceClientBuilder;
 import com.azure.storage.blob.models.BlobHttpHeaders;
+import jakarta.annotation.PostConstruct;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
@@ -13,9 +16,13 @@ import org.springframework.stereotype.Component;
 @Component
 @ConditionalOnProperty(name="app.attachments.provider", havingValue="azure", matchIfMissing=true)
 public class AzureBlobStorage implements BlobStorage {
+    private static final Logger log = LoggerFactory.getLogger(AzureBlobStorage.class);
     @Value("${app.attachments.azure-endpoint:}") private String endpoint;
     @Value("${app.attachments.azure-container:ecabin-evidence-private}") private String container;
     @Value("${app.attachments.azure-connection-string:}") private String connectionString;
+
+    @PostConstruct
+    void logProvider() { log.info("Evidence storage provider selected: Azure Blob Storage"); }
 
     private BlobContainerClient client() {
         if (connectionString != null && !connectionString.isBlank()) return new BlobServiceClientBuilder().connectionString(connectionString).buildClient().getBlobContainerClient(container);

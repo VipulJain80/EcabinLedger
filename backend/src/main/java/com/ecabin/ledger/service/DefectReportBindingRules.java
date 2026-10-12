@@ -13,7 +13,7 @@ import java.util.Map;
 final class DefectReportBindingRules {
     private static final EnumSet<DefectFieldBinding> REQUIRED = EnumSet.of(
         DefectFieldBinding.DEFECT_CATEGORY, DefectFieldBinding.COMPONENT_ID, DefectFieldBinding.CONDITION_ID,
-        DefectFieldBinding.ZONE, DefectFieldBinding.TITLE, DefectFieldBinding.DESCRIPTION, DefectFieldBinding.SEVERITY);
+        DefectFieldBinding.ZONE, DefectFieldBinding.TITLE, DefectFieldBinding.DESCRIPTION, DefectFieldBinding.SEVERITY, DefectFieldBinding.AIRCRAFT_ID);
 
     private DefectReportBindingRules() {}
 
@@ -54,9 +54,9 @@ final class DefectReportBindingRules {
             if(mapped.putIfAbsent(field.binding(),field)!=null&&field.binding()!=DefectFieldBinding.EVIDENCE_ATTACHMENTS)throw new IllegalArgumentException("Only one field may be bound to "+field.binding().name().replace('_',' ')+".");
             validateField(field);
         }
-        for(DefectFieldBinding required:EnumSet.of(DefectFieldBinding.COMPONENT_ID,DefectFieldBinding.CONDITION_ID,DefectFieldBinding.ZONE,DefectFieldBinding.SEVERITY,DefectFieldBinding.EVIDENCE_ATTACHMENTS)){
+        for(DefectFieldBinding required:EnumSet.of(DefectFieldBinding.COMPONENT_ID,DefectFieldBinding.CONDITION_ID,DefectFieldBinding.ZONE,DefectFieldBinding.SEVERITY,DefectFieldBinding.EVIDENCE_ATTACHMENTS,DefectFieldBinding.AIRCRAFT_ID)){
             FieldDefinition field=mapped.get(required);
-            if(field==null||!field.required())throw new IllegalArgumentException("The Galley report requires a "+required.name().replace('_',' ').toLowerCase(java.util.Locale.ROOT)+" field.");
+            if(field==null||!field.required())throw new IllegalArgumentException("The Galley report requires "+galleyFieldName(required)+".");
         }
         FieldDefinition component=mapped.get(DefectFieldBinding.COMPONENT_ID),condition=mapped.get(DefectFieldBinding.CONDITION_ID),evidence=mapped.get(DefectFieldBinding.EVIDENCE_ATTACHMENTS);
         if(condition.optionFilter()==null||!component.key().equals(condition.optionFilter().componentFieldKey()))throw new IllegalArgumentException("The condition field must use the component-bound field as its dependency.");
@@ -65,6 +65,18 @@ final class DefectReportBindingRules {
         if(remarks!=null&&remarks.required())throw new IllegalArgumentException("Remarks must remain optional in the Galley report.");
         if(mapped.containsKey(DefectFieldBinding.DEFECT_CATEGORY)||mapped.containsKey(DefectFieldBinding.TITLE)||mapped.containsKey(DefectFieldBinding.DESCRIPTION))throw new IllegalArgumentException("Galley category, title and description are generated from the selected area, component, condition and remarks.");
         return Map.copyOf(mapped);
+    }
+
+    private static String galleyFieldName(DefectFieldBinding binding) {
+        return switch(binding) {
+            case AIRCRAFT_ID -> "a required Aircraft Registration selector (AIRCRAFT_SELECT with the Aircraft Master source)";
+            case COMPONENT_ID -> "a required Component selector";
+            case CONDITION_ID -> "a required Defect Condition selector";
+            case ZONE -> "a required Galley Number / Location field";
+            case SEVERITY -> "a required Severity selector";
+            case EVIDENCE_ATTACHMENTS -> "a required Evidence Image Upload field";
+            default -> "a required "+binding.name().replace('_',' ').toLowerCase(java.util.Locale.ROOT)+" field";
+        };
     }
 
     private static void validateField(FieldDefinition field) {
@@ -76,6 +88,7 @@ final class DefectReportBindingRules {
             case ROW_NUMBER -> field.type() == FieldType.NUMBER;
             case ZONE, SEAT_REFERENCE, TITLE, DESCRIPTION, REMARKS -> field.type() == FieldType.TEXT || field.type() == FieldType.TEXTAREA;
             case EVIDENCE_ATTACHMENTS -> field.type() == FieldType.FILE_UPLOAD || field.type() == FieldType.IMAGE_UPLOAD;
+            case AIRCRAFT_ID -> field.type() == FieldType.AIRCRAFT_SELECT && field.optionSource() == OptionSource.AIRCRAFT;
         };
         if (!valid) throw new IllegalArgumentException("Field “" + field.label() + "” uses an incompatible type or reference source for its defect-property binding.");
     }

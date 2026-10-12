@@ -63,10 +63,13 @@ public class ConfigurationService {
     }
 
     private static final Set<String> PERMISSIONS = java.util.Arrays.stream(Permission.values()).map(Enum::name).collect(java.util.stream.Collectors.toUnmodifiableSet());
+    private static final Set<String> NAVIGATION_ROUTE_KEYS = Set.of("home","operations","reports","audit","configuration","defects","fleet","quality","organizations","fleets","aircraft","areas","defect-categories","defect-conditions","components","maintenance-teams","reviewer-routing","review-queue","users","menu-items","roles","severities","permissions","role-permissions","api-rate-limits","report-defect");
     private final JdbcTemplate jdbc;
     private final ObjectMapper mapper;
 
     public ConfigurationService(JdbcTemplate jdbc, ObjectMapper mapper) { this.jdbc = jdbc; this.mapper = mapper; }
+
+    static boolean isSupportedNavigationRoute(String routeKey) { return NAVIGATION_ROUTE_KEYS.contains(routeKey); }
 
     public List<MenuItem> menu() {
         List<MenuItem> items = new ArrayList<>();
@@ -524,7 +527,7 @@ public class ConfigurationService {
             result.put("key", result.get("key").toLowerCase(Locale.ROOT));
             result.put("routeKey", result.get("routeKey").toLowerCase(Locale.ROOT));
             if (!result.get("key").matches("[a-z0-9][a-z0-9-]{0,79}") || !result.get("routeKey").matches("[a-z0-9][a-z0-9-]{0,79}")) throw new IllegalArgumentException("Menu key and route must use lowercase letters, numbers and hyphens.");
-            if (!Set.of("home","operations","reports","audit","configuration","defects","fleet","quality","organizations","fleets","aircraft","defect-categories","defect-conditions","components","maintenance-teams","reviewer-routing","review-queue","users","menu-items","roles","severities","permissions","role-permissions").contains(result.get("routeKey"))) throw new IllegalArgumentException("Choose an application section that is supported by this MVP.");
+            if (!isSupportedNavigationRoute(result.get("routeKey"))) throw new IllegalArgumentException("Choose an application section that is supported by this MVP.");
             String normalized=java.util.Arrays.stream(result.get("requiredPermissions").toUpperCase(Locale.ROOT).split("[,|]"))
                 .map(String::trim).filter(value -> !value.isEmpty()).distinct().peek(value -> { try { Permission.valueOf(value); } catch (IllegalArgumentException ex) { throw new IllegalArgumentException("Select valid application permissions."); } }).collect(java.util.stream.Collectors.joining("|"));
             if (normalized.isBlank()) throw new IllegalArgumentException("At least one visibility permission is required.");

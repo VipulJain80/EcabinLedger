@@ -30,12 +30,18 @@ class ConfigurationImportServiceTest {
 
     @Test
     void allMasterTemplatesAreBackendDefinedWithAHeaderAndSampleRow() {
-        for (String key : List.of("organizations", "fleets", "aircraft", "areas", "defect-categories", "defect-conditions", "components", "maintenance-teams", "users", "menu-items", "roles", "severities")) {
+        for (String key : List.of("fleets", "aircraft", "areas", "defect-categories", "defect-conditions", "components", "maintenance-teams", "users", "menu-items", "roles", "severities")) {
             var template = imports.template(key);
             assertEquals(key, template.resource());
             assertTrue(template.sample().startsWith("\"" + template.headers().get(0) + "\""));
             assertEquals(2, template.sample().lines().count());
         }
         assertThrows(IllegalArgumentException.class, () -> imports.template("cabin-zones"));
+    }
+
+    @Test
+    void organizationsCannotRequestAnImportTemplateBecauseOnboardingOwnsProvisioning() {
+        var error = assertThrows(IllegalArgumentException.class, () -> imports.template("organizations"));
+        assertTrue(error.getMessage().contains("operator onboarding"));
     }
 }

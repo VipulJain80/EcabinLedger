@@ -71,6 +71,14 @@ WHERE c.operator_id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' AND c.code IN ('TRAY_
   AND d.operator_id=c.operator_id AND d.code='SURFACE_DAMAGE'
 ON CONFLICT(operator_id,component_id,condition_id) WHERE isactive=1 DO NOTHING;
 
+-- This demonstration-only observation label is also available for the seeded Galley latch.
+-- It is not an approved maintenance classification or procedure.
+INSERT INTO component_conditions_mst(operator_id,component_id,condition_id)
+SELECT c.operator_id,c.id,d.id
+FROM cabin_components_mst c JOIN defect_conditions_mst d ON d.operator_id=c.operator_id AND d.code='SURFACE_DAMAGE' AND d.isactive=1
+WHERE c.operator_id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' AND c.code='GALLEY_CART_LATCH' AND c.isactive=1
+ON CONFLICT(operator_id,component_id,condition_id) WHERE isactive=1 DO NOTHING;
+
 -- A local-only reporting template is seeded only for areas that already have an explicit active
 -- component/condition mapping. It records observations and context; it is not a maintenance procedure.
 INSERT INTO operational_forms_dtl(operator_id,area_id,form_key,name)
@@ -80,6 +88,7 @@ JOIN cabin_components_mst c ON c.operator_id=a.operator_id AND c.area_id=a.id AN
 JOIN component_conditions_mst cc ON cc.operator_id=c.operator_id AND cc.component_id=c.id AND cc.isactive=1
 JOIN defect_conditions_mst dc ON dc.operator_id=cc.operator_id AND dc.id=cc.condition_id AND dc.isactive=1
 WHERE a.operator_id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' AND a.isactive=1
+  AND a.code<>'GALLEY'
 ON CONFLICT(operator_id,form_key) DO NOTHING;
 
 INSERT INTO operational_form_versions_dtl(operator_id,form_id,version_number,status,fields_json,created_by,published_by,published_at)
@@ -103,6 +112,56 @@ UPDATE operational_forms_dtl f SET published_version_id=(
 WHERE f.operator_id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' AND f.form_key LIKE 'DEMO_REPORT_%'
   AND f.isactive=1
   AND NOT EXISTS (SELECT 1 FROM operational_form_versions_dtl current_version WHERE current_version.operator_id=f.operator_id AND current_version.form_id=f.id AND current_version.id=f.published_version_id AND current_version.fields_json @> '{"fields":[{"binding":"DEFECT_CATEGORY"}]}'::jsonb);
+
+-- Bootstrap only a fresh synthetic demo tenant with no existing Galley defect-report form.
+-- The version remains a draft until PostgresMigrationSmokeTest publishes it through the same
+-- OperationalFormService validation used by Form Master. Existing administrator forms/drafts
+-- are neither modified nor automatically published.
+INSERT INTO operational_forms_dtl(operator_id,area_id,form_key,name,purpose,workflow_stage)
+SELECT a.operator_id,a.id,'LOCAL_DEMO_GALLEY_AREA','Galley Area (DEMO)','DEFECT_REPORT','INITIAL_REPORT'
+FROM cabin_areas_mst a
+WHERE a.operator_id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' AND a.code='GALLEY' AND a.isactive=1
+  AND NOT EXISTS (
+    SELECT 1 FROM operational_forms_dtl existing
+    WHERE existing.operator_id=a.operator_id AND existing.area_id=a.id AND existing.purpose='DEFECT_REPORT'
+      AND existing.workflow_stage='INITIAL_REPORT'
+  )
+ON CONFLICT(operator_id,form_key) DO NOTHING;
+
+INSERT INTO operational_form_versions_dtl(operator_id,form_id,version_number,status,fields_json,created_by)
+SELECT f.operator_id,f.id,1,'DRAFT',
+  '{"fields":[{"key":"aircraftId","label":"Aircraft Registration","type":"AIRCRAFT_SELECT","required":true,"order":0,"optionSource":"AIRCRAFT","binding":"AIRCRAFT_ID"},{"key":"location","label":"Galley Number / Location","type":"TEXT","required":true,"order":1,"textRules":{"maxLength":80},"binding":"ZONE"},{"key":"component_ref","label":"Component","type":"DROPDOWN","required":true,"order":2,"optionSource":"COMPONENTS","binding":"COMPONENT_ID"},{"key":"condition_ref","label":"Defect Condition","type":"DROPDOWN","required":true,"order":3,"optionSource":"DEFECT_CONDITIONS","optionFilter":{"componentFieldKey":"component_ref"},"binding":"CONDITION_ID"},{"key":"severity_ref","label":"Severity","type":"DROPDOWN","required":true,"order":4,"optionSource":"GALLEY_SEVERITIES","binding":"SEVERITY"},{"key":"remarks","label":"Remarks","type":"TEXTAREA","required":false,"order":5,"textRules":{"maxLength":4000},"binding":"REMARKS"},{"key":"evidence","label":"Evidence Image Upload","type":"IMAGE_UPLOAD","required":true,"order":6,"binding":"EVIDENCE_ATTACHMENTS","fileRules":{"extensions":["jpg","jpeg","png","webp"],"mimeTypes":["image/jpeg","image/png","image/webp"],"maxFileSizeBytes":5242880,"minCount":1,"maxCount":5}}]}'::jsonb,
+  'local-demo-seed'
+FROM operational_forms_dtl f
+WHERE f.operator_id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' AND f.form_key='LOCAL_DEMO_GALLEY_AREA'
+  AND f.purpose='DEFECT_REPORT' AND f.workflow_stage='INITIAL_REPORT' AND f.isactive=1
+  AND NOT EXISTS (SELECT 1 FROM operational_form_versions_dtl v WHERE v.operator_id=f.operator_id AND v.form_id=f.id)
+ON CONFLICT(operator_id,form_id,version_number) DO NOTHING;
+
+-- If the fixed local demo tenant already has exactly one administrator-created Galley report
+-- form, preserve its published version and add the missing system aircraft selector only in a
+-- seed-owned draft. The smoke test publishes that draft through OperationalFormService.
+WITH galley_form AS (
+  SELECT f.operator_id,f.id AS form_id,v.fields_json,
+    (SELECT COALESCE(max(existing.version_number),0)+1 FROM operational_form_versions_dtl existing WHERE existing.operator_id=f.operator_id AND existing.form_id=f.id) AS next_version
+  FROM operational_forms_dtl f
+  JOIN cabin_areas_mst a ON a.operator_id=f.operator_id AND a.id=f.area_id AND a.code='GALLEY' AND a.isactive=1
+  JOIN operational_form_versions_dtl v ON v.operator_id=f.operator_id AND v.form_id=f.id AND v.id=f.published_version_id AND v.status='PUBLISHED'
+  WHERE f.operator_id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' AND f.purpose='DEFECT_REPORT' AND f.workflow_stage='INITIAL_REPORT' AND f.isactive=1
+    AND f.form_key<>'LOCAL_DEMO_GALLEY_AREA'
+    AND NOT EXISTS (SELECT 1 FROM operational_form_versions_dtl draft WHERE draft.operator_id=f.operator_id AND draft.form_id=f.id AND draft.status='DRAFT')
+    AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(v.fields_json->'fields') existing(field) WHERE existing.field->>'binding'='AIRCRAFT_ID')
+    AND (SELECT count(*) FROM operational_forms_dtl other WHERE other.operator_id=f.operator_id AND other.area_id=f.area_id AND other.purpose='DEFECT_REPORT' AND other.workflow_stage='INITIAL_REPORT' AND other.isactive=1)=1
+)
+INSERT INTO operational_form_versions_dtl(operator_id,form_id,version_number,status,fields_json,created_by)
+SELECT operator_id,form_id,next_version,'DRAFT',
+  jsonb_build_object('fields',
+    jsonb_build_array(jsonb_build_object('key','aircraftId','label','Aircraft Registration','type','AIRCRAFT_SELECT','required',true,'order',0,'optionSource','AIRCRAFT','binding','AIRCRAFT_ID')) ||
+    COALESCE((SELECT jsonb_agg(jsonb_set(existing.field,'{order}',to_jsonb(COALESCE((existing.field->>'order')::integer,existing.ordinality::integer-1)+1)) ORDER BY existing.ordinality)
+      FROM jsonb_array_elements(galley_form.fields_json->'fields') WITH ORDINALITY existing(field,ordinality)), '[]'::jsonb)),
+  'local-demo-seed'
+FROM galley_form
+ON CONFLICT(operator_id,form_id,version_number) DO NOTHING;
 
 INSERT INTO maintenance_teams_mst(operator_id, name, team_type, isactive) VALUES
   ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'Cabin Maintenance', 'MAINTENANCE', 1),

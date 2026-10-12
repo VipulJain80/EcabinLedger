@@ -11,11 +11,11 @@ import java.util.UUID;
 
 public final class FormModels {
     private FormModels() {}
-    public enum FieldType { TEXT, TEXTAREA, NUMBER, DROPDOWN, MULTI_SELECT, DATE, CHECKBOX, FILE_UPLOAD, IMAGE_UPLOAD, SECTION }
+    public enum FieldType { TEXT, TEXTAREA, NUMBER, DROPDOWN, MULTI_SELECT, DATE, CHECKBOX, FILE_UPLOAD, IMAGE_UPLOAD, AIRCRAFT_SELECT, SECTION }
     public enum FormPurpose { DEFECT_REPORT, INSPECTION, CORRECTIVE_ACTION, VERIFICATION, CLOSURE_APPROVAL, REOPEN }
     public enum WorkflowStage { INITIAL_REPORT, REPORTED, UNDER_REVIEW, INSPECTION_REQUIRED, INSPECTION_IN_PROGRESS, INSPECTION_COMPLETE, ACTION_ASSIGNED, IN_PROGRESS, AWAITING_VERIFICATION, VERIFIED, APPROVAL_REQUIRED, CLOSED, REOPENED }
     public enum OptionSource { DEFECT_CATEGORIES, DEFECT_SEVERITIES, GALLEY_SEVERITIES, CABIN_AREAS, CABIN_ZONES, COMPONENTS, DEFECT_CONDITIONS, AIRCRAFT, FLEETS, MAINTENANCE_TEAMS }
-    public enum DefectFieldBinding { DEFECT_CATEGORY, COMPONENT_ID, CONDITION_ID, ZONE, ROW_NUMBER, SEAT_REFERENCE, TITLE, DESCRIPTION, REMARKS, SEVERITY, EVIDENCE_ATTACHMENTS }
+    public enum DefectFieldBinding { DEFECT_CATEGORY, COMPONENT_ID, CONDITION_ID, ZONE, ROW_NUMBER, SEAT_REFERENCE, TITLE, DESCRIPTION, REMARKS, SEVERITY, EVIDENCE_ATTACHMENTS, AIRCRAFT_ID }
     public record TextRules(Integer minLength, Integer maxLength, Boolean alphaOnly, Boolean alphanumeric, String pattern) {}
     public record NumericRules(BigDecimal min, BigDecimal max, Integer precision) {}
     public record DateRules(String minDate, String maxDate) {}
@@ -49,6 +49,8 @@ public final class FormModels {
     public record FormForArea(UUID id, String formKey, String name, UUID areaId, FormPurpose purpose, WorkflowStage workflowStage, UUID versionId, int versionNumber,
         FormConfiguration configuration) {}
     public record FormOption(UUID id, String code, String label) {}
+    public record AircraftOption(UUID id, String tailNumber, String msnNumber, String aircraftType) {}
+    public record AircraftOptionPage(List<AircraftOption> items, int page, int size, long totalElements, int totalPages) {}
     public record FieldBindingDefinition(DefectFieldBinding binding, String stableKey, String name, String domainProperty,
         String destinationTable, String destinationColumn, String dataType, List<FieldType> supportedFieldTypes,
         List<String> cabinAreaCodes, List<FormPurpose> formPurposes, String requiredPolicy, OptionSource referenceDataSource,

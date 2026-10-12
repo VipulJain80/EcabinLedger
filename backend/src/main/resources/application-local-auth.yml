@@ -8,6 +8,9 @@ spring:
         jwt:
           issuer-uri: ecabin-ledger-local
 app:
+  attachments:
+    provider: ${ATTACHMENT_STORAGE_PROVIDER:local}
+    local-path: ${ATTACHMENT_LOCAL_PATH:/Users/vipuljain/Desktop/EcabinLedger/uploadimages}
   security:
     audience: ecabin-ledger-api
   local-auth:

@@ -18,6 +18,13 @@ class FormFieldBindingCatalogTest {
         assertEquals("seat_reference",catalog.require(DefectFieldBinding.SEAT_REFERENCE).destinationColumn());
         assertEquals("severity_id",catalog.require(DefectFieldBinding.SEVERITY).destinationColumn());
         assertEquals("attachments_dtl",catalog.require(DefectFieldBinding.EVIDENCE_ATTACHMENTS).destinationTable());
+        var aircraft=catalog.require(DefectFieldBinding.AIRCRAFT_ID);
+        assertEquals("aircraftId",aircraft.stableKey());
+        assertEquals("aircraft_mst",aircraft.destinationTable());
+        assertEquals("id",aircraft.destinationColumn());
+        assertEquals(Set.of(FieldType.AIRCRAFT_SELECT),Set.copyOf(aircraft.supportedFieldTypes()));
+        assertEquals("AIRCRAFT",aircraft.referenceDataSource().name());
+        assertEquals("SYSTEM_CONTROLLED_SELECTION",aircraft.classification());
         assertFalse(fields.stream().anyMatch(f->f.destinationTable().contains("${")||f.destinationColumn().contains(";")));
     }
 

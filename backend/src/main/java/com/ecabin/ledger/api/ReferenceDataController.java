@@ -28,8 +28,7 @@ public class ReferenceDataController {
 
     @GetMapping
     public Map<String, Object> get(JwtAuthenticationToken auth) {
-        AuthenticatedUser user = users.require(auth);
-        permissions.require(user, Permission.VIEW);
+        AuthenticatedUser user = operationalReader(auth);
         return Map.of(
             "categories", configuration.list(user.organizationId(), "defect-categories", false),
             "areas", configuration.list(user.organizationId(), "areas", false),
@@ -42,8 +41,9 @@ public class ReferenceDataController {
 
     @GetMapping("/components/{componentId}/conditions")
     public List<ConditionOption> conditionsForComponent(JwtAuthenticationToken auth, @PathVariable java.util.UUID componentId) {
-        AuthenticatedUser user = users.require(auth);
-        permissions.require(user, Permission.VIEW);
+        AuthenticatedUser user = operationalReader(auth);
         return configuration.conditionsForComponent(user.organizationId(), componentId);
     }
+
+    private AuthenticatedUser operationalReader(JwtAuthenticationToken auth){AuthenticatedUser user=users.require(auth);var grants=permissions.permissionsFor(user.organizationId(),user.role());if(!grants.contains(Permission.VIEW)&&!grants.contains(Permission.REPORT))throw new org.springframework.security.access.AccessDeniedException("View or report permission is required.");return user;}
 }

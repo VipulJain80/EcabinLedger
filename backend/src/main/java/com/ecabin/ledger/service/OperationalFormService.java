@@ -159,6 +159,11 @@ public class OperationalFormService {
         FormVersion version=requireVersion(operatorId,formId,versionId);
         if (!"DRAFT".equals(version.status())) throw new ResponseStatusException(HttpStatus.CONFLICT,"This form version is already published.");
         validateConfiguration(operatorId,formArea(operatorId,formId),version.configuration(),formPurpose(operatorId,formId),true);
+        if(formPurpose(operatorId,formId)==FormPurpose.DEFECT_REPORT) {
+            String areaCode=jdbc.queryForObject("SELECT code FROM cabin_areas_mst WHERE operator_id=? AND id=? AND isactive=1",String.class,operatorId,formArea(operatorId,formId));
+            if(areaCode.equals("GALLEY")&&DefectReportBindingRules.isGalleyCompact(version.configuration().fields()))DefectReportBindingRules.requireGalleyReport(version.configuration().fields());
+            else DefectReportBindingRules.requireComplete(version.configuration().fields());
+        }
         if (version.configuration().fields().isEmpty()) throw new IllegalArgumentException("Add at least one field before publishing.");
         int published=jdbc.update("UPDATE operational_form_versions_dtl SET status='PUBLISHED',published_by=?,published_at=now() WHERE operator_id=? AND form_id=? AND id=? AND status='DRAFT'",actor,operatorId,formId,versionId);
         int linked=jdbc.update("UPDATE operational_forms_dtl SET published_version_id=?,updated_at=now() WHERE operator_id=? AND id=? AND isactive=1",versionId,operatorId,formId);
@@ -191,7 +196,30 @@ public class OperationalFormService {
     public List<FormForArea> publishedForArea(UUID operatorId,UUID areaId,FormPurpose purpose,WorkflowStage stage) {
         requireActiveArea(operatorId,areaId);
         FormResolutionRules.requireMapping(purpose,stage);
-        return jdbc.query("SELECT f.id,f.form_key,f.name,f.area_id,f.purpose,f.workflow_stage,v.id AS version_id,v.version_number,v.fields_json::text FROM operational_forms_dtl f JOIN operational_form_versions_dtl v ON v.operator_id=f.operator_id AND v.form_id=f.id AND v.id=f.published_version_id AND v.status='PUBLISHED' WHERE f.operator_id=? AND f.area_id=? AND f.purpose=? AND f.workflow_stage=? AND f.isactive=1 ORDER BY f.name",(rs,n)->formForArea(rs),operatorId,areaId,purpose.name(),stage.name());
+        List<FormForArea> published=jdbc.query("SELECT f.id,f.form_key,f.name,f.area_id,f.purpose,f.workflow_stage,v.id AS version_id,v.version_number,v.fields_json::text FROM operational_forms_dtl f JOIN operational_form_versions_dtl v ON v.operator_id=f.operator_id AND v.form_id=f.id AND v.id=f.published_version_id AND v.status='PUBLISHED' WHERE f.operator_id=? AND f.area_id=? AND f.purpose=? AND f.workflow_stage=? AND f.isactive=1 ORDER BY f.name",(rs,n)->formForArea(rs),operatorId,areaId,purpose.name(),stage.name());
+        if(purpose!=FormPurpose.DEFECT_REPORT)return published;
+        String areaCode=jdbc.queryForObject("SELECT code FROM cabin_areas_mst WHERE operator_id=? AND id=? AND isactive=1",String.class,operatorId,areaId);
+        List<FormForArea> eligible=new ArrayList<>();List<String> configurationIssues=new ArrayList<>();
+        for(FormForArea form:published){
+            try{if("GALLEY".equals(areaCode)&&DefectReportBindingRules.isGalleyCompact(form.configuration().fields()))DefectReportBindingRules.requireGalleyReport(form.configuration().fields());else DefectReportBindingRules.requireComplete(form.configuration().fields());eligible.add(form);}
+            catch(IllegalArgumentException invalid){configurationIssues.add(form.name()+": "+invalid.getMessage());}
+        }
+        if(!eligible.isEmpty())return List.copyOf(eligible);
+        if(!configurationIssues.isEmpty())throw new ResponseStatusException(HttpStatus.CONFLICT,"No published defect-report form for this area has a valid configuration. Create or edit a draft version in Form Master, fix the configuration issue below, then publish a new version. "+configurationIssues.get(0));
+        return List.of();
+    }
+
+    /** Search active aircraft for an authorized reporting user; identity is supplied by the controller's validated principal. */
+    public AircraftOptionPage reportingAircraft(UUID operatorId,String search,int page,int size) {
+        int safePage=Math.max(0,Math.min(page,100_000));
+        int safeSize=Math.max(1,Math.min(size,100));
+        String term=search==null?"":search.trim().toLowerCase(java.util.Locale.ROOT);
+        if(term.length()>80)throw new IllegalArgumentException("Aircraft search must be 80 characters or fewer.");
+        String like="%"+term+"%";
+        Long total=jdbc.queryForObject("SELECT count(*) FROM aircraft_mst WHERE operator_id=? AND isactive=1 AND (?='' OR lower(tail_number) LIKE ? OR lower(msn_number) LIKE ?)",Long.class,operatorId,term,like,like);
+        List<AircraftOption> items=jdbc.query("SELECT id,tail_number,msn_number,aircraft_type FROM aircraft_mst WHERE operator_id=? AND isactive=1 AND (?='' OR lower(tail_number) LIKE ? OR lower(msn_number) LIKE ?) ORDER BY tail_number,id LIMIT ? OFFSET ?",(rs,n)->new AircraftOption(rs.getObject("id",UUID.class),rs.getString("tail_number"),rs.getString("msn_number"),rs.getString("aircraft_type")),operatorId,term,like,like,safeSize,(long)safePage*safeSize);
+        long count=total==null?0:total;
+        return new AircraftOptionPage(items,safePage,safeSize,count,(int)Math.ceil((double)count/safeSize));
     }
 
     /** Resolve mapped report answers from the exact published definition; client-supplied defect properties are ignored. */
@@ -200,6 +228,7 @@ public class OperationalFormService {
         if(!form.areaId().equals(areaId)||form.purpose()!=FormPurpose.DEFECT_REPORT||form.workflowStage()!=WorkflowStage.INITIAL_REPORT)
             throw new ResponseStatusException(HttpStatus.CONFLICT,"The selected version is not an initial defect-report form for this area.");
         Map<String,Object> submitted=answers==null?Map.of():answers;
+        for(FieldDefinition field:form.configuration().fields())if(field.binding()==DefectFieldBinding.AIRCRAFT_ID&&submitted.containsKey(field.key()))throw new IllegalArgumentException("Aircraft registration is selected separately and cannot be submitted as a form answer.");
         for(FieldDefinition field:form.configuration().fields())if(Boolean.TRUE.equals(field.readOnly())&&!blank(submitted.get(field.key())))throw new IllegalArgumentException("Read-only field "+field.label()+" cannot receive a submitted value.");
         Map<String,Object> result=new HashMap<>();
         String areaCode=jdbc.queryForObject("SELECT code FROM cabin_areas_mst WHERE operator_id=? AND id=? AND isactive=1",String.class,operatorId,areaId);
@@ -365,6 +394,7 @@ public class OperationalFormService {
             if(Boolean.FALSE.equals(f.visible())&&f.required())throw new IllegalArgumentException("A hidden field cannot be required.");
             if(f.binding()!=null) {
                 FieldBindingDefinition approved=bindingCatalog.require(f.binding());
+                if(f.binding()==DefectFieldBinding.AIRCRAFT_ID&&(!"aircraftId".equals(f.key())||f.type()!=FieldType.AIRCRAFT_SELECT))throw new IllegalArgumentException("The aircraft reference must use the stable aircraftId key and Aircraft Registration selector type.");
                 if(!approved.formPurposes().contains(purpose))throw new IllegalArgumentException("The selected backend binding is not supported for this form purpose.");
                 if(!approved.supportedFieldTypes().contains(f.type()))throw new IllegalArgumentException("Field “"+f.label()+"” uses an unsupported type for this backend binding.");
                 String areaCode=jdbc.queryForObject("SELECT code FROM cabin_areas_mst WHERE operator_id=? AND id=? AND isactive=1",String.class,operatorId,formArea);
@@ -432,6 +462,7 @@ public class OperationalFormService {
             if(Boolean.TRUE.equals(f.readOnly())&&answers.containsKey(f.key()))throw new IllegalArgumentException("A read-only field cannot receive a submitted value.");
             if(f.binding()==null&&f.type()!=FieldType.FILE_UPLOAD&&f.type()!=FieldType.IMAGE_UPLOAD)throw new IllegalArgumentException(FormFieldBindingCatalog.UNSUPPORTED_FIELD_MESSAGE+" (“"+f.label()+"”)");
             if(f.binding()!=null){FieldBindingDefinition approved=bindingCatalog.require(f.binding());String areaCode=jdbc.queryForObject("SELECT code FROM cabin_areas_mst WHERE operator_id=? AND id=? AND isactive=1",String.class,operatorId,form.areaId());boolean galleySeverity=f.binding()==DefectFieldBinding.SEVERITY&&areaCode.equals("GALLEY")&&f.optionSource()==OptionSource.GALLEY_SEVERITIES;if(!approved.formPurposes().contains(form.purpose())||!approved.supportedFieldTypes().contains(f.type())||approved.referenceDataSource()!=f.optionSource()&&!galleySeverity)throw new IllegalArgumentException("The published field has an unsupported or mismatched backend binding.");}
+            if(f.type()==FieldType.AIRCRAFT_SELECT){if(answers.containsKey(f.key()))throw new IllegalArgumentException("Aircraft registration is selected separately and cannot be submitted as a form answer.");if(jdbc.queryForObject("SELECT count(*) FROM defects_dtl WHERE operator_id=? AND id=? AND aircraft_id IS NOT NULL AND isactive=1",Integer.class,operatorId,defectId)!=1)throw new IllegalArgumentException("Select an active aircraft before submitting this report.");continue;}
             Object value=answers.get(f.key());
             if(value==null || (value instanceof String s && s.isBlank())) {
                 if(f.required()) throw new IllegalArgumentException("A value is required for "+f.label()+".");
@@ -446,6 +477,10 @@ public class OperationalFormService {
                 case DROPDOWN -> validateOption(operatorId,form.areaId(),f,value,answers);
                 case MULTI_SELECT -> { if(!(value instanceof List<?> list)) throw new IllegalArgumentException(f.label()+" must be a list of selections."); Set<Object> unique=new HashSet<>(); for(Object option:list){if(!unique.add(option))throw new IllegalArgumentException("Duplicate options are not allowed for "+f.label()+".");validateOption(operatorId,form.areaId(),f,option,answers);} if(f.required()&&list.isEmpty())throw new IllegalArgumentException("Choose at least one option for "+f.label()+"."); }
                 case FILE_UPLOAD, IMAGE_UPLOAD -> validateAttachmentCount(f,value);
+                case AIRCRAFT_SELECT -> {
+                    if(answers.containsKey(f.key()))throw new IllegalArgumentException("Aircraft registration is selected separately and cannot be submitted as a form answer.");
+                    if(jdbc.queryForObject("SELECT count(*) FROM defects_dtl WHERE operator_id=? AND id=? AND aircraft_id IS NOT NULL AND isactive=1",Integer.class,operatorId,defectId)!=1)throw new IllegalArgumentException("Select an active aircraft before submitting this report.");
+                }
                 case SECTION -> {}
             }
             if(f.type()==FieldType.FILE_UPLOAD||f.type()==FieldType.IMAGE_UPLOAD) validateAttachments(operatorId,defectId,form,f,value);
@@ -488,6 +523,7 @@ public class OperationalFormService {
             case NUMBER -> { if(t!=null||d!=null||files!=null||f.optionSource()!=null)throw new IllegalArgumentException("Number fields cannot use text, date, option or file settings.");if(n!=null){if(n.min()!=null&&n.max()!=null&&n.min().compareTo(n.max())>0)throw new IllegalArgumentException("Numeric minimum cannot exceed maximum.");if(n.precision()!=null&&(n.precision()<0||n.precision()>8))throw new IllegalArgumentException("Decimal precision must be between 0 and 8.");} }
             case DATE -> { if(t!=null||n!=null||files!=null||f.optionSource()!=null)throw new IllegalArgumentException("Date fields cannot use text, numeric, option or file settings.");if(d!=null){LocalDate min=parseDateRule(d.minDate()),max=parseDateRule(d.maxDate());if(min!=null&&max!=null&&min.isAfter(max))throw new IllegalArgumentException("Minimum date cannot be after maximum date.");} }
             case DROPDOWN,MULTI_SELECT -> { if(f.optionSource()==null||t!=null||n!=null||d!=null||files!=null)throw new IllegalArgumentException("Selection fields require one authorized master-data source only."); }
+            case AIRCRAFT_SELECT -> {if(f.optionSource()!=OptionSource.AIRCRAFT||t!=null||n!=null||d!=null||files!=null)throw new IllegalArgumentException("Aircraft selectors require the approved Aircraft Master source only.");}
             case FILE_UPLOAD,IMAGE_UPLOAD -> {if(files==null||t!=null||n!=null||d!=null||f.optionSource()!=null)throw new IllegalArgumentException("Evidence fields require file restrictions only.");if(files.maxFileSizeBytes()==null||files.maxFileSizeBytes()<1||files.maxFileSizeBytes()>15728640||files.minCount()==null||files.maxCount()==null||files.minCount()<0||files.maxCount()<1||files.maxCount()>10||files.minCount()>files.maxCount())throw new IllegalArgumentException("Configure valid file size and count limits (maximum 15 MB and 10 files per field).");if(files.extensions()==null||files.extensions().isEmpty()||files.mimeTypes()==null||files.mimeTypes().isEmpty())throw new IllegalArgumentException("Evidence fields must list allowed extensions and MIME types.");for(String ext:files.extensions())if(!EXTENSIONS.contains(ext.toLowerCase(java.util.Locale.ROOT)))throw new IllegalArgumentException("Unsupported file extension: "+ext);for(String mime:files.mimeTypes())if(!MIME_TYPES.contains(mime.toLowerCase(java.util.Locale.ROOT)))throw new IllegalArgumentException("Unsupported MIME type: "+mime);if(f.type()==FieldType.IMAGE_UPLOAD&&files.extensions().stream().anyMatch(ext->!Set.of("png","jpg","jpeg","webp").contains(ext.toLowerCase(java.util.Locale.ROOT))))throw new IllegalArgumentException("Image uploads may use PNG, JPEG or WEBP only."); }
             case CHECKBOX -> {if(t!=null||n!=null||d!=null||files!=null||f.optionSource()!=null)throw new IllegalArgumentException("Checkbox fields do not accept extra validation settings.");}
             case SECTION -> {if(f.required()||t!=null||n!=null||d!=null||files!=null||f.optionSource()!=null)throw new IllegalArgumentException("Section fields are headings and cannot be required or validated.");}

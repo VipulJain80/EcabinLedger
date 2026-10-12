@@ -92,10 +92,11 @@ public class SecurityConfig {
                 .requestMatchers(HttpMethod.GET, "/api/v1/reviewer-teams").access(authorization.anyOf(Permission.REVIEW))
                 .requestMatchers(HttpMethod.GET, "/api/v1/defects/*/events").access(authorization.anyOf(Permission.AUDIT, Permission.REVIEW))
                 .requestMatchers(HttpMethod.GET, "/api/v1/defects/*/operational-forms").access(authorization.authenticatedMember())
+                .requestMatchers(HttpMethod.GET, "/api/v1/areas/*/forms", "/api/v1/forms/**", "/api/v1/reference-data", "/api/v1/reference-data/**", "/api/v1/defects/*/form-submissions").access(authorization.anyOf(Permission.VIEW,Permission.REPORT))
+                .requestMatchers(HttpMethod.GET, "/api/v1/aircraft/options").access(authorization.anyOf(Permission.REPORT))
                 .requestMatchers(HttpMethod.GET, "/api/v1/aircraft/**").access(authorization.anyOf(Permission.VIEW))
                 .requestMatchers(HttpMethod.GET, "/api/v1/defects", "/api/v1/defects/*", "/api/v1/dashboard/summary",
-                    "/api/v1/fleet-status/**", "/api/v1/reference-data/**", "/api/v1/areas/*/forms",
-                    "/api/v1/forms/**", "/api/v1/defects/*/form-submissions", "/api/v1/attachments/*/download")
+                    "/api/v1/fleet-status/**", "/api/v1/attachments/*/download")
                     .access(authorization.anyOf(Permission.VIEW))
                 .requestMatchers(HttpMethod.GET, "/api/v1/configuration/**").access(authorization.anyOf(Permission.ADMINISTER_ORGANIZATION))
                 .requestMatchers(HttpMethod.POST, "/api/v1/defects").access(authorization.anyOf(Permission.REPORT))

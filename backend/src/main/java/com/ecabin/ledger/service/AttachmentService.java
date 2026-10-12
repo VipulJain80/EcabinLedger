@@ -7,6 +7,8 @@ import com.ecabin.ledger.security.AuthenticatedUser;
 import com.ecabin.ledger.security.Permission;
 import com.ecabin.ledger.storage.BlobStorage;
 import com.ecabin.ledger.storage.EvidenceScanner;
+import com.ecabin.ledger.storage.EvidenceFileValidator;
+import com.ecabin.ledger.storage.EvidenceScanStatus;
 import java.security.MessageDigest;
 import java.time.Instant;
 import java.util.HexFormat;
@@ -45,18 +47,20 @@ public class AttachmentService {
         var locked=jdbc.query("SELECT d.id FROM defects_dtl d WHERE d.operator_id=? AND d.id=? AND d.isactive=1 AND (?=false OR (d.status IN ('ACTION_ASSIGNED','IN_PROGRESS') AND ((d.assigned_team IS NULL AND d.assigned_user_id=?) OR "+teamMembershipPredicate("d.assigned_team")+"))) AND (?=false OR d.reported_by=?) FOR UPDATE",(rs,n)->rs.getObject(1,UUID.class),user.organizationId(),defectId,teamScoped,user.externalUserId(),user.organizationId(),user.externalUserId(),reporterScoped,user.externalUserId());
         if(locked.isEmpty())throw new ResponseStatusException(HttpStatus.NOT_FOUND,"Defect was not found for this organization.");
         FieldDefinition field=forms.requireUploadField(user.organizationId(),formId,versionId,fieldKey,defectId);
-        var rules=field.fileRules(); byte[] bytes;
+        var rules=field.fileRules();
+        if(rules==null||rules.maxFileSizeBytes()==null||rules.extensions()==null||rules.mimeTypes()==null)throw new ResponseStatusException(HttpStatus.CONFLICT,"This published evidence field has incomplete file rules. Ask an administrator to publish a corrected form version.");
+        String safeName=safeFilename(file.getOriginalFilename());String extension=extension(safeName);
+        EvidenceFileValidator.validateSize(field,extension,file.getSize());
+        byte[] bytes;
         try{bytes=file.getBytes();}catch(Exception ex){throw new IllegalArgumentException("The evidence file could not be read.");}
-        if(bytes.length==0||bytes.length>rules.maxFileSizeBytes()||bytes.length>15_728_640)throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE,"The file exceeds the size limit for this field.");
-        String safeName=safeFilename(file.getOriginalFilename());String extension=extension(safeName);String detected=detect(bytes);
-        if(extension==null||!rules.extensions().stream().anyMatch(x->x.equalsIgnoreCase(extension)))throw new IllegalArgumentException("This file extension is not allowed for the selected field.");
-        if(detected==null||!rules.mimeTypes().stream().anyMatch(x->x.equalsIgnoreCase(detected))||!mimeForExtension(extension).equals(detected))throw new IllegalArgumentException("The file content does not match an allowed file type.");
+        EvidenceFileValidator.validateSize(field,extension,bytes.length);
+        String detected=EvidenceFileValidator.validateContent(field,extension,bytes);
         Integer count=jdbc.queryForObject("SELECT count(*) FROM attachments_dtl WHERE operator_id=? AND defect_id=? AND form_id=? AND form_version_id=? AND field_key=? AND isactive=1 AND scan_status<>'REJECTED'",Integer.class,user.organizationId(),defectId,formId,versionId,fieldKey);
         if(count!=null&&count>=rules.maxCount())throw new IllegalArgumentException("The maximum number of files for this field has been reached.");
         UUID id=UUID.randomUUID();String key="evidence/"+user.organizationId()+"/"+defectId+"/"+id;String status="QUARANTINED";boolean stored=false;
         try {
             storage.put(key,bytes,detected);stored=true;
-            EvidenceScanner.Result result=scanner.scan(bytes);if(result==EvidenceScanner.Result.CLEAN)status="CLEAN";else if(result==EvidenceScanner.Result.REJECTED)status="REJECTED";
+            status=EvidenceScanStatus.from(scanner.scan(bytes));
             String digest=HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
             jdbc.update("INSERT INTO attachments_dtl(id,operator_id,defect_id,object_key,original_filename,detected_mime_type,size_bytes,sha256,uploaded_by,form_id,form_version_id,field_key,scan_status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",id,user.organizationId(),defectId,key,safeName,detected,bytes.length,digest,user.externalUserId(),formId,versionId,fieldKey,status);
             audit(user,id,defectId,"ATTACHMENT_UPLOADED",safeName,status);
@@ -87,8 +91,6 @@ public class AttachmentService {
     private String safeFilename(String raw){if(raw==null||raw.isBlank())throw new IllegalArgumentException("A filename is required.");String leaf=raw.replace('\\','/');leaf=leaf.substring(leaf.lastIndexOf('/')+1).replaceAll("[^A-Za-z0-9._-]","_");if(leaf.length()>120)leaf=leaf.substring(leaf.length()-120);if(leaf.isBlank()||leaf.startsWith("."))throw new IllegalArgumentException("The filename is invalid.");return leaf;}
     private String teamMembershipPredicate(String teamColumn){return "EXISTS (SELECT 1 FROM operator_membership_teams_mst omt JOIN operator_memberships_mst m ON m.operator_id=omt.operator_id AND m.external_user_id=omt.external_user_id AND m.isactive=1 JOIN maintenance_teams_mst t ON t.operator_id=omt.operator_id AND t.name=omt.team_name AND t.isactive=1 WHERE omt.operator_id=? AND omt.external_user_id=? AND omt.team_name="+teamColumn+" AND omt.isactive=1)";}
     private String extension(String name){int dot=name.lastIndexOf('.');return dot<1?null:name.substring(dot+1).toLowerCase(Locale.ROOT);}
-    private String mimeForExtension(String ext){return switch(ext){case "png"->"image/png";case "jpg","jpeg"->"image/jpeg";case "webp"->"image/webp";case "pdf"->"application/pdf";default->"";};}
-    private String detect(byte[] b){if(b.length>=8&&(b[0]&255)==137&&b[1]==80&&b[2]==78&&b[3]==71&&b[4]==13&&b[5]==10&&b[6]==26&&b[7]==10)return "image/png";if(b.length>=3&&(b[0]&255)==255&&(b[1]&255)==216&&(b[2]&255)==255)return "image/jpeg";if(b.length>=12&&b[0]=='R'&&b[1]=='I'&&b[2]=='F'&&b[3]=='F'&&b[8]=='W'&&b[9]=='E'&&b[10]=='B'&&b[11]=='P')return "image/webp";if(b.length>=5&&b[0]=='%'&&b[1]=='P'&&b[2]=='D'&&b[3]=='F'&&b[4]=='-')return "application/pdf";return null;}
     private record DownloadMeta(UUID defectId,String objectKey,String filename,String mimeType,String scanStatus,long sizeBytes){}
     public record Download(UUID id,String filename,String mimeType,byte[] content){}
 }
