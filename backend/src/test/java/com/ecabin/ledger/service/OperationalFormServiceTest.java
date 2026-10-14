@@ -58,8 +58,10 @@ class OperationalFormServiceTest {
         var query=org.mockito.ArgumentCaptor.forClass(String.class);
         verify(jdbc).query(query.capture(),any(RowMapper.class),any(Object[].class));
         verify(jdbc).queryForObject(contains("FROM cabin_areas_mst"),eq(Boolean.class),any(Object[].class));
-        assertTrue(query.getValue().contains("f.operator_id=? AND f.area_id=? AND f.purpose=? AND f.workflow_stage=? AND f.isactive=1"));
+        assertTrue(query.getValue().contains("f.operator_id=? AND v.area_id=? AND v.purpose=? AND v.workflow_stage=? AND f.isactive=1"));
         assertTrue(query.getValue().contains("v.id=f.published_version_id AND v.status='PUBLISHED'"));
+        assertTrue(query.getValue().contains("v.form_name"));
+        assertTrue(query.getValue().contains("v.area_id AS version_area_id"));
         assertTrue(query.getValue().contains("v.operator_id=f.operator_id AND v.form_id=f.id"));
         assertFalse(query.getValue().contains("cabin_zones"));
     }
@@ -73,22 +75,39 @@ class OperationalFormServiceTest {
         verify(jdbc,never()).query(anyString(),any(RowMapper.class),any(Object[].class));
     }
 
-    @Test void areaReassignmentIsTenantScopedAndAuditedWithoutChangingFormVersions(){
+    @Test void mappingOptionsComeFromActiveTenantAreasAndBackendPurposeStageRules(){
+        JdbcTemplate jdbc=mock(JdbcTemplate.class);UUID galley=UUID.randomUUID(),cabin=UUID.randomUUID();
+        when(jdbc.query(anyString(),any(RowMapper.class),any(Object[].class))).thenReturn(List.of(
+            Map.of("id",galley,"code","GALLEY"),Map.of("id",cabin,"code","CABIN")));
+        var mappedService=new OperationalFormService(jdbc,new ObjectMapper());
+
+        var options=mappedService.mappingOptions(operator);
+
+        assertTrue(options.stream().anyMatch(option->option.areaId().equals(galley)&&option.purpose()==FormPurpose.CLOSURE_APPROVAL&&option.workflowStage()==WorkflowStage.APPROVAL_REQUIRED));
+        assertFalse(options.stream().anyMatch(option->option.areaId().equals(cabin)&&option.purpose()==FormPurpose.CLOSURE_APPROVAL));
+        assertFalse(options.stream().anyMatch(option->option.purpose()==FormPurpose.DEFECT_REPORT&&option.workflowStage()!=WorkflowStage.INITIAL_REPORT));
+    }
+
+    @Test void areaReassignmentIsTenantScopedAuditedAndCreatesMappingSnapshotDraft(){
         JdbcTemplate jdbc=mock(JdbcTemplate.class);
         UUID formId=UUID.randomUUID(),previousArea=UUID.randomUUID(),nextArea=UUID.randomUUID();
-        when(jdbc.query(anyString(),any(RowMapper.class),any(Object[].class)))
-            .thenReturn(List.<Object>of(Map.of("isactive",1,"area_id",previousArea)));
+        Map<String,Object> form=new java.util.HashMap<>();form.put("isactive",1);form.put("area_id",previousArea);form.put("purpose","DEFECT_REPORT");form.put("workflow_stage","INITIAL_REPORT");form.put("name","Galley Area");form.put("published_version_id",null);
+        when(jdbc.query(contains("FOR UPDATE OF f"),any(RowMapper.class),any(Object[].class))).thenReturn(List.of(form));
+        when(jdbc.query(contains("SELECT id,fields_json::text AS fields_json"),any(RowMapper.class),any(Object[].class))).thenReturn(List.of());
+        when(jdbc.query(contains("SELECT f.*,a.name AS area_name"),any(RowMapper.class),any(Object[].class))).thenReturn(List.of(form));
         when(jdbc.queryForObject(contains("cabin_areas_mst"),eq(Boolean.class),any(Object[].class))).thenReturn(true);
+        when(jdbc.queryForObject(contains("set_config"),eq(String.class),any(Object[].class))).thenReturn("admin-user");
+        when(jdbc.queryForObject(contains("max(version_number)"),eq(Integer.class),any(Object[].class))).thenReturn(2);
         when(jdbc.update(anyString(),any(Object[].class))).thenReturn(1);
         var mappedService=new OperationalFormService(jdbc,new ObjectMapper());
 
         mappedService.reassignArea(operator,"admin-user",formId,nextArea,"Correct area assignment");
 
         var updates=org.mockito.ArgumentCaptor.forClass(String.class);
-        verify(jdbc,times(2)).update(updates.capture(),any(Object[].class));
+        verify(jdbc,times(4)).update(updates.capture(),any(Object[].class));
         assertTrue(updates.getAllValues().stream().anyMatch(sql->sql.contains("UPDATE operational_forms_dtl SET area_id=?")));
+        assertTrue(updates.getAllValues().stream().anyMatch(sql->sql.contains("INSERT INTO operational_form_versions_dtl")&&sql.contains("form_name,area_id,purpose,workflow_stage")));
         assertTrue(updates.getAllValues().stream().anyMatch(sql->sql.contains("INSERT INTO defect_events_dtl")),"The mapping change must be audited.");
-        assertTrue(updates.getAllValues().stream().noneMatch(sql->sql.contains("operational_form_versions_dtl")));
     }
 
     private FieldDefinition field(String key,FieldType type){return new FieldDefinition(key,key,type,null,false,0,null,null,null,null,null,null);}

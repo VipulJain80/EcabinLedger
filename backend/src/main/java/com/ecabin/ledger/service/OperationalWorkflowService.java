@@ -1,6 +1,7 @@
 package com.ecabin.ledger.service;
 
 import static com.ecabin.ledger.api.ApiModels.*;
+import com.ecabin.ledger.api.FormModels.*;
 
 import java.sql.Timestamp;
 import java.util.Set;
@@ -20,11 +21,14 @@ public class OperationalWorkflowService {
     private static final Set<String> PRIORITIES = Set.of("LOW", "MEDIUM", "HIGH", "CRITICAL");
     private final JdbcTemplate jdbc;
     private final NotificationService notifications;
+    private final ClosureReviewAccessService closureAccess;
+    private final OperationalFormService forms;
 
     @org.springframework.beans.factory.annotation.Autowired
-    public OperationalWorkflowService(JdbcTemplate jdbc, NotificationService notifications) { this.jdbc = jdbc; this.notifications = notifications; }
+    public OperationalWorkflowService(JdbcTemplate jdbc, NotificationService notifications, ClosureReviewAccessService closureAccess, OperationalFormService forms) { this.jdbc = jdbc; this.notifications = notifications; this.closureAccess=closureAccess; this.forms=forms; }
     /** Compatibility constructor for isolated legacy unit tests. */
-    public OperationalWorkflowService(JdbcTemplate jdbc) { this(jdbc, null); }
+    public OperationalWorkflowService(JdbcTemplate jdbc, NotificationService notifications) { this(jdbc,notifications,null,null); }
+    public OperationalWorkflowService(JdbcTemplate jdbc) { this(jdbc, null,null,null); }
 
     @Transactional
     public WorkflowRecord completeInspection(UUID organizationId, UUID defectId, String actorId, InspectionRequest request) {
@@ -92,7 +96,7 @@ public class OperationalWorkflowService {
         auditActor(actorId);
         String from = lockDefect(organizationId, defectId);
         if (!Set.of("ACTION_ASSIGNED", "IN_PROGRESS").contains(from)) throw new IllegalStateException("Only an active corrective action can be reassigned.");
-        ActionAssignment previous = jdbc.query("SELECT id,assigned_team,assigned_user_id,description,priority,due_at FROM corrective_actions_dtl WHERE operator_id=? AND defect_id=? AND id=? AND isactive=1 AND status IN ('ASSIGNED','IN_PROGRESS') FOR UPDATE",
+        ActionAssignment previous = jdbc.query("SELECT id,assigned_team,assigned_user_id,description,priority,due_at FROM corrective_actions_dtl WHERE operator_id=? AND defect_id=? AND id=? AND isactive=1 AND status IN ('ASSIGNED','IN_PROGRESS','ON_HOLD') FOR UPDATE",
             (rs, row) -> new ActionAssignment(rs.getObject("id", UUID.class), rs.getString("assigned_team"), rs.getString("assigned_user_id"), rs.getString("description"), rs.getString("priority"), rs.getTimestamp("due_at")), organizationId, defectId, actionId)
             .stream().findFirst().orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Active corrective action was not found."));
         String newTeam = request.assignedTeam().trim();
@@ -101,7 +105,7 @@ public class OperationalWorkflowService {
         if (newUser != null && !activeTeamMember(organizationId, newTeam, newUser)) throw new IllegalArgumentException("The individual assignee must be an active member of the selected maintenance team.");
         if (newTeam.equals(previous.team()) && java.util.Objects.equals(newUser, previous.assignedUser())) throw new IllegalArgumentException("Choose a different team or individual assignee.");
 
-        int cancelled = jdbc.update("UPDATE corrective_actions_dtl SET status='CANCELLED',updated_at=now() WHERE operator_id=? AND defect_id=? AND id=? AND isactive=1 AND status IN ('ASSIGNED','IN_PROGRESS')",
+        int cancelled = jdbc.update("UPDATE corrective_actions_dtl SET status='CANCELLED',updated_at=now() WHERE operator_id=? AND defect_id=? AND id=? AND isactive=1 AND status IN ('ASSIGNED','IN_PROGRESS','ON_HOLD')",
             organizationId, defectId, actionId);
         if (cancelled != 1) throw new IllegalStateException("The corrective action changed while it was being reassigned. Refresh and try again.");
         UUID replacementId = UUID.randomUUID();
@@ -153,6 +157,7 @@ public class OperationalWorkflowService {
         UUID verificationId = UUID.randomUUID();
         jdbc.update("INSERT INTO verifications_dtl(id,operator_id,defect_id,verifier_user_id,result,notes) VALUES(?,?,?,?,?,?)", verificationId, organizationId, defectId, actorId, result, request.notes().trim());
         String target = result.equals("PASS") ? "VERIFIED" : "IN_PROGRESS";
+        if(result.equals("FAIL")) returnCompletedCorrectiveAction(organizationId,defectId,actorId);
         updateStatus(organizationId, defectId, from, target);
         UUID eventId = audit(organizationId, defectId, "VERIFICATION_COMPLETED", from, target, request.notes().trim(), "VERIFICATION", verificationId, actorId, result, request.evidenceReference().trim());
         if (notifications != null) notifications.notifyParticipants(organizationId, defectId, eventId, actorId, result.equals("PASS") ? "WORK_VERIFIED" : "VERIFICATION_REJECTED", result.equals("PASS") ? "Corrective work passed independent verification." : "Independent verification failed; further corrective work is required.");
@@ -164,19 +169,34 @@ public class OperationalWorkflowService {
         auditActor(actorId);
         String from = lockDefect(organizationId, defectId);
         if (!from.equals("APPROVAL_REQUIRED")) throw new IllegalStateException("The defect is not awaiting closure approval.");
-        String decision = request.decision().toUpperCase();
-        if (!Set.of("APPROVED", "REJECTED").contains(decision)) throw new IllegalArgumentException("Decision must be APPROVED or REJECTED.");
+        String areaCode=jdbc.query("SELECT a.code FROM defects_dtl d JOIN cabin_areas_mst a ON a.operator_id=d.operator_id AND a.id=d.area_id WHERE d.operator_id=? AND d.id=?",rs->rs.next()?rs.getString(1):null,organizationId,defectId);
+        String submittedDecision=request.decision().trim().toUpperCase(java.util.Locale.ROOT);
+        if("GALLEY".equals(areaCode)&&!Set.of("ACCEPT","DECLINE").contains(submittedDecision))throw new IllegalArgumentException("Decision must be ACCEPT or DECLINE.");
+        String decision=ClosureDecisionRules.normalize(submittedDecision);
+        String reason=ClosureDecisionRules.validateReason(decision,request.reason());
+        UUID closureTeamId=null;
+        if("GALLEY".equals(areaCode)){
+            if(closureAccess==null||forms==null)throw new AccessDeniedException("Closure review is not configured for this application instance.");
+            closureTeamId=closureAccess.requireEligibleReviewer(organizationId,actorId);
+            if(request.formId()==null||request.versionId()==null)throw new IllegalArgumentException("Select the published Galley Closure Review form before submitting a decision.");
+            FormForArea selected=forms.published(organizationId,request.formId(),request.versionId());
+            if(selected.purpose()!=FormPurpose.CLOSURE_APPROVAL||selected.workflowStage()!=WorkflowStage.APPROVAL_REQUIRED||!"GALLEY".equals(jdbc.queryForObject("SELECT code FROM cabin_areas_mst WHERE operator_id=? AND id=? AND isactive=1",String.class,organizationId,selected.areaId())))throw new IllegalArgumentException("The selected published form is not eligible for Galley closure review.");
+            ClosureApprovalFormRules.requireValid(selected.configuration());
+            boolean eligible=forms.publishedForDefect(organizationId,defectId,FormPurpose.CLOSURE_APPROVAL).stream().anyMatch(form->form.id().equals(selected.id())&&form.versionId().equals(selected.versionId()));
+            if(!eligible)throw new ResponseStatusException(HttpStatus.CONFLICT,"The selected closure form version is stale or not eligible for this defect.");
+        }
         String verifier = jdbc.query("SELECT verifier_user_id FROM verifications_dtl WHERE operator_id=? AND defect_id=? AND isactive=1 ORDER BY verified_at DESC LIMIT 1", rs -> rs.next() ? rs.getString(1) : null, organizationId, defectId);
         if (actorId.equals(verifier)) throw new AccessDeniedException("The verifier cannot approve the same closure.");
         String evidence = request.evidenceReference() == null ? null : request.evidenceReference().trim();
-        if (decision.equals("APPROVED") && (evidence == null || evidence.isBlank())) throw new IllegalArgumentException("A closure evidence reference is required for approval.");
         UUID approvalId = UUID.randomUUID();
-        jdbc.update("INSERT INTO closure_approvals_dtl(id,operator_id,defect_id,approver_user_id,decision,reason) VALUES(?,?,?,?,?,?)", approvalId, organizationId, defectId, actorId, decision, request.reason().trim());
+        jdbc.update("INSERT INTO closure_approvals_dtl(id,operator_id,defect_id,approver_user_id,decision,reason) VALUES(?,?,?,?,?,?)", approvalId, organizationId, defectId, actorId, decision, reason);
         String target = decision.equals("APPROVED") ? "CLOSED" : "IN_PROGRESS";
+        UUID returnedActionId=decision.equals("REJECTED")?returnCompletedCorrectiveAction(organizationId,defectId,actorId):null;
         updateStatus(organizationId, defectId, from, target);
-        UUID eventId = audit(organizationId, defectId, "CLOSURE_" + decision, from, target, request.reason().trim(), "CLOSURE_APPROVAL", approvalId, actorId, null, evidence);
+        UUID eventId=insertEvent("INSERT INTO defect_events_dtl(operator_id,defect_id,event_type,from_status,to_status,note,evidence_reference,actor_id,entity_type,entity_id,previous_state,new_state,request_id) VALUES(?,?,?,?,?,?,?,?,?, ?,jsonb_build_object('status',?),jsonb_build_object('status',?,'decision',?,'formId',?::text,'versionId',?::text,'closureTeamId',?::text,'returnedActionId',?::text),?)",organizationId,defectId,"CLOSURE_"+decision,from,target,reason,evidence,actorId,"CLOSURE_APPROVAL",approvalId,from,target,submittedDecision,request.formId()==null?null:request.formId().toString(),request.versionId()==null?null:request.versionId().toString(),closureTeamId==null?null:closureTeamId.toString(),returnedActionId==null?null:returnedActionId.toString(),safeRequestId());
         if (notifications != null) notifications.notifyParticipants(organizationId, defectId, eventId, actorId, decision.equals("APPROVED") ? "CLOSURE_APPROVED" : "CLOSURE_REJECTED", decision.equals("APPROVED") ? "Defect closure was approved." : "Defect closure was rejected; corrective work must continue.");
-        return new WorkflowRecord(approvalId, decision);
+        if(decision.equals("REJECTED")&&returnedActionId!=null){ActionAssignment assignment=jdbc.query("SELECT id,assigned_team,assigned_user_id,description,priority,due_at FROM corrective_actions_dtl WHERE operator_id=? AND id=?",(rs,n)->new ActionAssignment(rs.getObject("id",UUID.class),rs.getString("assigned_team"),rs.getString("assigned_user_id"),rs.getString("description"),rs.getString("priority"),rs.getTimestamp("due_at")),organizationId,returnedActionId).get(0);notifyAssignedTeam(organizationId,defectId,assignment.team(),assignment.assignedUser(),eventId,actorId);}
+        return new WorkflowRecord(approvalId, target);
     }
 
     private String lockDefect(UUID organizationId, UUID defectId) {
@@ -205,13 +225,22 @@ public class OperationalWorkflowService {
 
     private boolean activeMaintenanceTeamWithMember(UUID org,String teamName){return Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM maintenance_teams_mst t WHERE t.operator_id=? AND t.name=? AND t.team_type='MAINTENANCE' AND t.isactive=1 AND EXISTS(SELECT 1 FROM operator_membership_teams_mst mt JOIN operator_memberships_mst m ON m.operator_id=mt.operator_id AND m.external_user_id=mt.external_user_id AND m.isactive=1 JOIN operator_roles_mst r ON r.operator_id=m.operator_id AND r.role_key=m.role AND r.isactive=1 WHERE mt.operator_id=t.operator_id AND mt.team_name=t.name AND mt.isactive=1 AND ('|'||r.permissions||'|') LIKE '%|PERFORM_ACTION|%'))",Boolean.class,org,teamName));}
 
+    /** Return rejected completed work to its existing assignment; the decision remains in immutable audit history. */
+    private UUID returnCompletedCorrectiveAction(UUID org,UUID defectId,String actor){
+        ActionAssignment prior=jdbc.query("SELECT id,assigned_team,assigned_user_id,description,priority,due_at FROM corrective_actions_dtl WHERE operator_id=? AND defect_id=? AND isactive=1 AND status='COMPLETED' ORDER BY created_at DESC,id DESC LIMIT 1 FOR UPDATE",(rs,n)->new ActionAssignment(rs.getObject("id",UUID.class),rs.getString("assigned_team"),rs.getString("assigned_user_id"),rs.getString("description"),rs.getString("priority"),rs.getTimestamp("due_at")),org,defectId).stream().findFirst().orElseThrow(()->new ResponseStatusException(HttpStatus.CONFLICT,"No completed maintenance action is available to return to its assigned team."));
+        UUID actionId=UUID.randomUUID();
+        jdbc.update("INSERT INTO corrective_actions_dtl(id,operator_id,defect_id,created_by_user_id,assigned_user_id,assigned_team,description,priority,due_at,status,created_at) VALUES(?,?,?,?,?,?,?,?,?,'IN_PROGRESS',clock_timestamp())",actionId,org,defectId,actor,prior.assignedUser(),prior.team(),prior.description(),prior.priority(),prior.dueAt());
+        jdbc.update("UPDATE defects_dtl SET assigned_to=?,assigned_user_id=?,assigned_team=?,due_at=?,updated_at=now(),version=version+1 WHERE operator_id=? AND id=? AND isactive=1",prior.assignedUser()==null?prior.team():prior.assignedUser(),prior.assignedUser(),prior.team(),prior.dueAt(),org,defectId);
+        return actionId;
+    }
+
+    private record ActionAssignment(UUID id,String team,String assignedUser,String description,String priority,Timestamp dueAt){}
+
     /** One in-app assignment notification per eligible recipient; UNION removes duplicate individual/team recipients. */
     private void notifyAssignedTeam(UUID org, UUID defectId, String teamName, String assignedUser, UUID eventId, String actor) {
         if (teamName == null && assignedUser == null) return;
         if (notifications != null) notifications.notifyMaintenance(org,defectId,eventId,actor,teamName,assignedUser,"ACTION_ASSIGNED","A corrective action was assigned to your maintenance team.");
     }
-
-    private record ActionAssignment(UUID id, String team, String assignedUser, String description, String priority, Timestamp dueAt) {}
 
     private Timestamp timestamp(java.time.Instant value) { return value == null ? null : Timestamp.from(value); }
 

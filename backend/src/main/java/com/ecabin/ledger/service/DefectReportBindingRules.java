@@ -89,6 +89,7 @@ final class DefectReportBindingRules {
             case ZONE, SEAT_REFERENCE, TITLE, DESCRIPTION, REMARKS -> field.type() == FieldType.TEXT || field.type() == FieldType.TEXTAREA;
             case EVIDENCE_ATTACHMENTS -> field.type() == FieldType.FILE_UPLOAD || field.type() == FieldType.IMAGE_UPLOAD;
             case AIRCRAFT_ID -> field.type() == FieldType.AIRCRAFT_SELECT && field.optionSource() == OptionSource.AIRCRAFT;
+            case REVIEW_DECISION, REVIEW_MAINTENANCE_TEAM, REVIEW_REJECTION_REASON, REVIEW_REMARK, MAINTENANCE_STATUS, SLA_TARGET_DATE, MAINTENANCE_REMARK, CLOSURE_DECISION, CLOSURE_REMARK -> false;
         };
         if (!valid) throw new IllegalArgumentException("Field “" + field.label() + "” uses an incompatible type or reference source for its defect-property binding.");
     }

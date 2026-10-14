@@ -1,6 +1,7 @@
 package com.ecabin.ledger.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -24,17 +25,17 @@ class PostgresMigrationSmokeTest {
     private static final String SCHEMA = System.getenv().getOrDefault("DB_SCHEMA", "ecabin_ledger");
     private static final Set<String> REQUIRED_TABLES = Set.of("operators_mst", "fleets_mst", "aircraft_mst", "operator_memberships_mst",
         "operator_membership_teams_mst", "defects_dtl", "inspections_dtl", "corrective_actions_dtl", "verifications_dtl",
-        "closure_approvals_dtl", "attachments_dtl", "notifications_dtl", "defect_events_dtl", "maintenance_teams_mst",
-        "cabin_areas_mst", "defect_categories_mst", "cabin_components_mst", "defect_conditions_mst", "component_conditions_mst", "configuration_imports_dtl", "navigation_menu_items_mst", "operator_roles_mst", "defect_severities_mst", "permissions_mst", "operational_forms_dtl", "operational_form_versions_dtl", "operational_form_submissions_dtl", "api_rate_limit_policies_mst", "api_rate_limit_usage_dtl", "api_rate_limit_public_usage_dtl", "api_rate_limit_policy_events_dtl", "flyway_schema_history");
+        "closure_approvals_dtl", "attachments_dtl", "notifications_dtl", "defect_events_dtl", "maintenance_teams_mst", "maintenance_sla_policies_mst",
+        "cabin_areas_mst", "area_maintenance_team_mappings_mst", "defect_workflow_config_mst", "defect_categories_mst", "cabin_components_mst", "defect_conditions_mst", "component_conditions_mst", "configuration_imports_dtl", "navigation_menu_items_mst", "operator_roles_mst", "defect_severities_mst", "permissions_mst", "operational_forms_dtl", "operational_form_versions_dtl", "operational_form_submissions_dtl", "defect_workflow_versions_dtl", "api_rate_limit_policies_mst", "api_rate_limit_usage_dtl", "api_rate_limit_public_usage_dtl", "api_rate_limit_policy_events_dtl", "flyway_schema_history");
     private static final Set<String> EXPECTED_APPLICATION_TABLES = Set.of("operators_mst", "fleets_mst", "aircraft_mst", "operator_memberships_mst",
         "operator_membership_teams_mst", "maintenance_teams_mst", "cabin_areas_mst", "defect_categories_mst",
-        "cabin_components_mst", "defect_conditions_mst", "component_conditions_mst", "operator_roles_mst", "navigation_menu_items_mst",
+        "cabin_components_mst", "defect_conditions_mst", "component_conditions_mst", "operator_roles_mst", "navigation_menu_items_mst", "area_maintenance_team_mappings_mst", "maintenance_sla_policies_mst", "defect_workflow_config_mst", "defect_workflow_versions_dtl",
         "defects_dtl", "defect_events_dtl", "inspections_dtl", "corrective_actions_dtl", "attachments_dtl", "notifications_dtl",
         "configuration_imports_dtl", "defect_severities_mst", "permissions_mst", "operational_forms_dtl", "operational_form_versions_dtl", "operational_form_submissions_dtl",
         "verifications_dtl", "closure_approvals_dtl", "api_rate_limit_policies_mst", "api_rate_limit_usage_dtl", "api_rate_limit_public_usage_dtl", "api_rate_limit_policy_events_dtl");
     private static final Set<String> SOFT_DELETE_TABLES = Set.of("operators_mst", "fleets_mst", "aircraft_mst", "operator_memberships_mst",
         "operator_membership_teams_mst", "defects_dtl", "inspections_dtl", "corrective_actions_dtl", "verifications_dtl",
-        "closure_approvals_dtl", "attachments_dtl", "notifications_dtl", "maintenance_teams_mst",
+        "closure_approvals_dtl", "attachments_dtl", "notifications_dtl", "maintenance_teams_mst", "area_maintenance_team_mappings_mst",
         "defect_categories_mst", "cabin_areas_mst", "cabin_components_mst", "defect_conditions_mst", "component_conditions_mst", "navigation_menu_items_mst", "operator_roles_mst", "defect_severities_mst", "permissions_mst", "operational_forms_dtl", "api_rate_limit_policies_mst");
 
     @Test
@@ -69,11 +70,29 @@ class PostgresMigrationSmokeTest {
                 assertTrue(!actual.contains("legacy_cabin_zones_archive"), "The retired cabin-zones table and its temporary archive must be removed.");
                 assertTrue(!actual.contains("cabin_zones_mst"), "The retired cabin-zones master must not remain under its application name.");
                 assertTrue(actual.stream().noneMatch(name -> name.endsWith("_mst_mst") || name.endsWith("_dtl_dtl") || name.endsWith("_mst_dtl") || name.endsWith("_dtl_mst")), "No table may have a duplicated or conflicting suffix.");
-                assertEquals(29, appliedMigrationCount(connection), "All versioned migrations, including V29, must be recorded as applied.");
+                assertEquals(37, appliedMigrationCount(connection), "All versioned migrations, including V37, must be recorded as applied.");
+                try(var closureRoute=connection.prepareStatement("SELECT 1 FROM information_schema.columns WHERE table_schema=? AND table_name='operators_mst' AND column_name='default_closure_team_id'")){
+                    closureRoute.setString(1,SCHEMA);try(var closureRows=closureRoute.executeQuery()){assertTrue(closureRows.next(),"V35 must add an independent tenant closure-review route.");}
+                }
+            }
+            try(var policies=connection.prepareStatement("SELECT status_key,is_configured,max_future_days,allow_past FROM maintenance_sla_policies_mst WHERE operator_id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' ORDER BY CASE status_key WHEN 'WORK_IN_PROGRESS' THEN 1 WHEN 'ON_HOLD' THEN 2 ELSE 3 END")){
+                try(var rows=policies.executeQuery()){
+                    assertTrue(rows.next());assertEquals("WORK_IN_PROGRESS",rows.getString("status_key"));assertTrue(rows.getBoolean("is_configured"));assertEquals(15,rows.getInt("max_future_days"));assertFalse(rows.getBoolean("allow_past"));
+                    assertTrue(rows.next());assertEquals("ON_HOLD",rows.getString("status_key"));assertTrue(rows.getBoolean("is_configured"));assertEquals(180,rows.getInt("max_future_days"));assertFalse(rows.getBoolean("allow_past"));
+                    assertTrue(rows.next());assertEquals("CLOSE_SUBMITTED",rows.getString("status_key"));assertFalse(rows.getBoolean("is_configured"));assertFalse(rows.next());
+                }
             }
             try (var objects = connection.prepareStatement("SELECT (SELECT count(*) FROM information_schema.table_constraints WHERE table_schema=? AND constraint_type='FOREIGN KEY'), (SELECT count(*) FROM information_schema.triggers WHERE trigger_schema=? AND event_object_table='defect_events_dtl' AND trigger_name='defect_events_append_only'), (SELECT count(*) FROM information_schema.triggers WHERE trigger_schema=? AND event_object_table='operational_form_versions_dtl' AND trigger_name='operational_form_version_immutable'), (SELECT count(*) FROM information_schema.triggers WHERE trigger_schema=? AND event_object_table='operational_form_submissions_dtl' AND trigger_name='operational_form_submission_immutable')")) {
                 for (int i=1;i<=4;i++) objects.setString(i,SCHEMA);
                 try (var rows=objects.executeQuery()) { rows.next(); assertTrue(rows.getInt(1)>0,"Tenant and workflow foreign keys must remain attached after table renames."); assertEquals(2,rows.getInt(2),"Append-only audit triggers for UPDATE and DELETE must remain attached to the renamed event table."); assertEquals(2,rows.getInt(3),"Published-version immutability triggers for UPDATE and DELETE must remain attached."); assertEquals(2,rows.getInt(4),"Submission immutability triggers for UPDATE and DELETE must remain attached."); }
+            }
+            try(var formSnapshot=connection.prepareStatement("SELECT (SELECT count(*) FROM information_schema.columns WHERE table_schema=? AND table_name='operational_form_versions_dtl' AND column_name IN ('form_name','area_id','purpose','workflow_stage')),(SELECT count(*) FROM information_schema.triggers WHERE trigger_schema=? AND event_object_table='operational_form_versions_dtl' AND trigger_name='operational_form_version_mapping_snapshot')")){
+                formSnapshot.setString(1,SCHEMA);formSnapshot.setString(2,SCHEMA);
+                try(var rows=formSnapshot.executeQuery()){rows.next();assertEquals(4,rows.getInt(1),"V37 must snapshot each version's name, area, purpose and stage.");assertEquals(1,rows.getInt(2),"New SQL-created versions must receive their mapping snapshot.");}
+            }
+            try(var routing=connection.prepareStatement("SELECT (SELECT count(*) FROM information_schema.columns WHERE table_schema=? AND table_name='defects_dtl' AND column_name='workflow_version_id'),(SELECT count(*) FROM information_schema.triggers WHERE trigger_schema=? AND event_object_table='defect_workflow_versions_dtl' AND trigger_name='defect_workflow_version_immutable'),(SELECT count(*) FROM pg_indexes WHERE schemaname=? AND indexname='area_maintenance_team_active_area_uq')")){
+                for(int i=1;i<=3;i++)routing.setString(i,SCHEMA);
+                try(var rows=routing.executeQuery()){rows.next();assertEquals(1,rows.getInt(1),"Defects must snapshot their tenant workflow version.");assertEquals(2,rows.getInt(2),"Workflow version rows must reject updates and deletes.");assertEquals(1,rows.getInt(3),"Only one active team mapping may exist per cabin area.");}
             }
             verifyAuditAppendOnly(connection);
             try (var auditColumns = connection.prepareStatement("SELECT table_name,column_name FROM information_schema.columns WHERE table_schema=? AND (table_name,column_name) IN (( 'fleets_mst','created_by'),('fleets_mst','created_at'),('fleets_mst','updated_by'),('fleets_mst','updated_at'),('operational_forms_dtl','created_by'),('operational_forms_dtl','created_at'),('operational_forms_dtl','updated_by'),('operational_forms_dtl','updated_at'),('operator_membership_teams_mst','created_by'),('operator_membership_teams_mst','created_at'),('operator_membership_teams_mst','updated_by'),('operator_membership_teams_mst','updated_at'))")) {
@@ -145,6 +164,28 @@ class PostgresMigrationSmokeTest {
             var demoGalleyDrafts=jdbc.query("SELECT f.id,v.id AS version_id FROM operational_forms_dtl f JOIN operational_form_versions_dtl v ON v.operator_id=f.operator_id AND v.form_id=f.id WHERE f.operator_id=? AND f.area_id=? AND f.purpose='DEFECT_REPORT' AND f.workflow_stage='INITIAL_REPORT' AND v.status='DRAFT' AND v.created_by='local-demo-seed' AND v.updated_by IS NULL AND v.fields_json @> '{\"fields\":[{\"binding\":\"AIRCRAFT_ID\",\"key\":\"aircraftId\",\"type\":\"AIRCRAFT_SELECT\",\"required\":true}]}'::jsonb",(rs,n)->new UUID[]{rs.getObject("id",UUID.class),rs.getObject("version_id",UUID.class)},demoOperator,galleyArea);
             var formService=new OperationalFormService(jdbc,new ObjectMapper());
             for(UUID[] draft:demoGalleyDrafts) formService.publish(demoOperator,"local-demo-seed",draft[0],draft[1]);
+            var reviewerDrafts=jdbc.query("SELECT f.id,v.id AS version_id FROM operational_forms_dtl f JOIN operational_form_versions_dtl v ON v.operator_id=f.operator_id AND v.form_id=f.id WHERE f.operator_id=? AND f.area_id=? AND f.form_key='LOCAL_DEMO_GALLEY_REVIEW_DECISION' AND f.created_by='local-demo-seed' AND f.purpose='REVIEW_DECISION' AND f.workflow_stage='REPORTED' AND v.status='DRAFT' AND v.created_by='local-demo-seed'",(rs,n)->new UUID[]{rs.getObject("id",UUID.class),rs.getObject("version_id",UUID.class)},demoOperator,galleyArea);
+            for(UUID[] draft:reviewerDrafts) formService.publish(demoOperator,"local-demo-seed",draft[0],draft[1]);
+            if(!reviewerDrafts.isEmpty()){
+                var reviewerForms=formService.publishedForArea(demoOperator,galleyArea,com.ecabin.ledger.api.FormModels.FormPurpose.REVIEW_DECISION,com.ecabin.ledger.api.FormModels.WorkflowStage.REPORTED);
+                assertTrue(reviewerForms.stream().anyMatch(form->form.formKey().equals("LOCAL_DEMO_GALLEY_REVIEW_DECISION")&&form.configuration().fields().size()==4),"The demo Reviewer form must publish through the same service validation and resolve by tenant, Galley, purpose and stage.");
+                assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM operational_forms_dtl f JOIN operational_form_versions_dtl v ON v.operator_id=f.operator_id AND v.form_id=f.id WHERE f.operator_id=? AND f.form_key='LOCAL_DEMO_GALLEY_REVIEW_DECISION'",Integer.class,demoOperator),"Repeated local initialization must not duplicate the Reviewer form or version.");
+            }
+            var closureDrafts=jdbc.query("SELECT f.id,v.id AS version_id FROM operational_forms_dtl f JOIN operational_form_versions_dtl v ON v.operator_id=f.operator_id AND v.form_id=f.id WHERE f.operator_id=? AND f.area_id=? AND f.form_key='LOCAL_DEMO_GALLEY_CLOSURE_REVIEW' AND f.created_by='local-demo-seed' AND f.purpose='CLOSURE_APPROVAL' AND f.workflow_stage='APPROVAL_REQUIRED' AND v.status='DRAFT' AND v.created_by='local-demo-seed'",(rs,n)->new UUID[]{rs.getObject("id",UUID.class),rs.getObject("version_id",UUID.class)},demoOperator,galleyArea);
+            boolean seededClosureForm=Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM operational_forms_dtl WHERE operator_id=? AND area_id=? AND form_key='LOCAL_DEMO_GALLEY_CLOSURE_REVIEW' AND created_by='local-demo-seed' AND purpose='CLOSURE_APPROVAL')",Boolean.class,demoOperator,galleyArea));
+            if(seededClosureForm){
+                for(UUID[] draft:closureDrafts)formService.publish(demoOperator,"local-demo-seed",draft[0],draft[1]);
+                var closureForms=formService.publishedForArea(demoOperator,galleyArea,com.ecabin.ledger.api.FormModels.FormPurpose.CLOSURE_APPROVAL,com.ecabin.ledger.api.FormModels.WorkflowStage.APPROVAL_REQUIRED);
+                assertTrue(closureForms.stream().anyMatch(form->form.formKey().equals("LOCAL_DEMO_GALLEY_CLOSURE_REVIEW")&&form.configuration().fields().stream().filter(field->field.type()!=com.ecabin.ledger.api.FormModels.FieldType.SECTION).count()==2),"The local Galley Closure Review draft must publish using Form Master validation and remain visible in Form Master and area-purpose resolution.");
+                assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM operational_forms_dtl f JOIN operational_form_versions_dtl v ON v.operator_id=f.operator_id AND v.form_id=f.id WHERE f.operator_id=? AND f.form_key='LOCAL_DEMO_GALLEY_CLOSURE_REVIEW'",Integer.class,demoOperator),"Repeated local initialization must not duplicate the Galley Closure Review form or its initial version.");
+            }else{
+                assertTrue(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM operational_forms_dtl WHERE operator_id=? AND area_id=? AND purpose='CLOSURE_APPROVAL' AND isactive=1)",Boolean.class,demoOperator,galleyArea),"Preserve a manually configured closure form; create the local demo draft only when no closure form already exists.");
+            }
+            var maintenanceDrafts=jdbc.query("SELECT f.id,v.id AS version_id FROM operational_forms_dtl f JOIN operational_form_versions_dtl v ON v.operator_id=f.operator_id AND v.form_id=f.id WHERE f.operator_id=? AND f.form_key='LOCAL_DEMO_GALLEY_MAINTENANCE_ACTION' AND f.created_by='local-demo-seed' AND f.purpose='CORRECTIVE_ACTION' AND f.workflow_stage='IN_PROGRESS' AND v.status='DRAFT' AND v.created_by='local-demo-seed'",(rs,n)->new UUID[]{rs.getObject("id",UUID.class),rs.getObject("version_id",UUID.class)},demoOperator);
+            for(UUID[] draft:maintenanceDrafts)formService.publish(demoOperator,"local-demo-seed",draft[0],draft[1]);
+            var maintenanceForms=formService.publishedForArea(demoOperator,galleyArea,com.ecabin.ledger.api.FormModels.FormPurpose.CORRECTIVE_ACTION,com.ecabin.ledger.api.FormModels.WorkflowStage.IN_PROGRESS);
+            assertTrue(maintenanceForms.stream().anyMatch(form->form.formKey().equals("LOCAL_DEMO_GALLEY_MAINTENANCE_ACTION")&&form.configuration().fields().size()==3),"The local Galley Maintenance Action form must publish through service validation with exactly its three configured business fields.");
+            assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM operational_forms_dtl WHERE operator_id=? AND form_key='LOCAL_DEMO_GALLEY_MAINTENANCE_ACTION'",Integer.class,demoOperator),"Repeated local initialization must not duplicate a maintenance form.");
             List<com.ecabin.ledger.api.FormModels.FormForArea> galleyForms;
             boolean existingDraftNeedsAdministratorConfiguration=false;
             try{galleyForms=formService.publishedForArea(demoOperator,galleyArea,com.ecabin.ledger.api.FormModels.FormPurpose.DEFECT_REPORT,com.ecabin.ledger.api.FormModels.WorkflowStage.INITIAL_REPORT);}

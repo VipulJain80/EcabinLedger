@@ -2,6 +2,7 @@ package com.ecabin.ledger.service;
 
 import com.ecabin.ledger.api.FormModels.FormPurpose;
 import com.ecabin.ledger.api.FormModels.WorkflowStage;
+import java.util.Set;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.server.ResponseStatusException;
 
@@ -13,6 +14,7 @@ final class FormResolutionRules {
         if (purpose == null || stage == null) throw new IllegalArgumentException("Choose a form purpose and applicable workflow stage.");
         boolean valid = switch (purpose) {
             case DEFECT_REPORT -> stage == WorkflowStage.INITIAL_REPORT;
+            case REVIEW_DECISION -> stage == WorkflowStage.REPORTED || stage == WorkflowStage.UNDER_REVIEW;
             case INSPECTION -> stage == WorkflowStage.INSPECTION_REQUIRED || stage == WorkflowStage.INSPECTION_IN_PROGRESS;
             case CORRECTIVE_ACTION -> stage == WorkflowStage.ACTION_ASSIGNED || stage == WorkflowStage.IN_PROGRESS;
             case VERIFICATION -> stage == WorkflowStage.AWAITING_VERIFICATION;
@@ -27,6 +29,9 @@ final class FormResolutionRules {
             if (!"REPORTED".equals(status)) throw new ResponseStatusException(HttpStatus.CONFLICT, "The defect report form is no longer applicable to this workflow stage.");
             return WorkflowStage.INITIAL_REPORT;
         }
+        if (purpose == FormPurpose.REVIEW_DECISION && !Set.of("REPORTED", "UNDER_REVIEW").contains(status))
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "The Reviewer decision form is not applicable to this workflow status.");
+        if (purpose == FormPurpose.CORRECTIVE_ACTION && Set.of("ACTION_ASSIGNED","IN_PROGRESS").contains(status)) return WorkflowStage.IN_PROGRESS;
         WorkflowStage stage;
         try { stage = WorkflowStage.valueOf(status); }
         catch (IllegalArgumentException ex) { throw new ResponseStatusException(HttpStatus.CONFLICT, "No operational form is available for this workflow status."); }

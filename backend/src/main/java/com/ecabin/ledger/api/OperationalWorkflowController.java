@@ -8,6 +8,7 @@ import com.ecabin.ledger.security.Permission;
 import com.ecabin.ledger.security.PermissionService;
 import com.ecabin.ledger.service.OperationalWorkflowService;
 import com.ecabin.ledger.service.DefectService;
+import com.ecabin.ledger.service.MaintenanceActionService;
 import jakarta.validation.Valid;
 import java.util.UUID;
 import org.springframework.http.HttpStatus;
@@ -26,9 +27,10 @@ public class OperationalWorkflowController {
     private final CurrentUserResolver users;
     private final PermissionService permissions;
     private final DefectService defects;
+    private final MaintenanceActionService maintenanceActions;
 
-    public OperationalWorkflowController(OperationalWorkflowService workflow, CurrentUserResolver users, PermissionService permissions,DefectService defects) {
-        this.workflow = workflow; this.users = users; this.permissions = permissions; this.defects=defects;
+    public OperationalWorkflowController(OperationalWorkflowService workflow, CurrentUserResolver users, PermissionService permissions,DefectService defects,MaintenanceActionService maintenanceActions) {
+        this.workflow = workflow; this.users = users; this.permissions = permissions; this.defects=defects; this.maintenanceActions=maintenanceActions;
     }
 
     @PostMapping("/inspections") @ResponseStatus(HttpStatus.CREATED)
@@ -61,6 +63,18 @@ public class OperationalWorkflowController {
         return workflow.completeAction(user.organizationId(), defectId, actionId, user.externalUserId(), request);
     }
 
+    @PostMapping("/actions/{actionId}/maintenance-form")
+    public WorkflowRecord maintenanceForm(JwtAuthenticationToken auth,@PathVariable UUID defectId,@PathVariable UUID actionId,@Valid @RequestBody MaintenanceActionUpdateRequest request){
+        AuthenticatedUser user=users.require(auth);permissions.require(user,Permission.PERFORM_ACTION);visibleDefect(user,defectId);
+        return maintenanceActions.update(user.organizationId(),defectId,actionId,user.externalUserId(),request);
+    }
+
+    @org.springframework.web.bind.annotation.GetMapping("/maintenance-sla-policy")
+    public MaintenanceSlaEffective maintenanceSlaPolicy(JwtAuthenticationToken auth,@PathVariable UUID defectId,@org.springframework.web.bind.annotation.RequestParam String status){
+        AuthenticatedUser user=users.require(auth);permissions.require(user,Permission.PERFORM_ACTION);visibleDefect(user,defectId);
+        return maintenanceActions.effectivePolicy(user.organizationId(),defectId,user.externalUserId(),status);
+    }
+
     @PostMapping("/verifications") @ResponseStatus(HttpStatus.CREATED)
     public WorkflowRecord verify(JwtAuthenticationToken auth, @PathVariable UUID defectId, @Valid @RequestBody VerificationRequest request) {
         AuthenticatedUser user=users.require(auth); permissions.require(user, Permission.VERIFY); visibleDefect(user,defectId);
@@ -69,7 +83,7 @@ public class OperationalWorkflowController {
 
     @PostMapping("/approvals") @ResponseStatus(HttpStatus.CREATED)
     public WorkflowRecord approve(JwtAuthenticationToken auth, @PathVariable UUID defectId, @Valid @RequestBody ApprovalRequest request) {
-        AuthenticatedUser user=users.require(auth); permissions.require(user, Permission.APPROVE); visibleDefect(user,defectId);
+        AuthenticatedUser user=users.require(auth); permissions.require(user, Permission.APPROVE); defects.get(user.organizationId(),defectId);
         return workflow.approve(user.organizationId(), defectId, user.externalUserId(), request);
     }
 

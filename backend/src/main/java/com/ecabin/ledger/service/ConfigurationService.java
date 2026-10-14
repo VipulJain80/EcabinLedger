@@ -63,7 +63,7 @@ public class ConfigurationService {
     }
 
     private static final Set<String> PERMISSIONS = java.util.Arrays.stream(Permission.values()).map(Enum::name).collect(java.util.stream.Collectors.toUnmodifiableSet());
-    private static final Set<String> NAVIGATION_ROUTE_KEYS = Set.of("home","operations","reports","audit","configuration","defects","fleet","quality","organizations","fleets","aircraft","areas","defect-categories","defect-conditions","components","maintenance-teams","reviewer-routing","review-queue","users","menu-items","roles","severities","permissions","role-permissions","api-rate-limits","report-defect");
+    private static final Set<String> NAVIGATION_ROUTE_KEYS = Set.of("home","operations","reports","audit","configuration","defects","fleet","quality","organizations","fleets","aircraft","areas","defect-categories","defect-conditions","components","maintenance-teams","reviewer-routing","area-team-mapping","maintenance-sla-policies","review-queue","users","menu-items","roles","severities","permissions","role-permissions","api-rate-limits","report-defect");
     private final JdbcTemplate jdbc;
     private final ObjectMapper mapper;
 
@@ -82,6 +82,8 @@ public class ConfigurationService {
         items.add(new MenuItem("components", "Components", "Cabin equipment reference"));
         items.add(new MenuItem("maintenance-teams", "Teams", "Manage Maintenance and Reviewer teams and user memberships"));
         items.add(new MenuItem("reviewer-routing", "Reviewer routing", "Choose the organization-wide team for new and returned defects"));
+        items.add(new MenuItem("area-team-mapping", "Cabin Area–Team Mapping", "Map active cabin areas to eligible Maintenance teams and select the versioned new-defect routing mode"));
+        items.add(new MenuItem("maintenance-sla-policies", "Maintenance SLA Policies", "Configure tenant maintenance target-date rules"));
         items.add(new MenuItem("users", "Users and roles", "Operator application memberships"));
         items.add(new MenuItem("menu-items", "Menus & submenus", "Control the organization navigation menu"));
         items.add(new MenuItem("roles", "Roles", "Create application roles and assign permissions"));
@@ -151,7 +153,7 @@ public class ConfigurationService {
             return jdbc.query("SELECT c.id,c.code,c.name,c.description,COALESCE(string_agg(DISTINCT m.component_id::text,'|' ORDER BY m.component_id::text),'') AS \"componentIds\",COALESCE(string_agg(DISTINCT p.name,', ' ORDER BY p.name),'') AS \"applicableComponents\",c.isactive,c.created_at,c.updated_at FROM defect_conditions_mst c LEFT JOIN component_conditions_mst m ON m.operator_id=c.operator_id AND m.condition_id=c.id AND m.isactive=1 LEFT JOIN cabin_components_mst p ON p.operator_id=m.operator_id AND p.id=m.component_id AND p.isactive=1 WHERE c.operator_id=?" + (includeInactive ? "" : " AND c.isactive=1") + " GROUP BY c.id ORDER BY c.name LIMIT 200", new ColumnMapRowMapper(), operatorId);
         }
         if (resource == Resource.NAVIGATION) return jdbc.query("SELECT m.id,m.menu_key AS key,m.label,m.parent_id AS \"parentId\",p.label AS \"parentLabel\",m.required_permissions AS \"requiredPermissions\",m.icon,m.route_key AS \"routeKey\",m.display_order AS \"displayOrder\",m.isactive,m.created_at,m.updated_at FROM navigation_menu_items_mst m LEFT JOIN navigation_menu_items_mst p ON p.operator_id=m.operator_id AND p.id=m.parent_id WHERE m.operator_id=?" + (includeInactive ? "" : " AND m.isactive=1") + " ORDER BY m.display_order,m.label LIMIT 200", new ColumnMapRowMapper(), operatorId);
-        if (resource == Resource.TEAMS) return jdbc.query("SELECT t.id,t.name,t.team_type AS \"teamType\",t.isactive,t.created_at,t.updated_at,(SELECT count(DISTINCT m.external_user_id) FROM operator_membership_teams_mst omt JOIN operator_memberships_mst m ON m.operator_id=omt.operator_id AND m.external_user_id=omt.external_user_id AND m.isactive=1 JOIN operator_roles_mst r ON r.operator_id=m.operator_id AND r.role_key=m.role AND r.isactive=1 WHERE omt.operator_id=t.operator_id AND omt.team_name=t.name AND omt.isactive=1 AND ('|'||r.permissions||'|') LIKE '%|REVIEW|%') AS \"eligibleMembers\" FROM maintenance_teams_mst t WHERE t.operator_id=?"+(includeInactive?"":" AND t.isactive=1")+" ORDER BY t.name LIMIT 200",new ColumnMapRowMapper(),operatorId);
+        if (resource == Resource.TEAMS) return jdbc.query("SELECT t.id,t.name,t.team_type AS \"teamType\",t.isactive,t.created_at,t.updated_at,(SELECT count(DISTINCT m.external_user_id) FROM operator_membership_teams_mst omt JOIN operator_memberships_mst m ON m.operator_id=omt.operator_id AND m.external_user_id=omt.external_user_id AND m.isactive=1 JOIN operator_roles_mst r ON r.operator_id=m.operator_id AND r.role_key=m.role AND r.isactive=1 WHERE omt.operator_id=t.operator_id AND omt.team_name=t.name AND omt.isactive=1 AND ('|'||r.permissions||'|') LIKE CASE t.team_type WHEN 'REVIEWER' THEN '%|REVIEW|%' WHEN 'CLOSURE' THEN '%|APPROVE|%' ELSE '%|PERFORM_ACTION|%' END) AS \"eligibleMembers\" FROM maintenance_teams_mst t WHERE t.operator_id=?"+(includeInactive?"":" AND t.isactive=1")+" ORDER BY t.name LIMIT 200",new ColumnMapRowMapper(),operatorId);
         sql = "SELECT " + resource.columns + " FROM " + resource.table + " WHERE operator_id=?" +
             (includeInactive ? "" : " AND isactive=1") + " ORDER BY " + orderBy(resource) + " LIMIT 200";
         return jdbc.query(sql, new ColumnMapRowMapper(), operatorId);
@@ -447,13 +449,13 @@ public class ConfigurationService {
             throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.CONFLICT, "Deactivate or reassign active components and resolve open defects in this area first.");
         if (resource == Resource.AIRCRAFT && exists("SELECT 1 FROM defects_dtl WHERE operator_id=? AND aircraft_id=? LIMIT 1", operatorId, UUID.fromString(entityId)))
             throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.CONFLICT, "Aircraft with defect history cannot be deactivated.");
-        if (resource == Resource.TEAMS && (exists("SELECT 1 FROM corrective_actions_dtl WHERE operator_id=? AND assigned_team=? AND isactive=1 AND status IN ('ASSIGNED','IN_PROGRESS') LIMIT 1", operatorId, previous.get("name")) || exists("SELECT 1 FROM operators_mst WHERE id=? AND default_reviewer_team_id=?", operatorId, UUID.fromString(entityId)) || exists("SELECT 1 FROM defects_dtl WHERE operator_id=? AND reviewer_team_id=? AND isactive=1 AND status NOT IN ('CLOSED','CANCELLED') LIMIT 1", operatorId, UUID.fromString(entityId))))
+        if (resource == Resource.TEAMS && (exists("SELECT 1 FROM corrective_actions_dtl WHERE operator_id=? AND assigned_team=? AND isactive=1 AND status IN ('ASSIGNED','IN_PROGRESS','ON_HOLD') LIMIT 1", operatorId, previous.get("name")) || exists("SELECT 1 FROM operators_mst WHERE id=? AND (default_reviewer_team_id=? OR default_closure_team_id=?)", operatorId, UUID.fromString(entityId),UUID.fromString(entityId)) || exists("SELECT 1 FROM defects_dtl WHERE operator_id=? AND reviewer_team_id=? AND isactive=1 AND status NOT IN ('CLOSED','CANCELLED') LIMIT 1", operatorId, UUID.fromString(entityId))))
             throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.CONFLICT, "Reassign active work and update the default Reviewer route before deactivating this team.");
         if (resource == Resource.USERS) {
             if (actorId.equals(entityId)) throw new IllegalArgumentException("You cannot deactivate your own membership.");
-            if (exists("SELECT 1 FROM corrective_actions_dtl WHERE operator_id=? AND assigned_user_id=? AND isactive=1 AND status IN ('ASSIGNED','IN_PROGRESS') LIMIT 1", operatorId, entityId))
+            if (exists("SELECT 1 FROM corrective_actions_dtl WHERE operator_id=? AND assigned_user_id=? AND isactive=1 AND status IN ('ASSIGNED','IN_PROGRESS','ON_HOLD') LIMIT 1", operatorId, entityId))
                 throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.CONFLICT, "Reassign open corrective actions before deactivating this user.");
-            if (exists("SELECT 1 FROM inspections_dtl WHERE operator_id=? AND inspector_user_id=? AND isactive=1 AND status IN ('ASSIGNED','IN_PROGRESS') LIMIT 1", operatorId, entityId))
+            if (exists("SELECT 1 FROM inspections_dtl WHERE operator_id=? AND inspector_user_id=? AND isactive=1 AND status IN ('ASSIGNED','IN_PROGRESS','ON_HOLD') LIMIT 1", operatorId, entityId))
                 throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.CONFLICT, "Reassign open inspections before deactivating this user.");
             Map<String, Object> row = previous;
             if ("ADMIN".equals(row.get("role")) && jdbc.queryForObject("SELECT count(*) FROM operator_memberships_mst WHERE operator_id=? AND role='ADMIN' AND isactive=1", Integer.class, operatorId) <= 1)
@@ -461,6 +463,8 @@ public class ConfigurationService {
         }
         if (resource == Resource.NAVIGATION && exists("SELECT 1 FROM navigation_menu_items_mst WHERE operator_id=? AND parent_id=? AND isactive=1 LIMIT 1", operatorId, UUID.fromString(entityId)))
             throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.CONFLICT, "Deactivate or move this menu's submenus before deactivating it.");
+        if (resource == Resource.TEAMS && "MAINTENANCE".equals(previous.get("teamType")) && exists("SELECT 1 FROM area_maintenance_team_mappings_mst WHERE operator_id=? AND maintenance_team_id=? AND isactive=1 LIMIT 1", operatorId, UUID.fromString(entityId)))
+            throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.CONFLICT, "Deactivate or replace active cabin-area mappings before deactivating this Maintenance team.");
         if (resource == Resource.ROLES && ("ADMIN".equals(previous.get("roleKey")) || exists("SELECT 1 FROM operator_memberships_mst WHERE operator_id=? AND role=? AND isactive=1 LIMIT 1", operatorId, previous.get("roleKey"))))
             throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.CONFLICT, "The Administrator role is protected. Reassign active users before deactivating another role.");
         String sql = "UPDATE " + resource.table + " SET isactive=2,updated_at=now() WHERE operator_id=? AND " + (resource == Resource.USERS ? "external_user_id" : "id") + "=? AND isactive=1";
@@ -550,7 +554,7 @@ public class ConfigurationService {
         }
         if (resource == Resource.TEAMS) {
             String type=result.getOrDefault("teamType","MAINTENANCE").toUpperCase(Locale.ROOT);
-            if (!Set.of("MAINTENANCE","REVIEWER").contains(type)) throw new IllegalArgumentException("Team type must be MAINTENANCE or REVIEWER.");
+            if (!Set.of("MAINTENANCE","REVIEWER","CLOSURE").contains(type)) throw new IllegalArgumentException("Team type must be MAINTENANCE, REVIEWER, or CLOSURE.");
             result.put("teamType",type);
         }
         if (resource == Resource.USERS && fields.containsKey("teamIds")) {

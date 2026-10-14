@@ -12,6 +12,8 @@ class FormResolutionRulesTest {
     @Test
     void everyPurposeAcceptsOnlyItsSupportedWorkflowStages() {
         FormResolutionRules.requireMapping(FormPurpose.DEFECT_REPORT, WorkflowStage.INITIAL_REPORT);
+        FormResolutionRules.requireMapping(FormPurpose.REVIEW_DECISION, WorkflowStage.REPORTED);
+        FormResolutionRules.requireMapping(FormPurpose.REVIEW_DECISION, WorkflowStage.UNDER_REVIEW);
         FormResolutionRules.requireMapping(FormPurpose.INSPECTION, WorkflowStage.INSPECTION_REQUIRED);
         FormResolutionRules.requireMapping(FormPurpose.INSPECTION, WorkflowStage.INSPECTION_IN_PROGRESS);
         FormResolutionRules.requireMapping(FormPurpose.CORRECTIVE_ACTION, WorkflowStage.ACTION_ASSIGNED);
@@ -25,6 +27,9 @@ class FormResolutionRulesTest {
     void defectReportResolvesThroughInitialContextThenOnlyAtReportedStatus() {
         assertEquals(WorkflowStage.INITIAL_REPORT, FormResolutionRules.stageForDefect(FormPurpose.DEFECT_REPORT, "REPORTED"));
         assertThrows(ResponseStatusException.class, () -> FormResolutionRules.stageForDefect(FormPurpose.DEFECT_REPORT, "UNDER_REVIEW"));
+        assertEquals(WorkflowStage.REPORTED, FormResolutionRules.stageForDefect(FormPurpose.REVIEW_DECISION, "REPORTED"));
+        assertEquals(WorkflowStage.UNDER_REVIEW, FormResolutionRules.stageForDefect(FormPurpose.REVIEW_DECISION, "UNDER_REVIEW"));
+        assertThrows(ResponseStatusException.class, () -> FormResolutionRules.stageForDefect(FormPurpose.REVIEW_DECISION, "INSPECTION_REQUIRED"));
     }
 
     @Test

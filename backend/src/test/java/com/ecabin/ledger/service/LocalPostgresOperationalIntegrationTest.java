@@ -26,6 +26,8 @@ import com.ecabin.ledger.api.FormModels.TextRules;
 import com.ecabin.ledger.api.FormModels.OptionSource;
 import com.ecabin.ledger.api.FormModels.OptionFilter;
 import com.ecabin.ledger.api.FormModels.DefectFieldBinding;
+import com.ecabin.ledger.api.FormModels.FormPurpose;
+import com.ecabin.ledger.api.FormModels.WorkflowStage;
 import com.ecabin.ledger.service.ConfigurationService.SaveRequest;
 import com.ecabin.ledger.security.AppRole;
 import com.ecabin.ledger.security.CurrentUserResolver;
@@ -86,6 +88,7 @@ class LocalPostgresOperationalIntegrationTest {
     @Autowired CurrentUserResolver users;
     @Autowired ConfigurationImportService imports;
     @Autowired ReviewerQueueService reviewerQueue;
+    @Autowired MaintenanceSlaPolicyService maintenanceSlaPolicies;
     @Autowired com.ecabin.ledger.security.PermissionService resolvedPermissions;
     @Autowired MockMvc mockMvc;
     @Autowired ObjectMapper objectMapper;
@@ -148,6 +151,38 @@ class LocalPostgresOperationalIntegrationTest {
             .contentType(MediaType.APPLICATION_JSON).content(request)).andExpect(status().isForbidden());
         assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM api_rate_limit_policy_events_dtl WHERE operator_id=? AND policy_id=? AND event_type='UPDATED' AND reason='Raise test limit immediately'",Integer.class,orgA,policyId));
         assertTrue(jdbc.queryForObject("SELECT count(*) FROM api_rate_limit_usage_dtl WHERE operator_id=? AND policy_id=? AND rejected_count>0",Integer.class,orgA,policyId)>0);
+    }
+
+    @Test
+    @Transactional
+    @Rollback
+    void maintenanceSlaPoliciesAreTenantScopedAuditedAndEffectiveImmediately() throws Exception {
+        UUID orgA=createTenant("MAINT-SLA-A"),orgB=createTenant("MAINT-SLA-B");
+        addMember(orgA,"sla-admin-a","ADMIN");addMember(orgA,"sla-viewer-a","VIEWER");addMember(orgB,"sla-admin-b","ADMIN");
+        given(jwtDecoder.decode("sla-admin-a-token")).willReturn(testJwt("sla-admin-a",orgA));
+        given(jwtDecoder.decode("sla-viewer-a-token")).willReturn(testJwt("sla-viewer-a",orgA));
+        given(jwtDecoder.decode("sla-admin-b-token")).willReturn(testJwt("sla-admin-b",orgB));
+
+        var defaults=maintenanceSlaPolicies.list(orgA);
+        assertEquals(3,defaults.size());
+        assertEquals(15,defaults.get(0).maxFutureDays());
+        assertEquals(180,defaults.get(1).maxFutureDays());
+        assertFalse(defaults.get(2).configured());
+        mockMvc.perform(get("/api/v1/configuration/maintenance-sla-policies").header("Authorization","Bearer sla-admin-a-token"))
+            .andExpect(status().isOk()).andExpect(content().string(containsString("CLOSE_SUBMITTED")));
+        mockMvc.perform(get("/api/v1/configuration/maintenance-sla-policies").header("Authorization","Bearer sla-viewer-a-token"))
+            .andExpect(status().isForbidden());
+        String update="""
+            {"statusKey":"CLOSE_SUBMITTED","dateRequired":true,"allowFuture":true,"maxFutureDays":45,"allowPast":false,"maxPastDays":null,"businessTimezone":"Asia/Kolkata","reason":"Configure closure submission target date"}
+            """;
+        mockMvc.perform(post("/api/v1/configuration/maintenance-sla-policies").header("Authorization","Bearer sla-admin-a-token")
+            .contentType(MediaType.APPLICATION_JSON).content(update)).andExpect(status().isOk());
+        assertTrue(maintenanceSlaPolicies.requireConfigured(orgA,"CLOSE_SUBMITTED").configured());
+        assertEquals(45,maintenanceSlaPolicies.requireConfigured(orgA,"CLOSE_SUBMITTED").maxFutureDays());
+        assertFalse(maintenanceSlaPolicies.requireConfigured(orgB,"CLOSE_SUBMITTED").configured());
+        assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM defect_events_dtl WHERE operator_id=? AND event_type='MAINTENANCE_SLA_POLICY_UPDATED' AND note=?",Integer.class,orgA,"Configure closure submission target date"));
+        mockMvc.perform(get("/api/v1/configuration/maintenance-sla-policies").header("Authorization","Bearer sla-admin-b-token"))
+            .andExpect(status().isOk()).andExpect(content().string(not(containsString("Asia/Kolkata"))));
     }
 
     @Test
@@ -226,6 +261,8 @@ class LocalPostgresOperationalIntegrationTest {
         var submittedForm=new SubmitFormRequest(form.id(),published.id(),com.ecabin.ledger.api.FormModels.FormPurpose.DEFECT_REPORT,submittedAnswers);
         mockMvc.perform(post("/api/v1/defects/{id}/form-submissions",apiCreated.id()).header("Authorization","Bearer auditor-token").contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(submittedForm))).andExpect(status().isCreated());
         assertEquals(1,forms.submissions(org,apiCreated.id()).size());
+        mockMvc.perform(get("/api/v1/defects/{id}/operational-forms?purpose=DEFECT_REPORT",apiCreated.id()).header("Authorization","Bearer auditor-token"))
+            .andExpect(status().isOk()).andExpect(content().json("[]"));
         var wrongRegistration=new CreateDefectRequest("N999ZZ","CABIN","SEAT",area,component,condition,"FWD CABIN / ROW 17 / SEAT 17A",null,null,null,"Wrong aircraft","Registration cannot replace the selected aircraft.","MEDIUM",aircraft,form.id(),published.id(),reportAnswers(org,component,condition,"FWD CABIN / ROW 17 / SEAT 17A","Wrong aircraft","Registration cannot replace the selected aircraft."));
         mockMvc.perform(post("/api/v1/defects").header("Authorization","Bearer auditor-token").contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(wrongRegistration))).andExpect(status().isBadRequest());
         var foreignAircraftReport=new CreateDefectRequest(tail,"CABIN","SEAT",area,component,condition,"FWD CABIN / ROW 18 / SEAT 18A",null,null,null,"Foreign aircraft","Aircraft identifiers remain tenant-scoped.","MEDIUM",foreignAircraft,form.id(),published.id(),reportAnswers(org,component,condition,"FWD CABIN / ROW 18 / SEAT 18A","Foreign aircraft","Aircraft identifiers remain tenant-scoped."));
@@ -249,26 +286,45 @@ class LocalPostgresOperationalIntegrationTest {
         addMember(org,"auditor.test@ecabin.local","AUDITOR");addMember(org,"reviewer.test@ecabin.local","REVIEWER");addMember(org,"maintenance.test@ecabin.local","MAINTENANCE_TECHNICIAN");addMember(org,"inspector.test@ecabin.local","INSPECTOR");
         jdbc.update("INSERT INTO maintenance_teams_mst(operator_id,name,team_type) VALUES(?, 'Cabin Review','REVIEWER'),(?, 'Cabin Maintenance','MAINTENANCE')",org,org);
         jdbc.update("INSERT INTO operator_membership_teams_mst(operator_id,external_user_id,team_name) VALUES(?,?,?),(?,?,?)",org,"reviewer.test@ecabin.local","Cabin Review",org,"maintenance.test@ecabin.local","Cabin Maintenance");
+        UUID maintenanceTeam=jdbc.queryForObject("SELECT id FROM maintenance_teams_mst WHERE operator_id=? AND name='Cabin Maintenance' AND team_type='MAINTENANCE'",UUID.class,org);
         UUID reviewerTeam=jdbc.queryForObject("SELECT id FROM maintenance_teams_mst WHERE operator_id=? AND name='Cabin Review'",UUID.class,org);
         jdbc.update("UPDATE operators_mst SET default_reviewer_team_id=? WHERE id=?",reviewerTeam,org);
-        UUID area=UUID.randomUUID();jdbc.update("INSERT INTO cabin_areas_mst(id,operator_id,code,name) VALUES(?,?,?,'Cabin')",area,org,"FLOW_"+area.toString().substring(0,8));
+        UUID area=jdbc.queryForObject("SELECT id FROM cabin_areas_mst WHERE operator_id=? AND code='GALLEY' AND isactive=1",UUID.class,org);
         UUID component=UUID.randomUUID();jdbc.update("INSERT INTO cabin_components_mst(id,operator_id,area_id,code,name) VALUES(?,?,?,?,?)",component,org,area,"FLOW_CMP_"+component.toString().substring(0,8),"Seat assembly");
         UUID condition=createCondition(org,component);String tail=jdbc.queryForObject("SELECT tail_number FROM aircraft_mst WHERE operator_id=?",String.class,org);
+        var galleyForm=forms.create(org,"http-admin",new CreateFormRequest("REVIEW_GALLEY_"+UUID.randomUUID().toString().substring(0,8).toUpperCase(),"Reviewer workflow report",area));
+        var galleyDraft=forms.saveDraft(org,"http-admin",galleyForm.id(),galleyForm.draftVersionId(),reportConfiguration());
+        var galleyPublished=forms.publish(org,"http-admin",galleyForm.id(),galleyDraft.id());
+        var decisionForm=forms.create(org,"http-admin",new CreateFormRequest("REVIEW_DECISION_"+UUID.randomUUID().toString().substring(0,8).toUpperCase(),"Galley Reviewer Decision",area,FormPurpose.REVIEW_DECISION,WorkflowStage.REPORTED));
+        var decisionDraft=forms.saveDraft(org,"http-admin",decisionForm.id(),decisionForm.draftVersionId(),reviewDecisionConfiguration());
+        var decisionPublished=forms.publish(org,"http-admin",decisionForm.id(),decisionDraft.id());
         UUID reportRetryKey=UUID.randomUUID();
-        CreateDefectRequest reportPayload=new CreateDefectRequest(tail,"CABIN","SEAT",area,component,condition,"FWD CABIN",14,"14A",null,"Seat finding","Reported by local Auditor.","HIGH");
+        UUID aircraftId=jdbc.queryForObject("SELECT id FROM aircraft_mst WHERE operator_id=? AND tail_number=? AND isactive=1",UUID.class,org,tail);
+        var approvedAnswers=galleyReportAnswers(org,component,condition,"Galley 2","Galley finding","Reported by local Auditor.","HIGH");
+        CreateDefectRequest reportPayload=new CreateDefectRequest(tail,"GALLEY","GALLEY",area,component,condition,"Galley 2",null,null,null,"Galley — Seat assembly — Galley 2","Condition: Test condition","HIGH",aircraftId,galleyForm.id(),galleyPublished.id(),approvedAnswers);
         DefectView approved=defects.create(org,"auditor.test@ecabin.local",reportPayload,reportRetryKey);
         assertEquals(approved.id(),defects.create(org,"auditor.test@ecabin.local",reportPayload,reportRetryKey).id(),"A timed-out report retry must return the existing defect.");
         assertThrows(ResponseStatusException.class,()->defects.create(org,"reviewer.test@ecabin.local",reportPayload,reportRetryKey),"A retry key cannot be reused by another actor.");
         assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM defects_dtl WHERE operator_id=? AND report_idempotency_key=?",Integer.class,org,reportRetryKey));
         assertEquals(reviewerTeam,jdbc.queryForObject("SELECT reviewer_team_id FROM defects_dtl WHERE operator_id=? AND id=?",UUID.class,org,approved.id()));
         assertTrue(reviewerQueue.queue(org,"reviewer.test@ecabin.local",false,0,25,"ALL",null,"reportedAt","DESC").items().stream().anyMatch(row->row.id().equals(approved.id())));
-        assertThrows(org.springframework.web.server.ResponseStatusException.class,()->reviewerQueue.decide(org,approved.id(),"maintenance.test@ecabin.local",new ReviewerDecisionRequest("APPROVE","should be denied")));
-        var approval=reviewerQueue.decide(org,approved.id(),"reviewer.test@ecabin.local",new ReviewerDecisionRequest("APPROVE","Inspection required before repair."));
+        assertTrue(forms.publishedForDefect(org,approved.id(),FormPurpose.DEFECT_REPORT).isEmpty(),"Initial report forms remain in Report Defect and are not actionable forms on an already-created case.");
+        assertTrue(forms.publishedForDefect(org,approved.id(),FormPurpose.REVIEW_DECISION).stream().anyMatch(form->form.id().equals(decisionForm.id())),"The published Reviewer form resolves for the created Galley case.");
+        assertThrows(org.springframework.web.server.ResponseStatusException.class,()->reviewerQueue.decide(org,approved.id(),"maintenance.test@ecabin.local",new ReviewerDecisionRequest("APPROVE",maintenanceTeam,"should be denied")));
+        assertTrue(reviewerQueue.decisionOptions(org,approved.id(),"reviewer.test@ecabin.local").maintenanceTeams().stream().anyMatch(team->team.id().equals(maintenanceTeam)),"Reviewer options are available from the case's typed defect details even when the legacy report-submission row is absent.");
+        assertThrows(ResponseStatusException.class,()->reviewerQueue.decide(org,approved.id(),"reviewer.test@ecabin.local",new ReviewerDecisionRequest("REJECT",null,"Fix the report",null,decisionForm.id(),UUID.randomUUID())),"A stale or unpublished decision form version cannot be submitted.");
+        forms.submit(org,"auditor.test@ecabin.local",approved.id(),new SubmitFormRequest(galleyForm.id(),galleyPublished.id(),approvedAnswers));
+        assertTrue(forms.publishedForDefect(org,approved.id(),com.ecabin.ledger.api.FormModels.FormPurpose.DEFECT_REPORT).isEmpty(),"An initial report version must not be offered again after submission.");
+        assertThrows(ResponseStatusException.class,()->forms.submit(org,"auditor.test@ecabin.local",approved.id(),new SubmitFormRequest(galleyForm.id(),galleyPublished.id(),approvedAnswers)),"A duplicate direct form submission must be rejected by the backend.");
+        var decisionOptions=reviewerQueue.decisionOptions(org,approved.id(),"reviewer.test@ecabin.local");
+        assertTrue(decisionOptions.maintenanceTeams().stream().anyMatch(team->team.id().equals(maintenanceTeam)));
+        assertThrows(IllegalArgumentException.class,()->reviewerQueue.decide(org,approved.id(),"reviewer.test@ecabin.local",new ReviewerDecisionRequest("APPROVE",null,null,null,decisionForm.id(),decisionPublished.id())));
+        var approval=reviewerQueue.decide(org,approved.id(),"reviewer.test@ecabin.local",new ReviewerDecisionRequest("APPROVE",maintenanceTeam,null,null,decisionForm.id(),decisionPublished.id()));
         assertEquals("INSPECTION_REQUIRED",approval.status());
         assertEquals(0,jdbc.queryForObject("SELECT count(*) FROM corrective_actions_dtl WHERE operator_id=? AND defect_id=? AND isactive=1",Integer.class,org,approved.id()));
         assertEquals(0,jdbc.queryForObject("SELECT count(*) FROM defects_dtl WHERE operator_id=? AND id=? AND assigned_team IS NOT NULL",Integer.class,org,approved.id()),"Maintenance assignment fields must remain empty until inspection passes.");
-        assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM defect_events_dtl WHERE operator_id=? AND defect_id=? AND event_type='REVIEW_APPROVED' AND actor_id='reviewer.test@ecabin.local' AND note='Inspection required before repair.'",Integer.class,org,approved.id()));
-        assertThrows(org.springframework.web.server.ResponseStatusException.class,()->reviewerQueue.decide(org,approved.id(),"reviewer.test@ecabin.local",new ReviewerDecisionRequest("REJECT","conflicting retry")));
+        assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM defect_events_dtl WHERE operator_id=? AND defect_id=? AND event_type='REVIEW_APPROVED' AND actor_id='reviewer.test@ecabin.local' AND note='Reviewer approved the report; inspection is required before maintenance.'",Integer.class,org,approved.id()));
+        assertThrows(org.springframework.web.server.ResponseStatusException.class,()->reviewerQueue.decide(org,approved.id(),"reviewer.test@ecabin.local",new ReviewerDecisionRequest("REJECT",null,"must be rejected before repeat", "conflicting retry",decisionForm.id(),decisionPublished.id())));
         defects.transition(org,approved.id(),"inspector.test@ecabin.local",new TransitionRequest("INSPECTION_IN_PROGRESS","Inspection started.",null,null));
         var inspection=workflow.completeInspection(org,approved.id(),"inspector.test@ecabin.local",new InspectionRequest("PASS","Seat inspected.",null));
         assertEquals("ACTION_ASSIGNED",inspection.status());
@@ -276,13 +332,16 @@ class LocalPostgresOperationalIntegrationTest {
         assertEquals("Cabin Maintenance",jdbc.queryForObject("SELECT assigned_team FROM corrective_actions_dtl WHERE operator_id=? AND defect_id=? AND isactive=1",String.class,org,approved.id()));
         assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM notifications_dtl WHERE operator_id=? AND defect_id=? AND recipient_user_id='maintenance.test@ecabin.local' AND notification_type='ACTION_ASSIGNED'",Integer.class,org,approved.id()));
 
-        DefectView rejected=defects.create(org,"auditor.test@ecabin.local",new CreateDefectRequest(tail,"CABIN","SEAT",area,component,condition,"AFT CABIN",15,"15A",null,"Duplicate finding","Rejected by review.","LOW"));
-        var rejection=reviewerQueue.decide(org,rejected.id(),"reviewer.test@ecabin.local",new ReviewerDecisionRequest("REJECT","Not a defect; duplicate report."));
-        assertEquals("REJECTED",rejection.status());
-        assertTrue(reviewerQueue.queue(org,"reviewer.test@ecabin.local",false,0,25,"ALL",null,"reportedAt","DESC").items().stream().noneMatch(row->row.id().equals(rejected.id())));
+        DefectView rejected=defects.create(org,"auditor.test@ecabin.local",new CreateDefectRequest(tail,"GALLEY","GALLEY",area,component,condition,"Galley 1",null,null,null,"Galley — Seat assembly — Galley 1","Condition: Test condition","LOW",aircraftId,null,null));
+        var rejectedAnswers=galleyReportAnswers(org,component,condition,"Galley 1","Duplicate finding","Returned for correction.","LOW");
+        forms.submit(org,"auditor.test@ecabin.local",rejected.id(),new SubmitFormRequest(galleyForm.id(),galleyPublished.id(),rejectedAnswers));
+        var rejection=reviewerQueue.decide(org,rejected.id(),"reviewer.test@ecabin.local",new ReviewerDecisionRequest("REJECT",null,"The location is unclear.",null,decisionForm.id(),decisionPublished.id()));
+        assertEquals("REPORTED",rejection.status());
+        assertFalse(reviewerQueue.queue(org,"reviewer.test@ecabin.local",false,0,25,"ALL",null,"reportedAt","DESC").items().stream().anyMatch(row->row.id().equals(rejected.id())),"Returned reports leave the review queue until a correction is submitted.");
         assertEquals(0,jdbc.queryForObject("SELECT count(*) FROM corrective_actions_dtl WHERE operator_id=? AND defect_id=? AND isactive=1",Integer.class,org,rejected.id()));
-        assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM defect_events_dtl WHERE operator_id=? AND defect_id=? AND event_type='REVIEW_REJECTED' AND note='Not a defect; duplicate report.'",Integer.class,org,rejected.id()));
-        assertThrows(org.springframework.web.server.ResponseStatusException.class,()->reviewerQueue.decide(org,rejected.id(),"reviewer.test@ecabin.local",new ReviewerDecisionRequest("APPROVE","must conflict")));
+        assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM defect_events_dtl WHERE operator_id=? AND defect_id=? AND event_type='REVIEW_REJECTED' AND note='Returned for correction: The location is unclear.' AND new_state->>'rejectionReason'='The location is unclear.' AND new_state->>'returnForCorrection'='true'",Integer.class,org,rejected.id()));
+        assertThrows(org.springframework.web.server.ResponseStatusException.class,()->reviewerQueue.decide(org,rejected.id(),"reviewer.test@ecabin.local",new ReviewerDecisionRequest("APPROVE",maintenanceTeam,null,"must conflict",decisionForm.id(),decisionPublished.id())));
+        assertThrows(IllegalArgumentException.class,()->reviewerQueue.decide(org,rejected.id(),"reviewer.test@ecabin.local",new ReviewerDecisionRequest("REJECT",null,"  ",null,decisionForm.id(),decisionPublished.id())),"Reject requires a nonblank reason.");
     }
 
     @Test
@@ -345,6 +404,23 @@ class LocalPostgresOperationalIntegrationTest {
         assertTrue(defectEvents.stream().anyMatch(event -> "REVIEW_ROUTING_FAILED".equals(event.eventType())));
         jdbc.update("UPDATE defects_dtl SET isactive=2 WHERE operator_id=? AND id=?", orgA, defect.id());
         assertThrows(ResponseStatusException.class, () -> defects.get(orgA, defect.id()));
+    }
+
+    @Test
+    @Transactional
+    @Rollback
+    void closureTeamMembersWithApprovePermissionSeeOnlyRoutedClosureCasesInSharedQueue() {
+        UUID org=createTenant("CLOSURE-QUEUE");addMember(org,"closure-reviewer","SUPERVISOR");
+        UUID team=UUID.randomUUID();jdbc.update("INSERT INTO maintenance_teams_mst(id,operator_id,name,team_type) VALUES(?,?,?,'CLOSURE')",team,org,"Configured Closure Team");
+        jdbc.update("INSERT INTO operator_membership_teams_mst(operator_id,external_user_id,team_name) VALUES(?,?,?)",org,"closure-reviewer","Configured Closure Team");
+        jdbc.update("UPDATE operators_mst SET default_closure_team_id=? WHERE id=?",team,org);
+        UUID area=jdbc.queryForObject("SELECT id FROM cabin_areas_mst WHERE operator_id=? AND code='CABIN'",UUID.class,org);
+        UUID component=jdbc.queryForObject("SELECT id FROM cabin_components_mst WHERE operator_id=? AND code='TRAY_TABLE'",UUID.class,org);
+        UUID condition=createCondition(org,component);String tail=jdbc.queryForObject("SELECT tail_number FROM aircraft_mst WHERE operator_id=?",String.class,org);
+        DefectView defect=defects.create(org,"closure-reviewer",new CreateDefectRequest(tail,"CABIN","SEAT",area,component,condition,"FWD CABIN",null,null,null,"Closure queue fixture","Synthetic test fixture","MEDIUM"));
+        jdbc.update("UPDATE defects_dtl SET reviewer_team_id=?,status='APPROVAL_REQUIRED' WHERE operator_id=? AND id=?",team,org,defect.id());
+        var queue=reviewerQueue.queue(org,"closure-reviewer",false,0,25,"APPROVAL_REQUIRED",null,"reportedAt","DESC");
+        assertTrue(queue.items().stream().anyMatch(item->item.id().equals(defect.id())),"An explicitly configured closure-team member with APPROVE should see closure-stage cases in the shared queue.");
     }
 
     @Test
@@ -421,7 +497,8 @@ class LocalPostgresOperationalIntegrationTest {
         UUID component=UUID.randomUUID();jdbc.update("INSERT INTO cabin_components_mst(id,operator_id,area_id,code,name) VALUES(?,?,?,?,?)",component,orgA,area,"CMP_"+component.toString().substring(0,8),"Seat assembly");
         UUID condition=createCondition(orgA,component);
         String tail=jdbc.queryForObject("SELECT tail_number FROM aircraft_mst WHERE operator_id=?",String.class,orgA);
-        DefectView defect=defects.create(orgA,"form-reporter",new CreateDefectRequest(tail,"CABIN","SEAT",area,component,condition,"FWD CABIN / ROW 14 / SEAT 14A",null,null,null,"Test title","Test defect description","MEDIUM"));
+        UUID aircraftId=jdbc.queryForObject("SELECT id FROM aircraft_mst WHERE operator_id=? AND tail_number=? AND isactive=1",UUID.class,orgA,tail);
+        DefectView defect=defects.create(orgA,"form-reporter",new CreateDefectRequest(tail,"CABIN","SEAT",area,component,condition,"FWD CABIN / ROW 14 / SEAT 14A",null,null,null,"Test title","Test defect description","MEDIUM",aircraftId,null,null));
 
         var created=forms.create(orgA,"form-admin",new CreateFormRequest("CABIN_CHECK_"+UUID.randomUUID().toString().substring(0,8).toUpperCase(),"Cabin check",area));
         var definition=reportConfiguration();
@@ -446,7 +523,7 @@ class LocalPostgresOperationalIntegrationTest {
         assertEquals("FWD CABIN / ROW 14 / SEAT 14A",result.snapshot().zone());
         assertEquals(1,forms.submissions(orgA,defect.id()).size());
         assertThrows(ResponseStatusException.class,()->forms.submissions(orgB,defect.id()));
-        assertThrows(IllegalArgumentException.class,()->forms.submit(orgA,"form-reporter",defect.id(),new SubmitFormRequest(created.id(),published.id(),java.util.Map.of("finding","OK","component",component.toString(),"condition",UUID.randomUUID().toString()))));
+        assertThrows(ResponseStatusException.class,()->forms.submit(orgA,"form-reporter",defect.id(),new SubmitFormRequest(created.id(),published.id(),java.util.Map.of("finding","OK","component",component.toString(),"condition",UUID.randomUUID().toString()))));
         assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM defect_events_dtl WHERE operator_id=? AND entity_type='FORM_SUBMISSION' AND entity_id=?",Integer.class,orgA,result.id()));
     }
 
@@ -645,13 +722,29 @@ class LocalPostgresOperationalIntegrationTest {
             new FieldDefinition("zone","Location",FieldType.TEXT,null,true,3,new TextRules(1,80,false,false,null),null,null,null,null,null,DefectFieldBinding.ZONE),
             new FieldDefinition("title","Finding",FieldType.TEXT,null,true,4,new TextRules(1,160,false,false,null),null,null,null,null,null,DefectFieldBinding.TITLE),
             new FieldDefinition("description","Details",FieldType.TEXTAREA,null,true,5,new TextRules(1,4000,false,false,null),null,null,null,null,null,DefectFieldBinding.DESCRIPTION),
-            new FieldDefinition("severity_ref","Severity",FieldType.DROPDOWN,null,true,6,null,null,null,OptionSource.DEFECT_SEVERITIES,null,null,DefectFieldBinding.SEVERITY)));
+            new FieldDefinition("severity_ref","Severity",FieldType.DROPDOWN,null,true,6,null,null,null,OptionSource.DEFECT_SEVERITIES,null,null,DefectFieldBinding.SEVERITY),
+            new FieldDefinition("aircraftId","Aircraft Registration",FieldType.AIRCRAFT_SELECT,null,true,7,null,null,null,OptionSource.AIRCRAFT,null,null,DefectFieldBinding.AIRCRAFT_ID)));
+    }
+
+    private FormConfiguration reviewDecisionConfiguration(){
+        return new FormConfiguration(List.of(
+            new FieldDefinition("decision","Decision",FieldType.DROPDOWN,null,true,0,null,null,null,OptionSource.REVIEW_DECISIONS,null,null,DefectFieldBinding.REVIEW_DECISION,true,false),
+            new FieldDefinition("maintenanceTeam","Assign Team",FieldType.DROPDOWN,null,true,1,null,null,null,OptionSource.MAINTENANCE_TEAMS,null,null,DefectFieldBinding.REVIEW_MAINTENANCE_TEAM,true,false,new com.ecabin.ledger.api.FormModels.VisibilityRule("decision","APPROVE")),
+            new FieldDefinition("rejectionReason","Rejection Reason",FieldType.TEXTAREA,null,true,2,new TextRules(null,2000,false,false,null),null,null,null,null,null,DefectFieldBinding.REVIEW_REJECTION_REASON,true,false,new com.ecabin.ledger.api.FormModels.VisibilityRule("decision","REJECT")),
+            new FieldDefinition("remark","Remark",FieldType.TEXTAREA,null,false,3,new TextRules(null,2000,false,false,null),null,null,null,null,null,DefectFieldBinding.REVIEW_REMARK,true,false)));
     }
 
     private java.util.Map<String,Object> reportAnswers(UUID org,UUID component,UUID condition,String zone,String title,String description) {
         UUID category=jdbc.query("SELECT id FROM defect_categories_mst WHERE operator_id=? AND code='SEAT' AND isactive=1",rs->rs.next()?rs.getObject("id",UUID.class):null,org);
         if(category==null){category=UUID.randomUUID();jdbc.update("INSERT INTO defect_categories_mst(id,operator_id,code,name) VALUES(?,?,'SEAT','Passenger seat')",category,org);}
         UUID severity=jdbc.queryForObject("SELECT id FROM defect_severities_mst WHERE operator_id=? AND severity_code='MEDIUM' AND isactive=1",UUID.class,org);
+        return java.util.Map.of("category_ref",category.toString(),"component_ref",component.toString(),"condition_ref",condition.toString(),"zone",zone,"title",title,"description",description,"severity_ref",severity.toString());
+    }
+
+    private java.util.Map<String,Object> galleyReportAnswers(UUID org,UUID component,UUID condition,String zone,String title,String description,String severityCode) {
+        UUID category=jdbc.query("SELECT id FROM defect_categories_mst WHERE operator_id=? AND code='GALLEY' AND isactive=1",rs->rs.next()?rs.getObject("id",UUID.class):null,org);
+        if(category==null){category=UUID.randomUUID();jdbc.update("INSERT INTO defect_categories_mst(id,operator_id,code,name) VALUES(?,?,'GALLEY','Galley finding')",category,org);}
+        UUID severity=jdbc.queryForObject("SELECT id FROM defect_severities_mst WHERE operator_id=? AND severity_code=? AND isactive=1",UUID.class,org,severityCode);
         return java.util.Map.of("category_ref",category.toString(),"component_ref",component.toString(),"condition_ref",condition.toString(),"zone",zone,"title",title,"description",description,"severity_ref",severity.toString());
     }
 

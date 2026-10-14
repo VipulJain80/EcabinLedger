@@ -163,6 +163,72 @@ SELECT operator_id,form_id,next_version,'DRAFT',
 FROM galley_form
 ON CONFLICT(operator_id,form_id,version_number) DO NOTHING;
 
+-- Provision a local-only Reviewer workflow form as a draft for the synthetic demo tenant.
+-- Form Master/OperationalFormService remains the publication authority. Existing organization
+-- forms and administrator-authored versions are preserved; only the demo tenant is considered.
+INSERT INTO operational_forms_dtl(operator_id,area_id,form_key,name,purpose,workflow_stage,created_by,updated_by)
+SELECT a.operator_id,a.id,'LOCAL_DEMO_GALLEY_REVIEW_DECISION','Galley Reviewer Decision (DEMO)','REVIEW_DECISION','REPORTED','local-demo-seed','local-demo-seed'
+FROM cabin_areas_mst a
+WHERE a.operator_id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' AND a.code='GALLEY' AND a.isactive=1
+  AND NOT EXISTS (
+    SELECT 1 FROM operational_forms_dtl existing
+    WHERE existing.operator_id=a.operator_id AND existing.area_id=a.id AND existing.purpose='REVIEW_DECISION'
+  )
+ON CONFLICT(operator_id,form_key) DO NOTHING;
+
+INSERT INTO operational_form_versions_dtl(operator_id,form_id,version_number,status,fields_json,created_by,updated_by)
+SELECT f.operator_id,f.id,1,'DRAFT',
+  '{"fields":[{"key":"decision","label":"Decision","type":"DROPDOWN","required":true,"order":0,"optionSource":"REVIEW_DECISIONS","binding":"REVIEW_DECISION","visible":true,"readOnly":false},{"key":"maintenanceTeam","label":"Assign Team","type":"DROPDOWN","required":true,"order":1,"optionSource":"MAINTENANCE_TEAMS","binding":"REVIEW_MAINTENANCE_TEAM","visible":true,"readOnly":false,"visibleWhen":{"fieldKey":"decision","equals":"APPROVE"}},{"key":"rejectionReason","label":"Rejection Reason","type":"TEXTAREA","required":true,"order":2,"textRules":{"maxLength":2000},"binding":"REVIEW_REJECTION_REASON","visible":true,"readOnly":false,"visibleWhen":{"fieldKey":"decision","equals":"REJECT"}},{"key":"remark","label":"Remark","type":"TEXTAREA","required":false,"order":3,"textRules":{"maxLength":2000},"binding":"REVIEW_REMARK","visible":true,"readOnly":false}]}'::jsonb,
+  'local-demo-seed','local-demo-seed'
+FROM operational_forms_dtl f
+WHERE f.operator_id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+  AND f.form_key='LOCAL_DEMO_GALLEY_REVIEW_DECISION' AND f.created_by='local-demo-seed'
+  AND f.purpose='REVIEW_DECISION' AND f.workflow_stage='REPORTED' AND f.isactive=1
+  AND NOT EXISTS (SELECT 1 FROM operational_form_versions_dtl v WHERE v.operator_id=f.operator_id AND v.form_id=f.id)
+ON CONFLICT(operator_id,form_id,version_number) DO NOTHING;
+
+-- Provide a local-only Galley Closure Review draft so administrators can find,
+-- configure, and publish it through Form Master. Never overwrite a tenant-authored form.
+INSERT INTO operational_forms_dtl(operator_id,area_id,form_key,name,purpose,workflow_stage,created_by,updated_by)
+SELECT a.operator_id,a.id,'LOCAL_DEMO_GALLEY_CLOSURE_REVIEW','Galley Closure Review (DEMO)','CLOSURE_APPROVAL','APPROVAL_REQUIRED','local-demo-seed','local-demo-seed'
+FROM cabin_areas_mst a
+WHERE a.operator_id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' AND a.code='GALLEY' AND a.isactive=1
+  AND NOT EXISTS (
+    SELECT 1 FROM operational_forms_dtl existing
+    WHERE existing.operator_id=a.operator_id AND existing.area_id=a.id AND existing.purpose='CLOSURE_APPROVAL'
+  )
+ON CONFLICT(operator_id,form_key) DO NOTHING;
+
+INSERT INTO operational_form_versions_dtl(operator_id,form_id,version_number,status,fields_json,created_by,updated_by)
+SELECT f.operator_id,f.id,1,'DRAFT',
+  '{"fields":[{"key":"closureDecision","label":"Closure Decision","type":"DROPDOWN","required":true,"order":0,"optionSource":"CLOSURE_DECISIONS","binding":"CLOSURE_DECISION","visible":true,"readOnly":false},{"key":"remarks","label":"Remarks","type":"TEXTAREA","required":false,"order":1,"textRules":{"maxLength":2000},"requiredWhen":{"fieldKey":"closureDecision","equals":"DECLINE"},"binding":"CLOSURE_REMARK","visible":true,"readOnly":false}]}'::jsonb,
+  'local-demo-seed','local-demo-seed'
+FROM operational_forms_dtl f
+WHERE f.operator_id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+  AND f.form_key='LOCAL_DEMO_GALLEY_CLOSURE_REVIEW' AND f.created_by='local-demo-seed'
+  AND f.purpose='CLOSURE_APPROVAL' AND f.workflow_stage='APPROVAL_REQUIRED' AND f.isactive=1
+  AND NOT EXISTS (SELECT 1 FROM operational_form_versions_dtl v WHERE v.operator_id=f.operator_id AND v.form_id=f.id)
+ON CONFLICT(operator_id,form_id,version_number) DO NOTHING;
+
+-- Local demo Maintenance Action form: create a draft only when no tenant-owned
+-- corrective-action form already exists. Publication remains Form Master service-owned.
+INSERT INTO operational_forms_dtl(operator_id,area_id,form_key,name,purpose,workflow_stage,created_by,updated_by)
+SELECT a.operator_id,a.id,'LOCAL_DEMO_GALLEY_MAINTENANCE_ACTION','Galley Maintenance Action (DEMO)','CORRECTIVE_ACTION','IN_PROGRESS','local-demo-seed','local-demo-seed'
+FROM cabin_areas_mst a
+WHERE a.operator_id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' AND a.code='GALLEY' AND a.isactive=1
+  AND NOT EXISTS (SELECT 1 FROM operational_forms_dtl existing WHERE existing.operator_id=a.operator_id AND existing.area_id=a.id AND existing.purpose='CORRECTIVE_ACTION')
+ON CONFLICT(operator_id,form_key) DO NOTHING;
+
+INSERT INTO operational_form_versions_dtl(operator_id,form_id,version_number,status,fields_json,created_by,updated_by)
+SELECT f.operator_id,f.id,1,'DRAFT',
+  '{"fields":[{"key":"maintenanceStatus","label":"Maintenance Status","type":"DROPDOWN","required":true,"order":0,"optionSource":"MAINTENANCE_ACTION_STATUSES","binding":"MAINTENANCE_STATUS","visible":true,"readOnly":false},{"key":"slaTargetDate","label":"SLA Target Date","type":"DATE","required":true,"order":1,"binding":"SLA_TARGET_DATE","visible":true,"readOnly":false},{"key":"remark","label":"Remarks","type":"TEXTAREA","required":false,"order":2,"textRules":{"maxLength":2000},"binding":"MAINTENANCE_REMARK","visible":true,"readOnly":false}]}'::jsonb,
+  'local-demo-seed','local-demo-seed'
+FROM operational_forms_dtl f
+WHERE f.operator_id='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' AND f.form_key='LOCAL_DEMO_GALLEY_MAINTENANCE_ACTION'
+  AND f.created_by='local-demo-seed' AND f.purpose='CORRECTIVE_ACTION' AND f.workflow_stage='IN_PROGRESS' AND f.isactive=1
+  AND NOT EXISTS (SELECT 1 FROM operational_form_versions_dtl v WHERE v.operator_id=f.operator_id AND v.form_id=f.id)
+ON CONFLICT(operator_id,form_id,version_number) DO NOTHING;
+
 INSERT INTO maintenance_teams_mst(operator_id, name, team_type, isactive) VALUES
   ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'Cabin Maintenance', 'MAINTENANCE', 1),
   ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'Cabin Quality (DEMO)', 'MAINTENANCE', 1)

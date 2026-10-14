@@ -1,7 +1,7 @@
-export type DefectBinding = "DEFECT_CATEGORY" | "COMPONENT_ID" | "CONDITION_ID" | "ZONE" | "ROW_NUMBER" | "SEAT_REFERENCE" | "TITLE" | "DESCRIPTION" | "REMARKS" | "SEVERITY" | "EVIDENCE_ATTACHMENTS" | "AIRCRAFT_ID";
+export type DefectBinding = "DEFECT_CATEGORY" | "COMPONENT_ID" | "CONDITION_ID" | "ZONE" | "ROW_NUMBER" | "SEAT_REFERENCE" | "TITLE" | "DESCRIPTION" | "REMARKS" | "SEVERITY" | "EVIDENCE_ATTACHMENTS" | "AIRCRAFT_ID" | "REVIEW_DECISION" | "REVIEW_MAINTENANCE_TEAM" | "REVIEW_REJECTION_REASON" | "REVIEW_REMARK" | "MAINTENANCE_STATUS" | "SLA_TARGET_DATE" | "MAINTENANCE_REMARK" | "CLOSURE_DECISION" | "CLOSURE_REMARK";
 export type ReportField = { key: string; label: string; type: string; required: boolean; visible?: boolean | null; readOnly?: boolean | null; optionSource?: string | null; binding?: DefectBinding | null; optionFilter?: { componentFieldKey?: string | null } | null; fileRules?: { minCount?: number; extensions?: string[]; mimeTypes?: string[]; maxFileSizeBytes?: number } | null };
 
-type PersistedDefectBinding = Exclude<DefectBinding, "EVIDENCE_ATTACHMENTS">;
+type PersistedDefectBinding = Exclude<DefectBinding, "EVIDENCE_ATTACHMENTS" | "REVIEW_DECISION" | "REVIEW_MAINTENANCE_TEAM" | "REVIEW_REJECTION_REASON" | "REVIEW_REMARK" | "MAINTENANCE_STATUS" | "SLA_TARGET_DATE" | "MAINTENANCE_REMARK">;
 const mandatory: PersistedDefectBinding[] = ["DEFECT_CATEGORY", "COMPONENT_ID", "CONDITION_ID", "ZONE", "TITLE", "DESCRIPTION", "SEVERITY", "AIRCRAFT_ID"];
 
 export function defectReportBindingIssue(fields: readonly ReportField[], areaCode?: string): string {
@@ -19,9 +19,9 @@ export function defectReportBindingIssue(fields: readonly ReportField[], areaCod
     return matches.length !== 1 || !matches[0].required;
   });
   if (missing.length) {
-    const labels: Record<DefectBinding, string> = {
+    const labels: Partial<Record<DefectBinding, string>> = {
       DEFECT_CATEGORY: "Defect category", COMPONENT_ID: "Component", CONDITION_ID: "Condition", ZONE: "Location",
-      ROW_NUMBER: "Row number", SEAT_REFERENCE: "Seat reference", TITLE: "Title", DESCRIPTION: "Description", REMARKS: "Remarks", SEVERITY: "Severity", EVIDENCE_ATTACHMENTS: "Evidence image upload", AIRCRAFT_ID: "Aircraft Registration",
+      ROW_NUMBER: "Row number", SEAT_REFERENCE: "Seat reference", TITLE: "Title", DESCRIPTION: "Description", REMARKS: "Remarks", SEVERITY: "Severity", EVIDENCE_ATTACHMENTS: "Evidence image upload", AIRCRAFT_ID: "Aircraft Registration", REVIEW_DECISION: "Reviewer decision", REVIEW_MAINTENANCE_TEAM: "Maintenance team", REVIEW_REJECTION_REASON: "Rejection reason", REVIEW_REMARK: "Reviewer remark", CLOSURE_DECISION: "Closure decision", CLOSURE_REMARK: "Closure remarks",
     };
     return galley
       ? `Galley Area requires these fields: ${missing.map(binding => labels[binding]).join(", ")}.`

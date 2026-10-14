@@ -8,8 +8,12 @@ class DefectWorkflowTest {
     @Test
     void permitsOnlyDocumentedLifecycleEdges() {
         assertTrue(DefectWorkflow.permits("REPORTED", "UNDER_REVIEW"));
+        assertTrue(DefectWorkflow.permits("UNDER_REVIEW", "REPORTED"), "A rejected report returns to the reporter for correction.");
         assertTrue(DefectWorkflow.permits("INSPECTION_COMPLETE", "ACTION_ASSIGNED"));
         assertTrue(DefectWorkflow.permits("AWAITING_VERIFICATION", "VERIFIED"));
+        assertTrue(DefectWorkflow.permits("VERIFIED", "APPROVAL_REQUIRED"));
+        assertTrue(DefectWorkflow.permits("APPROVAL_REQUIRED", "CLOSED"));
+        assertTrue(DefectWorkflow.permits("APPROVAL_REQUIRED", "IN_PROGRESS"), "A declined closure returns maintenance work to the active work state.");
         assertFalse(DefectWorkflow.permits("REPORTED", "CLOSED"));
         assertFalse(DefectWorkflow.permits("CLOSED", "IN_PROGRESS"));
     }

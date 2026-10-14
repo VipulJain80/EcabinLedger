@@ -4,6 +4,7 @@ import static com.ecabin.ledger.api.ApiModels.*;
 
 import com.ecabin.ledger.service.DefectService;
 import com.ecabin.ledger.service.OperationalFormService;
+import com.ecabin.ledger.service.ClosureReviewAccessService;
 import com.ecabin.ledger.security.AuthenticatedUser;
 import com.ecabin.ledger.security.CurrentUserResolver;
 import com.ecabin.ledger.security.Permission;
@@ -31,7 +32,10 @@ public class DefectController {
     private final CurrentUserResolver users;
     private final PermissionService permissions;
     private final OperationalFormService forms;
-    public DefectController(DefectService service, CurrentUserResolver users, PermissionService permissions, OperationalFormService forms) { this.service = service; this.users = users; this.permissions = permissions; this.forms = forms; }
+    private final ClosureReviewAccessService closureAccess;
+    @org.springframework.beans.factory.annotation.Autowired
+    public DefectController(DefectService service, CurrentUserResolver users, PermissionService permissions, OperationalFormService forms,ClosureReviewAccessService closureAccess) { this.service = service; this.users = users; this.permissions = permissions; this.forms = forms;this.closureAccess=closureAccess; }
+    public DefectController(DefectService service,CurrentUserResolver users,PermissionService permissions,OperationalFormService forms){this(service,users,permissions,forms,null);}
 
     @GetMapping("/defects")
     public DefectPage list(JwtAuthenticationToken auth,
@@ -130,6 +134,10 @@ public class DefectController {
     public List<DefectEventView> events(JwtAuthenticationToken auth, @PathVariable UUID id) { AuthenticatedUser user=users.require(auth); if(!permissions.permissionsFor(user.organizationId(),user.role()).contains(Permission.AUDIT))permissions.require(user,Permission.REVIEW); visibleDefect(user, id); return service.events(user.organizationId(), id); }
 
     private DefectView visibleDefect(AuthenticatedUser user, UUID id) {
+        if(closureAccess!=null&&permissions.permissionsFor(user.organizationId(),user.role()).contains(Permission.APPROVE)){
+            try{DefectView candidate=service.get(user.organizationId(),id);if(closureAccess.mayViewClosureCase(user.organizationId(),user.externalUserId(),id,candidate.status()))return candidate;}
+            catch(org.springframework.web.server.ResponseStatusException ignored){}
+        }
         if (permissions.isMaintenanceTeamScoped(user.organizationId(), user.role())) return service.getForMaintenanceMember(user.organizationId(), user.externalUserId(), id);
         if (permissions.isReporterScoped(user.organizationId(), user.role())) return service.getForReporter(user.organizationId(), user.externalUserId(), id);
         if (permissions.isReviewerTeamScoped(user.organizationId(),user.role())) return service.getForReviewerMember(user.organizationId(),user.externalUserId(),id);

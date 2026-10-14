@@ -1,8 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ColumnDef, SortingState } from "@tanstack/react-table";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import DataTable, { ServerTablePage } from "@/common/tables/DataTable";
 import { responseErrorMessage } from "@/common/alerts";
 
@@ -13,7 +13,9 @@ const date=(value:string)=>new Intl.DateTimeFormat(undefined,{dateStyle:"medium"
 
 export default function ReviewerWorkQueuePage({request,onOpen}:{request:Request;onOpen:(defectId:string)=>void}){
   const [page,setPage]=useState(0),[pageSize,setPageSize]=useState(25),[search,setSearch]=useState(""),[status,setStatus]=useState("ALL"),[sorting,setSorting]=useState<SortingState>([{id:"reportedAt",desc:true}]);
+  const queryClient=useQueryClient();
   const query=useQuery<ServerTablePage<ReviewItem>>({queryKey:["review-queue",page,pageSize,search,status,sorting],queryFn:async({signal})=>{const params=new URLSearchParams({page:String(page),size:String(pageSize),status});if(search.trim())params.set("search",search.trim());if(sorting[0]){params.set("sortBy",sorting[0].id);params.set("sortDirection",sorting[0].desc?"DESC":"ASC");}const response=await request(`/review-queue?${params}`,{signal});if(!response.ok)throw new Error(await responseErrorMessage(response,"Could not load the shared Reviewer queue."));return response.json() as Promise<ServerTablePage<ReviewItem>>;}});
+  useEffect(()=>{const refresh=()=>void queryClient.invalidateQueries({queryKey:["review-queue"]});window.addEventListener("review-queue-refresh",refresh);return()=>window.removeEventListener("review-queue-refresh",refresh);},[queryClient]);
   const columns:ColumnDef<ReviewItem,unknown>[]=[
     {accessorKey:"defectId",header:"Defect ID",enableSorting:true,cell:({row})=><button className="work-queue-open" type="button" onClick={()=>onOpen(row.original.id)}>{row.original.defectId}</button>},
     {accessorKey:"aircraftRegistration",header:"Aircraft"},{accessorKey:"msnNumber",header:"MSN",cell:({getValue})=>String(getValue()||"—")},{accessorKey:"aircraftType",header:"Aircraft type"},{accessorKey:"zone",header:"Cabin zone"},{accessorKey:"component",header:"Component",cell:({getValue})=>String(getValue()||"—")},{accessorKey:"severity",header:"Severity",cell:({row})=>row.original.severityName||human(row.original.severity)},{accessorKey:"status",header:"Status",cell:({getValue})=>human(String(getValue()))},{accessorKey:"reviewerTeam",header:"Reviewer team",cell:({row})=>row.original.routingNeedsAttention?<strong className="routing-attention">Needs eligible Reviewer</strong>:String(row.original.reviewerTeam||"Unassigned · configure route")},{accessorKey:"maintenanceTeam",header:"Maintenance team",cell:({getValue})=>String(getValue()||"—")},{accessorKey:"reportedAt",header:"Reported",cell:({getValue})=>date(String(getValue()))},

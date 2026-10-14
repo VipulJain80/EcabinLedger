@@ -30,12 +30,15 @@ public class ReviewerQueueController {
     @GetMapping("/review-queue")
     public ReviewerQueuePage queue(JwtAuthenticationToken auth,@RequestParam(defaultValue="0") int page,@RequestParam(defaultValue="25") int size,@RequestParam(required=false) String status,@RequestParam(required=false) String search,@RequestParam(defaultValue="reportedAt") String sortBy,@RequestParam(defaultValue="DESC") String sortDirection){
         AuthenticatedUser u=users.require(auth);var grants=permissions.permissionsFor(u.organizationId(),u.role());boolean admin=grants.contains(Permission.ADMINISTER_ORGANIZATION);
-        if(!admin){permissions.require(u,Permission.VIEW);permissions.require(u,Permission.REVIEW);}
+        if(!admin){permissions.require(u,Permission.VIEW);if(!grants.contains(Permission.REVIEW)&&!grants.contains(Permission.APPROVE))throw new org.springframework.security.access.AccessDeniedException("Review or closure approval permission is required.");}
         return reviewers.queue(u.organizationId(),u.externalUserId(),admin,page,size,status,search,sortBy,sortDirection);
     }
 
     @GetMapping("/reviewer-teams")
     public java.util.List<ApiModels.ReviewerTeamOption> reviewerTeams(JwtAuthenticationToken auth){AuthenticatedUser u=users.require(auth);permissions.require(u,Permission.REVIEW);return reviewers.reviewerTeams(u.organizationId());}
+
+    @GetMapping("/defects/{id}/review-decision-options")
+    public ApiModels.ReviewerDecisionOptions decisionOptions(JwtAuthenticationToken auth,@PathVariable UUID id){AuthenticatedUser u=users.require(auth);permissions.require(u,Permission.REVIEW);return reviewers.decisionOptions(u.organizationId(),id,u.externalUserId());}
 
     @GetMapping("/configuration/reviewer-routing/default")
     public Map<String,Object> routing(JwtAuthenticationToken auth){AuthenticatedUser u=admin(auth);return reviewers.routing(u.organizationId());}

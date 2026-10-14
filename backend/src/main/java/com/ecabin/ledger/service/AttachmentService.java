@@ -37,7 +37,11 @@ public class AttachmentService {
 
     public UUID defectForAttachment(UUID operatorId,UUID attachmentId){return jdbc.query("SELECT defect_id FROM attachments_dtl WHERE operator_id=? AND id=? AND isactive=1",rs->rs.next()?rs.getObject(1,UUID.class):null,operatorId,attachmentId);}
 
-    private Permission permissionFor(FormPurpose purpose){return switch(purpose){case DEFECT_REPORT->Permission.REPORT;case INSPECTION->Permission.INSPECT;case CORRECTIVE_ACTION->Permission.PERFORM_ACTION;case VERIFICATION->Permission.VERIFY;case CLOSURE_APPROVAL->Permission.APPROVE;case REOPEN->Permission.REOPEN;};}
+    public java.util.List<AttachmentView> listForDefect(UUID operatorId,UUID defectId){
+        return jdbc.query("SELECT id,defect_id,form_submission_id,field_key,original_filename,detected_mime_type,size_bytes,scan_status,uploaded_at FROM attachments_dtl WHERE operator_id=? AND defect_id=? AND isactive=1 ORDER BY uploaded_at,id",(rs,n)->new AttachmentView(rs.getObject("id",UUID.class),rs.getObject("defect_id",UUID.class),rs.getObject("form_submission_id",UUID.class),rs.getString("field_key"),rs.getString("original_filename"),rs.getString("detected_mime_type"),rs.getLong("size_bytes"),rs.getString("scan_status"),rs.getTimestamp("uploaded_at").toInstant()),operatorId,defectId);
+    }
+
+    private Permission permissionFor(FormPurpose purpose){return switch(purpose){case DEFECT_REPORT->Permission.REPORT;case REVIEW_DECISION->throw new ResponseStatusException(HttpStatus.CONFLICT,"Reviewer decision forms do not accept file uploads.");case INSPECTION->Permission.INSPECT;case CORRECTIVE_ACTION->Permission.PERFORM_ACTION;case VERIFICATION->Permission.VERIFY;case CLOSURE_APPROVAL->Permission.APPROVE;case REOPEN->Permission.REOPEN;};}
 
     @Transactional
     public AttachmentView upload(AuthenticatedUser user,boolean teamScoped,boolean reporterScoped,UUID defectId,UUID formId,UUID versionId,String fieldKey,MultipartFile file){

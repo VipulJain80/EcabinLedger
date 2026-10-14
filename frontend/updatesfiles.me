@@ -1,0 +1,395 @@
+export SPRING_DATASOURCE_URL='jdbc:postgresql://localhost:5432/postgres?connectTimeout=10&sslmode=prefer&currentSchema=ecabin_ledger'
+export SPRING_DATASOURCE_USERNAME='postgres'
+export SPRING_DATASOURCE_PASSWORD='root'
+export ECABIN_DB_VERIFY='true'
+export ECABIN_SEED_DEMO='true'
+
+./mvnw -Dtest=PostgresMigrationSmokeTest test
+
+2026-10-13 — Form Master version actions for forms without versions
+
+Problem: An active form with no published_version_id and no DRAFT operational_form_versions_dtl row showed only Change mapping and Deactivate. The shared Form Master UI conditionally renders Edit draft and New version only when corresponding version IDs are present, leaving this legacy/orphan form state with no way to enter the existing draft workflow.
+
+Change: Added a Create draft action for active forms with neither a published nor a draft version. It calls the existing POST /api/v1/configuration/forms/{id}/drafts endpoint, which creates the next empty DRAFT version and opens the existing designer. Publishing remains available only inside the draft editor and remains subject to existing backend validation. No API, database, permission, or workflow changes were made.
+
+Files modified:
+- frontend/src/common/configuration/FormMasterPage.tsx — show Create draft only when the active form has no published or draft version; reuse the existing draft creation handler.
+- README.md — document the missing-version action and existing draft/version API behavior.
+- updatesfiles.me — created this cumulative implementation log; no prior file existed.
+
+Verification executed:
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && pnpm build` — passed (Next.js production build and TypeScript checks).
+
+Remaining limitation: The row state itself should be checked in the Form Master API/database if version records are expected. The UI now provides a recovery path when both version IDs are absent. The new draft remains empty and must be configured and validated before it can be published.
+
+2026-10-13 — Removed the Form Master “Create draft” row action at the user's request after it contributed to confusion with creating duplicate forms. Existing “Edit draft” and “New version” actions remain unchanged. README now describes only the supported version actions. No backend, database, permission, or workflow behavior changed. Verification: source review only; no lint or build run for this one-condition UI removal.
+
+2026-10-13 — Added a Galley-only Reviewer decision form to the existing defect detail workflow.
+
+Implementation: The existing review decision endpoint now accepts only APPROVE or REJECT, an optional maintenance-team UUID, and an optional remark of at most 2000 characters. New backend decision options return only active tenant maintenance teams with an active member authorized for PERFORM_ACTION. Both options and decision submission require REVIEW permission and membership in the defect's currently routed Reviewer team. Decision writes lock the defect row, enforce GALLEY and reviewable statuses, reject repeat decisions until correction is submitted, and validate the selected maintenance team again. Approval moves a case to INSPECTION_REQUIRED and records its selected maintenance team in the append-only REVIEW_APPROVED event; the existing inspection-pass path remains responsible for creating the corrective action. Rejection creates REVIEW_REJECTED and creates no maintenance action. The rejected case remains REPORTED to permit reporting correction. A subsequent eligible Galley report submission updates the existing typed defect columns, appends another immutable typed form submission and REPORT_CORRECTED event, and returns the case to UNDER_REVIEW without replacing historical submissions. Reviewer detail displays the exact submitted form version and typed snapshot, with evidence fetched and downloaded through authorized endpoints.
+
+Files created:
+- frontend/src/common/fleet/GalleyReviewerDecisionForm.tsx — shared-component-based Galley Reviewer decision UI, versioned report display, authorized evidence access, team options, validation and submission.
+
+Files modified:
+- backend/src/main/java/com/ecabin/ledger/api/ApiModels.java — decision request and response DTOs.
+- backend/src/main/java/com/ecabin/ledger/api/ReviewerQueueController.java — added authorized decision-options endpoint.
+- backend/src/main/java/com/ecabin/ledger/api/AttachmentController.java — added tenant- and Reviewer-scoped attachment listing for a defect.
+- backend/src/main/java/com/ecabin/ledger/api/OperationalFormsController.java — allowed REVIEW users to read submissions and exact published definitions.
+- backend/src/main/java/com/ecabin/ledger/config/SecurityConfig.java — route-level REVIEW permissions for decision options, report history, and attachment listing.
+- backend/src/main/java/com/ecabin/ledger/service/AttachmentService.java — tenant-scoped defect attachment metadata retrieval.
+- backend/src/main/java/com/ecabin/ledger/service/DefectWorkflow.java — explicit UNDER_REVIEW to REPORTED correction-return edge.
+- backend/src/main/java/com/ecabin/ledger/service/OperationalFormService.java — corrected Galley report persistence into existing typed defect columns and append-only resubmission history.
+- backend/src/main/java/com/ecabin/ledger/service/ReviewerQueueService.java — routed Reviewer scope, Galley restriction, eligible team validation, status transitions, event recording, deferred assignment behavior and duplicate-decision protection.
+- backend/src/test/java/com/ecabin/ledger/service/DefectWorkflowTest.java — regression assertion for return-to-correction transition.
+- backend/src/test/java/com/ecabin/ledger/service/LocalPostgresOperationalIntegrationTest.java — PostgreSQL workflow assertions for Galley approval/rejection, permission, team requirement and deferred assignment (database-gated).
+- frontend/src/app/page.tsx — replaced alert prompts with the embedded decision form and case/queue refresh behavior.
+- frontend/src/common/fleet/ReviewerWorkQueuePage.tsx — refreshes the shared queue after a decision.
+- frontend/src/app/configuration.css — styles the decision form and read-only report/evidence section.
+- README.md — documented the actual Galley decision API, validations, state transitions, correction flow and assignment behavior.
+- updatesfiles.me — appended this cumulative change entry.
+
+Database changes: No Flyway migration was needed. `defect_events_dtl` already records immutable decision events with actor/time/state, `operational_form_submissions_dtl` already preserves typed versioned report snapshots, and `defects_dtl` already has the typed business columns required for a correction.
+
+Verification executed:
+- `cd backend && ./mvnw clean test` — passed: 69 tests, 0 failures, 0 errors; 15 database/Docker-gated tests skipped. The local PostgreSQL smoke and operational integration tests were skipped because database verification was not enabled; the Testcontainers tenant-isolation test was skipped because Docker was unavailable.
+- `cd frontend && pnpm lint` — passed after removing the new effect lint error and switching queue refresh to query-cache invalidation.
+- `cd frontend && pnpm build` — passed, including Next.js production compilation and TypeScript checks.
+- `cd backend && ./mvnw clean package` — started; final result to be recorded after completion.
+
+Remaining limitation: PostgreSQL-backed authorization, concurrent-decision, correction-submission, and event-persistence integration checks could not be executed in this environment. Browser interaction was not manually exercised. No Flyway migration was added.
+
+Verification follow-up (2026-10-13): `cd backend && ./mvnw clean package` — passed; package lifecycle reran the same 69 tests (0 failures, 0 errors, 15 database/Docker-gated skips) and produced the Spring Boot JAR. The Reviewer queue now also excludes a returned `REPORTED` case until a corrected report is submitted; the PostgreSQL integration assertion was updated accordingly. `git diff --check` — passed. The integration assertion itself remains unexecuted because its PostgreSQL test is environment-gated.
+
+Documentation follow-up (2026-10-13): README API inventory also includes the new Reviewer-authorized `GET /api/v1/defects/{id}/attachments` route used to load original evidence metadata.
+
+2026-10-13 — Prevented ineligible report forms and backdrop click-through on defect detail
+
+Root causes confirmed from the current paths: `OperationalFormService.publishedForDefect()` resolved forms from the defect's current status but did not exclude an initial defect-report version after its submission was already recorded, allowing stale or repeated report actions. The Galley Reviewer UI rendered its decision controls before the backend options request had confirmed eligibility, and `ReviewerQueueService` allowed a direct options/decision request for a Galley case before any initial report submission existed. Separately, shared `DialogPortal` dismissed on backdrop `mousedown`; removing the overlay before the browser's subsequent click allowed that click to reach the underlying page.
+
+Changes: the backend now only resolves an initial report while it is due, or a returned Galley report after its rejection event; it applies the same rule again under the defect row lock on submission. Reviewer decision options and POST now require a submitted defect report as well as existing GALLEY/status/Reviewer-scope checks. Reviewer decision fields are withheld until the backend options request succeeds; expected 409 ineligibility hides the panel. After a report submission, the renderer clears its actionable initial-report state and refreshes eligibility. The shared dialog now consumes backdrop presses without dismissing; clicks inside do not run backdrop logic, and explicit close/Escape behavior is preserved.
+
+Files created:
+- `frontend/src/common/dialogs/dialogBackdrop.ts` — shared backdrop press event handling.
+- `frontend/src/common/dialogs/dialogBackdrop.test.mjs` — regression tests for backdrop and inside-dialog presses.
+
+Files modified:
+- `backend/src/main/java/com/ecabin/ledger/service/OperationalFormService.java` — authoritative existing-defect report eligibility and duplicate submission rejection.
+- `backend/src/main/java/com/ecabin/ledger/service/ReviewerQueueService.java` — require an existing report before review options or decisions can be used.
+- `backend/src/test/java/com/ecabin/ledger/service/LocalPostgresOperationalIntegrationTest.java` — tests initial report visibility, duplicate submission, and Reviewer decision gating with an actual published report (database-gated).
+- `frontend/src/common/dialogs/DialogPortal.tsx` — prevent backdrop dismissal/click-through while preserving explicit and Escape dismissal.
+- `frontend/src/common/forms/OperationalFormRenderer.tsx` — clear/refetch the initial report after successful submission and distinguish stage ineligibility from missing configuration.
+- `frontend/src/common/fleet/GalleyReviewerDecisionForm.tsx` — do not render controls until backend eligibility is confirmed; hide on workflow-conflict response.
+- `README.md` — document form eligibility, Reviewer submission prerequisite, and modal dismissal behavior.
+- `updatesfiles.me` — append-only implementation history.
+
+Database/API changes: no schema migration or endpoint shape change. Existing GET form-resolution, GET Reviewer-options, and POST submission/decision endpoints now enforce current workflow eligibility using tenant-scoped relational submission/event records.
+
+Verification executed:
+- `cd backend && ./mvnw clean test` — passed: 69 tests, 0 failures, 0 errors; 15 PostgreSQL/Docker-dependent tests skipped.
+- `cd backend && ./mvnw clean package` — passed; the same suite ran with 69 tests, 0 failures, 0 errors, 15 skipped.
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && pnpm build` — passed (Next production compile and TypeScript checks).
+- `cd frontend && node --experimental-strip-types --test src/common/forms/*.test.mjs src/common/fleet/*.test.mjs src/common/dialogs/*.test.mjs` — passed: 22 tests, 0 failures.
+- `git diff --check` — passed.
+
+Limitations: PostgreSQL-backed tests were skipped because database verification was not enabled; Testcontainers tenant isolation was skipped because Docker is unavailable. Browser-based navigation/modal interaction was not run; the shared backdrop event policy is unit-tested. No migration was added.
+
+2026-10-14 — Resolve Galley Reviewer forms from the published workflow design
+
+Root causes: an existing defect could resolve its original `DEFECT_REPORT` again from the defect detail view, so the UI showed the Galley report form after case creation. The Reviewer Decision was a hardcoded workflow panel and was not represented as a supported, published Form Master purpose. Its historical-report renderer also treated a missing legacy submission row as a reason to show no review content. Consequently, the Reviewer decision was not resolved/rendered from an exact published operational form version.
+
+Implementation: existing-case resolution now excludes the initial report form except for an eligible returned Galley correction. Galley cases in `REPORTED` or `UNDER_REVIEW` resolve only published `REVIEW_DECISION` versions at the matching stage; returned cases wait for correction. Form Master supports the purpose and its three approved workflow bindings. Publication validates exactly Decision, Assign Team and Remark with the required approved types/sources. The Reviewer screen fetches the case-scoped operational-form list, renders its configured labels/order and backend-sourced decision choices, loads eligible teams through the existing authorized decision-options API, and submits the selected published `formId` and `versionId` to the existing reviewer-decision endpoint. A missing versioned Auditor submission no longer blocks a Reviewer decision; the typed defect details remain available. The server validates the Galley area, review status, current published form/version, routed Reviewer scope, team tenant/active/eligibility constraints, and decision atomically. Decisions continue to use append-only defect events; Reviewer decisions are not stored as generic operational submissions. V32 only adds the supported purpose/stage constraint and leaves submission purposes unchanged.
+
+Files created:
+- `backend/src/main/resources/db/migration/V32__galley_reviewer_decision_forms.sql` — allow the workflow-only form purpose and its review stages.
+- `frontend/src/common/fleet/GalleyReviewerDecisionForm.tsx` — render original report context and exact published Reviewer Decision form, with backend-sourced choices, validation, submission and evidence links.
+- `frontend/src/common/dialogs/dialogBackdrop.ts` — shared backdrop press handling to prevent click-through/navigation.
+- `frontend/src/common/dialogs/dialogBackdrop.test.mjs` — backdrop and inside-dialog regression tests.
+
+Files modified:
+- `backend/src/main/java/com/ecabin/ledger/api/ApiModels.java` — carry exact decision form/version references in the decision request.
+- `backend/src/main/java/com/ecabin/ledger/api/AttachmentController.java` — preserve Reviewer-authorized evidence access used by the review screen.
+- `backend/src/main/java/com/ecabin/ledger/api/FormModels.java` — add the workflow purpose, approved bindings and decision option source.
+- `backend/src/main/java/com/ecabin/ledger/api/OperationalFormsController.java` — authorize and route workflow-form resolution while rejecting generic decision submission/upload paths.
+- `backend/src/main/java/com/ecabin/ledger/api/ReviewerQueueController.java` — use the extended decision request contract.
+- `backend/src/main/java/com/ecabin/ledger/config/SecurityConfig.java` — allow the existing Reviewer permission path for the new read endpoints.
+- `backend/src/main/java/com/ecabin/ledger/service/AttachmentService.java` — prevent workflow decision forms from using generic evidence upload.
+- `backend/src/main/java/com/ecabin/ledger/service/DefectReportBindingRules.java` — keep Reviewer-only bindings out of defect report persistence.
+- `backend/src/main/java/com/ecabin/ledger/service/DefectWorkflow.java` — align existing decision transition behavior with the dedicated form path.
+- `backend/src/main/java/com/ecabin/ledger/service/FormFieldBindingCatalog.java` — register only verified workflow-controlled bindings for Galley Reviewer forms.
+- `backend/src/main/java/com/ecabin/ledger/service/FormResolutionRules.java` — map Reviewer decisions only to reviewable workflow stages.
+- `backend/src/main/java/com/ecabin/ledger/service/OperationalFormService.java` — authoritative case-stage form resolution, exact mapping checks, and Reviewer publication validation.
+- `backend/src/main/java/com/ecabin/ledger/service/ReviewerQueueService.java` — validate selected published form/version, reviewer scope, decision and maintenance-team eligibility while preserving atomic status/event writes.
+- `backend/src/test/java/com/ecabin/ledger/service/DefectWorkflowTest.java` — workflow regression coverage.
+- `backend/src/test/java/com/ecabin/ledger/service/FormResolutionRulesTest.java` — Reviewer purpose/stage mapping coverage.
+- `backend/src/test/java/com/ecabin/ledger/service/LocalPostgresOperationalIntegrationTest.java` — published-form resolution, missing legacy submission, decision, assignment and stale-version integration coverage (environment-gated).
+- `backend/src/test/java/com/ecabin/ledger/service/PostgresMigrationSmokeTest.java` — expect the V32 migration in applied migration history.
+- `frontend/src/app/configuration.css` — layout for the Reviewer operational-form section.
+- `frontend/src/app/page.tsx` — show reviewer decision panel and avoid offering ineligible initial report forms on existing cases.
+- `frontend/src/common/configuration/FormMasterPage.tsx` — configure `REVIEW_DECISION`, its supported stages and publication validation.
+- `frontend/src/common/dialogs/DialogPortal.tsx` — prevent backdrop click-through while preserving explicit close and Escape behavior.
+- `frontend/src/common/fleet/ReviewerWorkQueuePage.tsx` — align queue refresh/detail behavior with decision results.
+- `frontend/src/common/forms/OperationalFormRenderer.tsx` — hide exhausted initial-report actions and preserve correction/report submission recovery.
+- `frontend/src/common/forms/defectReportMapping.ts` — type and exclude workflow-only bindings from report-answer persistence.
+- `README.md` — document form setup, mapping, API, authorization, workflow transitions and the fact that the decision form must be published in Form Master.
+- `updatesfiles.me` — append this implementation record; prior entries retained.
+
+Database/API behavior: V32 is a forward-only migration and was not run against PostgreSQL in this verification. `GET /api/v1/defects/{id}/operational-forms?purpose=REVIEW_DECISION` resolves the current matching published Galley version. The decision dropdown choices load from the published field's `REVIEW_DECISIONS` source; `GET /api/v1/defects/{id}/review-decision-options` supplies case-eligible maintenance teams under existing Reviewer authorization. `POST /api/v1/defects/{id}/review-decision` now requires decision, optional team/remark, and exact `formId`/`versionId`. No form answer JSON or generic submission row was added for a Reviewer decision. Administrators must configure and publish a valid Galley Reviewer Decision version; the migration does not invent or auto-seed tenant form definitions.
+
+Verification actually executed on 2026-10-14:
+- `cd backend && ./mvnw clean package` — passed; 69 tests, 0 failures, 0 errors, 15 skipped. PostgreSQL smoke/integration tests were skipped because database verification was not enabled; the Testcontainers tenant-isolation test was skipped because Docker is unavailable. The JAR was packaged.
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && pnpm build` — passed, including TypeScript and Next.js production build.
+- `cd frontend && node --experimental-strip-types --test src/common/forms/*.test.mjs src/common/fleet/*.test.mjs src/common/dialogs/*.test.mjs` — passed; 22 tests, 0 failures.
+- `git diff --check` — passed.
+
+Remaining limitations: the V32 migration and database-backed workflow assertions have not been executed against local PostgreSQL; no browser-driven visual test was run. The Reviewer Decision card remains intentionally unavailable until an organization administrator creates/maps a Galley `REVIEW_DECISION` form with stages `REPORTED` or `UNDER_REVIEW`, configures exactly the three approved bindings, saves and publishes it. Existing `Galley Area` `DEFECT_REPORT` versions are not changed or repurposed.
+
+2026-10-14 — Area-based Maintenance Team routing and workflow modes
+
+Implemented: added tenant-scoped area-to-Maintenance-team configuration and immutable tenant workflow-mode versions. Existing organizations start in `REVIEWER_APPROVAL`, preserving the prior default. An organization administrator may create a new `DIRECT_MAINTENANCE` workflow version and map active cabin areas to eligible active Maintenance teams. New defects snapshot the active workflow version; a later setting change does not reroute existing defects. Direct assignment reuses `corrective_actions_dtl`, the existing assigned-team defect field, notification delivery and append-only defect events. If direct mode has no eligible area mapping, the defect stays unassigned in `REPORTED` and appears in the routing exceptions view for safe retry after configuration is corrected. No Reviewer or other role permissions were granted automatically.
+
+Files created:
+- `backend/src/main/resources/db/migration/V33__area_maintenance_routing.sql` — tenant mapping/workflow-version schema, current-version defect reference, safe legacy-mode initialization, append-only version trigger and Administration navigation provisioning.
+- `backend/src/main/java/com/ecabin/ledger/api/AreaMaintenanceRoutingController.java` — protected tenant-scoped management and retry endpoints.
+- `backend/src/main/java/com/ecabin/ledger/service/AreaMaintenanceRoutingService.java` — mapping validation, workflow versioning, direct assignment, exceptions, retry and audit history.
+- `backend/src/test/java/com/ecabin/ledger/service/AreaMaintenanceRoutingServiceTest.java` — validation tests for auditable reasons and workflow-mode allow-listing.
+- `frontend/src/common/configuration/AreaTeamRoutingPage.tsx` — area/team mapping, workflow mode, exceptions/retry and change-history UI.
+
+Files modified:
+- `backend/src/main/java/com/ecabin/ledger/api/ApiModels.java` — expose assigned team and routing-attention state.
+- `backend/src/main/java/com/ecabin/ledger/service/DefectService.java` — snapshot configured workflow versions and preserve legacy Reviewer routing while applying direct mappings for new reports.
+- `backend/src/main/java/com/ecabin/ledger/service/ConfigurationService.java` — provision/route the menu entry and protect mapped Maintenance teams from deactivation.
+- `backend/src/test/java/com/ecabin/ledger/service/ConfigurationServiceRouteTest.java` — recognize the route.
+- `backend/src/test/java/com/ecabin/ledger/service/LocalPostgresOperationalIntegrationTest.java` — update test fixtures for provisioned area records and currently required aircraft selector; validate existing Reviewer workflow against local PostgreSQL.
+- `backend/src/test/java/com/ecabin/ledger/service/PostgresMigrationSmokeTest.java` — verify V33 schema objects, workflow snapshot column, indexes and immutability trigger.
+- `frontend/src/app/configuration.tsx`, `frontend/src/app/configuration.css` — integrate the screen with configuration navigation and styles.
+- `frontend/src/app/page.tsx` — display routed maintenance team and routing attention on defect summaries/details.
+- `README.md` — document configuration, routing behavior, endpoints and migration.
+- `docs/gap-analysis.md` — document the new master relation, ownership, security and workflow behavior.
+- `updatesfiles.me` — append this cumulative change record.
+
+API and database behavior: the controller exposes GET `/api/v1/configuration/area-team-routing/mappings`, `/eligible-teams`, `/workflow`, `/exceptions`, `/history`; POST `/mappings`, `/mappings/{id}/activate`, `/mappings/{id}/deactivate`, `/workflow`, and `/exceptions/{defectId}/retry`. All endpoints require `ADMINISTER_ORGANIZATION`; tenant and actor come from the validated principal. Mapping and mode changes require a reason and are written to append-only `defect_events_dtl`. V33 adds the tenant-owned mapping master, immutable workflow version history and active-version pointer, and `defects_dtl.workflow_version_id`; direct routing creates the existing corrective-action record and updates the existing defect assignment/status fields. No new defect-answer store or per-area defect table was added.
+
+Verification actually executed:
+- `cd backend && ./mvnw clean package` — passed; 72 tests, 0 failures, 0 errors, 15 skipped in the default run (database-gated tests require explicit opt-in; Testcontainers tenant-isolation test skipped because Docker is unavailable).
+- `ECABIN_DB_VERIFY=true SPRING_DATASOURCE_URL='jdbc:postgresql://localhost:5432/postgres?connectTimeout=10&sslmode=prefer&currentSchema=ecabin_ledger' SPRING_DATASOURCE_USERNAME=postgres SPRING_DATASOURCE_PASSWORD=root DB_SCHEMA=ecabin_ledger ./mvnw -Dtest=PostgresMigrationSmokeTest test` — passed against local PostgreSQL 18.6; Flyway applied V33 and the schema reached version 33.
+- The same database settings with `-Dtest=LocalPostgresOperationalIntegrationTest test` — passed; 13 tests, 0 failures/errors, using transactional rollback fixtures.
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && pnpm build` — passed, including TypeScript checking and production build.
+- `git diff --check` — passed before the final test-fixture adjustment; rerun before committing.
+
+Limitations: the Testcontainers tenant-isolation test could not run because Docker is unavailable. New direct-maintenance assignment and concurrent mode-change behavior have not yet received a dedicated PostgreSQL integration case; service unit coverage is limited to request validation, so add focused end-to-end tests before treating those paths as fully verified. No browser-driven visual session was run. V33 was applied only to the configured local development schema, not UAT.
+
+2026-10-14 — Configurable Galley Reviewer Decision form
+
+Implemented the Galley Reviewer Decision configuration as a versioned Form Master workflow form. The existing Galley Area `DEFECT_REPORT` / `INITIAL_REPORT` publication and historical submissions are unchanged. The current backend has no `REVIEWER` stage enum; Form Master and resolution use the actual `REPORTED` and `UNDER_REVIEW` stages. A new published Reviewer version must contain exactly four approved bindings: required Decision, required Assign Team conditioned on `APPROVE`, required Rejection Reason (maximum 2,000 characters) conditioned on `REJECT`, and optional Remark (maximum 2,000 characters). Typed `{fieldKey, equals}` visibility configuration is validated at publication and again during server-side form resolution and decision submission.
+
+The decision endpoint keeps its typed request contract (`decision`, optional `maintenanceTeamId`, optional `rejectionReason`, optional `remark`, exact `formId` and `versionId`). It requires a nonblank reason for REJECT, rejects team assignment on REJECT, requires an eligible active same-tenant Maintenance team on APPROVE, rechecks the exact current published configuration and routed Reviewer access, and records the decision details in the append-only event. Approval continues to `INSPECTION_REQUIRED`; maintenance assignment is still created only after inspection passes. The frontend renders configured field order/labels, loads team options only for APPROVE, and clears team/reason values when switching decisions.
+
+The opt-in seed now creates a `LOCAL_DEMO_GALLEY_REVIEW_DECISION` draft only for the synthetic demo tenant when no Galley Reviewer Decision form already exists. The smoke-test seed path publishes that draft using `OperationalFormService`; it does not insert a published version or update administrator-owned forms. No Flyway migration was added because existing versioned form configuration and defect event storage support the feature.
+
+Files created:
+- `backend/src/main/java/com/ecabin/ledger/service/ReviewerDecisionFormRules.java` — approved four-field shape and typed conditional validation.
+- `backend/src/test/java/com/ecabin/ledger/service/ReviewerDecisionFormRulesTest.java` — valid/invalid configuration and JSON condition-property tests.
+- `frontend/src/common/forms/conditionalFieldVisibility.ts` — shared data-only conditional visibility evaluator.
+- `frontend/src/common/forms/conditionalFieldVisibility.test.mjs` — conditional and ordinary field visibility tests.
+
+Files modified:
+- `backend/src/main/java/com/ecabin/ledger/api/FormModels.java` — add the rejection-reason binding and serializable typed visibility condition.
+- `backend/src/main/java/com/ecabin/ledger/api/ApiModels.java` — decision request includes the typed optional rejection reason.
+- `backend/src/main/java/com/ecabin/ledger/service/FormFieldBindingCatalog.java` — register the Galley rejection-reason binding and its conditional policy.
+- `backend/src/main/java/com/ecabin/ledger/service/DefectReportBindingRules.java` — classify Reviewer-only bindings as non-report bindings.
+- `backend/src/main/java/com/ecabin/ledger/service/OperationalFormService.java` — validate Reviewer form publication and filter malformed published Reviewer versions from authoritative resolution.
+- `backend/src/main/java/com/ecabin/ledger/service/ReviewerQueueService.java` — validate rejection reason/team rules and record rejection reason, remark, actor and exact form-version references; recheck resolved published form configuration.
+- `backend/src/main/resources/db/dev-seed.sql` — idempotently add a seed-owned Reviewer draft without replacing an existing Galley Reviewer form.
+- `backend/src/test/java/com/ecabin/ledger/service/LocalPostgresOperationalIntegrationTest.java` — test four-field form publication, approval/rejection, empty remark, required reason and no-assignment rejection behavior.
+- `backend/src/test/java/com/ecabin/ledger/service/PostgresMigrationSmokeTest.java` — publish a seed-owned Reviewer draft through the existing validation service and verify it resolves when the PostgreSQL smoke test is enabled.
+- `frontend/src/common/configuration/FormMasterPage.tsx` — configure and validate typed conditions and the four required bindings.
+- `frontend/src/common/forms/OperationalFormRenderer.tsx` — use the shared conditional visibility evaluator for configured fields.
+- `frontend/src/common/forms/defectReportMapping.ts` — identify the Reviewer rejection reason as workflow-only rather than a report answer.
+- `frontend/src/common/fleet/GalleyReviewerDecisionForm.tsx` — render configured Reviewer fields in order, provide conditional team/reason controls and load eligible team options only for approval.
+- `README.md` and `docs/gap-analysis.md` — document field rules, API contract, stage behavior, authorization, transitions, seed behavior and lack of a schema migration.
+- `updatesfiles.me` — append this cumulative implementation record; prior entries retained.
+
+Verification executed on 2026-10-14:
+- `cd backend && ./mvnw clean test` — passed; 76 tests, 0 failures, 0 errors, 15 skipped.
+- `cd backend && ./mvnw clean package` — passed; packaged the Spring Boot JAR; 76 tests, 0 failures, 0 errors, 15 skipped.
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && pnpm build` — passed, including TypeScript and production build.
+- `cd frontend && node --experimental-strip-types --test src/common/forms/*.test.mjs src/common/fleet/*.test.mjs src/common/dialogs/*.test.mjs` — passed; 24 tests, 0 failures.
+- `cd backend && ./mvnw -Dtest=ReviewerDecisionFormRulesTest test` — passed; 4 tests, 0 failures.
+- `git diff --check` — passed before this log append; it is rerun after the final edit.
+
+Database verification remains outstanding: the repository `.env` file is absent and no datasource credentials were configured, so the opt-in `PostgresMigrationSmokeTest` and 13 `LocalPostgresOperationalIntegrationTest` cases were skipped. The Testcontainers tenant-isolation test was also skipped because Docker is unavailable; Docker was not used. No browser-driven UI test or live API/database verification was performed. To verify the demo seed when an authorized local PostgreSQL datasource is configured, run from `backend/`: `ECABIN_DB_VERIFY=true ECABIN_SEED_DEMO=true ./mvnw -Dtest=PostgresMigrationSmokeTest test`. Existing administrator-managed forms are intentionally preserved and may require administrator completion if their definitions are incomplete.
+
+Correction to the preceding entry: two migrations are present in this worktree. V32 adds the `REVIEW_DECISION` purpose and allows it only at the existing `REPORTED` and `UNDER_REVIEW` stages; it does not change submission-purpose constraints. V33 adds tenant-scoped cabin-area Maintenance-team mappings and versioned routing configuration, including an opt-in `DIRECT_MAINTENANCE` mode. The direct-maintenance mode is broader than the Reviewer Decision form request and conflicts with that request's instruction not to implement the future Reviewer bypass. Do not deploy V33 or its related area-routing changes as part of this Reviewer Decision change; they need to be separated or removed before treating this feature as scope-complete. V33 has not been applied or database-verified.
+
+2026-10-14 — Dynamic Galley Maintenance Action form and tenant SLA date policies
+
+Implemented a corrective-action dynamic form with exactly three approved bindings: required Maintenance Status, required SLA Target Date, and optional Remarks limited to 2,000 characters. The supported status choices are WORK_IN_PROGRESS, ON_HOLD, and CLOSE_SUBMITTED. Form definitions remain tenant-owned Form Master versions and are validated on publication and again when resolved/submitted. The local synthetic demo seed creates only a seed-owned draft when no corrective-action form already exists; the opt-in PostgreSQL smoke test publishes it through OperationalFormService. Existing administrator-owned form configuration and published versions are preserved.
+
+V34 adds tenant-scoped maintenance_sla_policies_mst, extends the corrective-action status constraint for ON_HOLD, adds policy defaults (15 days WIP, 180 days On Hold, past dates disabled, Close Submitted unconfigured), and provisions the Maintenance SLA Policies administration navigation. SLA Target Date reuses corrective_actions_dtl.due_at and updates the existing defects_dtl.due_at projection; no duplicate SLA column or notification worker was added. Admin policy updates are reason-required, immediately effective from database reads, and audited as before/after append-only defect events. Maintenance form updates require PERFORM_ACTION and the active assigned team's membership (or the existing individually assigned user), validate the exact current published form and policy under locked rows, and use server-resolved tenant/actor/time. Close Submitted completes the action and advances the defect only to AWAITING_VERIFICATION; it does not close the defect. Verification failure or rejected closure returns the completed action to maintenance work while retaining decision history.
+
+Files created:
+- backend/src/main/java/com/ecabin/ledger/api/MaintenanceSlaPolicyController.java — tenant-authorized SLA policy GET/POST API.
+- backend/src/main/java/com/ecabin/ledger/service/MaintenanceActionFormRules.java — exact approved maintenance form definition validation.
+- backend/src/main/java/com/ecabin/ledger/service/MaintenanceActionService.java — assigned-team checks, current form/policy validation, row-locked updates, workflow transition and audit event.
+- backend/src/main/java/com/ecabin/ledger/service/MaintenanceSlaDateRules.java — timezone-aware allowed date range and validation.
+- backend/src/main/java/com/ecabin/ledger/service/MaintenanceSlaPolicyService.java — tenant policy persistence, defaults access, updates and append-only change audit.
+- backend/src/main/resources/db/migration/V34__maintenance_sla_policies_and_target_date.sql — forward-only policy schema/defaults, ON_HOLD check, and navigation provisioning.
+- backend/src/test/java/com/ecabin/ledger/service/MaintenanceActionFormRulesTest.java — valid/invalid form definition coverage.
+- backend/src/test/java/com/ecabin/ledger/service/MaintenanceSlaDateRulesTest.java — range boundaries, past/future rules, optional date, today-only policy and timezone boundaries.
+- frontend/src/common/configuration/MaintenanceSlaPoliciesPage.tsx — responsive policy settings UI.
+
+Files modified for this feature:
+- backend/src/main/java/com/ecabin/ledger/api/ApiModels.java and FormModels.java — typed request/response, field binding and approved status option source.
+- backend/src/main/java/com/ecabin/ledger/api/OperationalWorkflowController.java and config/SecurityConfig.java — maintenance form/policy routes with existing PERFORM_ACTION / ADMINISTER_ORGANIZATION permission checks.
+- backend/src/main/java/com/ecabin/ledger/service/FormFieldBindingCatalog.java, MaintenanceActionFormRules.java, OperationalFormService.java, FormResolutionRules.java — supported binding/purpose validation, status options and current-stage form resolution; generic submissions cannot bypass the maintenance workflow endpoint.
+- backend/src/main/java/com/ecabin/ledger/service/OperationalWorkflowService.java — return completed corrective actions to the assigned team after failed verification or rejected closure without deleting decisions.
+- backend/src/main/java/com/ecabin/ledger/service/DefectService.java and ReviewerQueueService.java — include ON_HOLD in current action visibility/work scoping.
+- backend/src/main/java/com/ecabin/ledger/service/ConfigurationService.java — permitted policy navigation route/menu.
+- backend/src/main/resources/db/dev-seed.sql — idempotent seed-owned Galley Maintenance Action draft for the synthetic local tenant.
+- backend/src/test/java/com/ecabin/ledger/service/PostgresMigrationSmokeTest.java and LocalPostgresOperationalIntegrationTest.java — V34/schema checks, form publication/resolution and tenant-scoped audited policy integration coverage.
+- frontend/src/common/configuration/FormMasterPage.tsx, frontend/src/app/configuration.tsx, frontend/src/app/configuration.css — binding configuration, route and policy page navigation/styles.
+- frontend/src/common/forms/OperationalFormRenderer.tsx and frontend/src/app/page.tsx — resolve action ID, use live status-specific date bounds and submit through the maintenance workflow API.
+- frontend/src/common/fleet/MaintenanceWorkQueuePage.tsx — expose On Hold filtering.
+- README.md and docs/gap-analysis.md — document workflow, APIs, policy defaults, migration, verification and limitations.
+- updatesfiles.me — this cumulative implementation entry.
+
+Verification actually executed:
+- `cd backend && ./mvnw clean test` — passed after correcting a missing ZoneId import; 84 tests, 0 failures, 0 errors, 16 skipped.
+- `cd backend && ./mvnw clean package` — passed; 84 tests, 0 failures, 0 errors, 16 skipped; executable JAR packaged.
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && pnpm build` — passed (Next.js production build and TypeScript checks).
+- The combined `pnpm lint && pnpm build` command also completed successfully.
+
+Database limitations: PostgresMigrationSmokeTest (1), local PostgreSQL integration tests (14), and the Testcontainers tenant-isolation test (1) were skipped. No datasource URL/username/password were configured and `pg_isready` was unavailable; Testcontainers reported no Docker environment. No database migration was applied and no browser-driven visual test was run. V34 is statically compiled/reviewed but has not been executed against PostgreSQL. Close Submitted remains unavailable until an organization administrator explicitly saves its policy. SLA pause/resume semantics and alerts/notifications remain out of scope.
+
+Additional verification after the implementation entry above: `cd frontend && node --experimental-strip-types --test src/common/forms/*.test.mjs src/common/fleet/*.test.mjs src/common/dialogs/*.test.mjs` passed all 24 tests. Node emitted only MODULE_TYPELESS_PACKAGE_JSON performance warnings for the repository's TypeScript test helpers. `git diff --check` also passed.
+
+2026-10-14 — Corrected V34 initial Close Submitted policy constraint
+
+The supplied PostgreSQL smoke-test log showed V34 rolling back on SQLSTATE 23514 while inserting the deliberately unconfigured CLOSE_SUBMITTED row. Root cause: the migration check was inverted (`is_configured OR status_key <> 'CLOSE_SUBMITTED'`), which rejected the required default. V34 is confirmed by the supplied log to have rolled back and the schema remained at version 33; because this failed migration was not applied, the migration was corrected in place. The check now allows an unconfigured CLOSE_SUBMITTED row while requiring WIP and ON_HOLD policies to be configured. The PostgreSQL smoke test now asserts the 15-day WIP, 180-day On Hold, past-disabled defaults, and unconfigured Close Submitted row.
+
+Files modified:
+- backend/src/main/resources/db/migration/V34__maintenance_sla_policies_and_target_date.sql — correct the initial-policy constraint.
+- backend/src/test/java/com/ecabin/ledger/service/PostgresMigrationSmokeTest.java — verify policy rows created by V34.
+- README.md — document the V34 constraint/default behavior.
+- updatesfiles.me — append this failure diagnosis and correction.
+
+Verification after the correction:
+- `cd backend && ./mvnw clean test` — passed, 84 tests, 0 failures, 0 errors, 16 skipped.
+- `cd backend && ./mvnw clean package` — passed, 84 tests, 0 failures, 0 errors, 16 skipped.
+- `git diff --check` — passed.
+- PostgreSQL smoke execution was not repeated here because this session has no configured datasource variables or `pg_isready`; the supplied log confirms the failed Flyway transaction rolled back. The user must rerun the opt-in migration smoke test against the intended local database to verify V34 applies. Testcontainers tenant isolation remains skipped because Docker is unavailable.
+
+2026-10-14 — Fixed maintenance SLA service startup injection
+
+The follow-up startup log confirms Flyway applied V34 successfully and the database is now at version 34. Application startup then failed while creating `MaintenanceSlaPolicyService`: Spring searched for a no-argument constructor because the service had both a public `JdbcTemplate` constructor and a package-private test-clock constructor, with neither annotated for constructor injection. The service now marks the production `JdbcTemplate` constructor with `@Autowired`; the package-private clock constructor remains available for deterministic unit tests. README notes the constructor setup and clean rebuild guidance.
+
+Files changed:
+- backend/src/main/java/com/ecabin/ledger/service/MaintenanceSlaPolicyService.java — explicitly select the production dependency-injection constructor.
+- README.md — document the service constructor and stale build troubleshooting.
+- updatesfiles.me — append this diagnosis and verification record.
+
+Verification:
+- `cd backend && ./mvnw clean test` — passed, 84 tests, 0 failures, 0 errors, 16 skipped. PostgreSQL smoke/integration checks were skipped because this run did not opt into the database tests; the Testcontainers test was skipped because Docker is unavailable.
+- Spring Boot startup was not rerun here, so runtime startup against PostgreSQL remains to be confirmed by the user.
+
+2026-10-14 — Implemented configurable Galley Closure Review
+
+Implemented the closure-review stage using the existing operational-form versioning, workflow APIs, defect event history, attachment authorization, and tenant/team permission model. The form is a Form Master configuration (`CLOSURE_APPROVAL / APPROVAL_REQUIRED`) with exactly two business bindings: required Closure Decision (backend options ACCEPT/DECLINE) and optional Closure Remarks (required only for DECLINE, maximum 2,000 characters). Form submission answers are not stored as generic form answers; the dedicated approval API records the decision in the existing closure approval table and append-only defect event.
+
+The configured closure route is separate from initial Reviewer routing. V35 adds a tenant-owned closure-team reference and allows the existing maintenance-team master to classify a team as CLOSURE. No default route or permission is automatically assigned. A caller needs the existing APPROVE permission, active organization membership, and active membership in the configured active CLOSURE or REVIEWER team. V36 exposes closure-stage defects in the existing shared Reviewer queue for eligible closure reviewers. Closure decisions are accepted only at APPROVAL_REQUIRED, under a row lock, using the exact currently published Galley closure form/version. ACCEPT moves APPROVAL_REQUIRED → CLOSED. DECLINE requires a reason and moves APPROVAL_REQUIRED → IN_PROGRESS by creating a new corrective-action row for the prior maintenance assignment; completed action rows, submissions, evidence, and past decisions remain intact. Generic area-only form resolution rejects closure forms; use the defect-scoped resolver so case status and routing can be checked.
+
+Files created:
+- backend/src/main/resources/db/migration/V35__closure_review_team_routing.sql — adds closure team classification and tenant closure-route pointer with a composite tenant foreign key.
+- backend/src/main/resources/db/migration/V36__closure_review_queue_access.sql — updates the existing queue navigation permission contract for APPROVE-capable closure reviewers.
+- backend/src/main/java/com/ecabin/ledger/service/ClosureReviewAccessService.java — validates active tenant route, team membership, and existing APPROVE grant.
+- backend/src/main/java/com/ecabin/ledger/service/ClosureApprovalFormRules.java — validates the two allowed closure form bindings and conditional remark rule.
+- backend/src/main/java/com/ecabin/ledger/service/ClosureDecisionRules.java — normalizes ACCEPT/DECLINE and validates required/optional remark behavior.
+- backend/src/test/java/com/ecabin/ledger/api/OperationalFormsControllerTest.java — verifies closure forms cannot be resolved from area alone.
+- backend/src/test/java/com/ecabin/ledger/service/ClosureApprovalFormRulesTest.java — publication configuration rules.
+- backend/src/test/java/com/ecabin/ledger/service/ClosureDecisionRulesTest.java — decision and reason validation.
+
+Files modified for closure review:
+- backend/src/main/java/com/ecabin/ledger/api/ApiModels.java, FormModels.java — closure purpose/bindings and approval request form/version metadata.
+- backend/src/main/java/com/ecabin/ledger/api/AttachmentController.java, DefectController.java — authorize closure-team case/evidence visibility.
+- backend/src/main/java/com/ecabin/ledger/api/OperationalFormsController.java — closure resolver, definition/options access checks, and rejection of area-only closure resolution.
+- backend/src/main/java/com/ecabin/ledger/api/OperationalWorkflowController.java — keeps the existing approval route behind APPROVE.
+- backend/src/main/java/com/ecabin/ledger/api/ReviewerQueueController.java and backend/src/main/java/com/ecabin/ledger/service/ReviewerQueueService.java — include eligible closure reviewers in the existing queue.
+- backend/src/main/java/com/ecabin/ledger/service/ConfigurationService.java and AreaMaintenanceRoutingService.java; backend/src/main/java/com/ecabin/ledger/api/AreaMaintenanceRoutingController.java; frontend/src/common/configuration/AreaTeamRoutingPage.tsx — separate, audited admin closure-team routing.
+- backend/src/main/java/com/ecabin/ledger/service/DefectReportBindingRules.java, FormFieldBindingCatalog.java, OperationalFormService.java — approved closure bindings, dynamic options, stage-specific resolution, and publication validation.
+- backend/src/main/java/com/ecabin/ledger/service/OperationalWorkflowService.java and DefectWorkflow.java — transactional accept/decline decisions, status transitions, immutable event data, and creation of a new maintenance action on decline.
+- backend/src/test/java/com/ecabin/ledger/service/DefectWorkflowTest.java, LocalPostgresOperationalIntegrationTest.java, PostgresMigrationSmokeTest.java — transition, closure-route integration, and migration assertions.
+- frontend/src/common/forms/OperationalFormRenderer.tsx, conditionalFieldVisibility.ts, conditionalFieldVisibility.test.mjs — dynamic closure decision UI, conditional remark validation, evidence access, and confirmation.
+- frontend/src/app/page.tsx, frontend/src/common/fleet/ReviewerWorkQueuePage.tsx, frontend/src/app/configuration.css — refresh and display in existing case/queue surfaces.
+- README.md and docs/gap-analysis.md — document actual workflow, permissions, endpoints, migrations, setup, and limitations.
+- updatesfiles.me — append this implementation record.
+
+Verification actually executed:
+- `cd backend && ./mvnw clean test` — passed: 90 tests, 0 failures, 0 errors, 17 skipped.
+- `cd backend && ./mvnw clean package` — passed: 90 tests, 0 failures, 0 errors, 17 skipped; executable JAR packaged.
+- `cd frontend && pnpm lint` — passed after escaping an apostrophe in AreaTeamRoutingPage.
+- `cd frontend && pnpm build` — passed, including TypeScript and production compilation.
+- `cd frontend && node --experimental-strip-types --test src/common/forms/*.test.mjs src/common/fleet/*.test.mjs src/common/dialogs/*.test.mjs` — passed: 25 tests, 0 failures.
+- `git diff --check` — passed before this log append.
+
+Limitations: PostgreSQL migration smoke (1 test) and local PostgreSQL integration tests (15 tests) were skipped because this run did not opt into/configure the local database. The Testcontainers tenant-isolation test was skipped because Docker is unavailable. No migration was applied to a database, and no browser-driven visual test was performed. An administrator must apply V35/V36 through Flyway, configure an eligible closure route, and create/publish the Galley Closure Review form through Form Master before the workflow can be used.
+
+2026-10-14 — Made Galley Closure Review visible in the local Form Master seed
+
+Root cause: Form Master already supported the CLOSURE_APPROVAL purpose, APPROVAL_REQUIRED stage, approved closure bindings, draft editing, and publishing. The opt-in local demo seed provisioned the Galley report, Reviewer Decision, and Maintenance Action forms, but it never created a Galley Closure Review row/version. Consequently, Form Master had nothing to list for that form in the synthetic local tenant.
+
+Changes:
+- backend/src/main/resources/db/dev-seed.sql — add an idempotent `LOCAL_DEMO_GALLEY_CLOSURE_REVIEW` draft with Closure Decision and Remarks bindings, only for the synthetic demo tenant and only when no Galley closure form already exists. This does not publish, overwrite, or change administrator-authored forms.
+- backend/src/test/java/com/ecabin/ledger/service/PostgresMigrationSmokeTest.java — opt-in database setup publishes only the seed-owned closure draft through `OperationalFormService.publish`, asserts it appears through the validated closure resolver, and checks repeated initialization does not duplicate it. Existing tenant-authored closure forms are preserved.
+- backend/src/main/java/com/ecabin/ledger/api/OperationalFormsController.java — prevent closure forms from being resolved through the generic area-only API; closure form visibility requires the defect-scoped resolver and its tenant/status/routing checks.
+- backend/src/test/java/com/ecabin/ledger/api/OperationalFormsControllerTest.java — regression test for the area-only closure resolution restriction.
+- frontend/src/common/configuration/AreaTeamRoutingPage.tsx — fix the apostrophe escaping issue found during lint.
+- README.md and docs/gap-analysis.md — explain the demo draft, opt-in initialization/publish process, and production-seed boundary.
+- updatesfiles.me — append this record.
+
+No Flyway migration was added for the form itself; the existing operational form/version schema and Form Master publication service are reused. V35/V36 remain the routing/queue migrations already documented above.
+
+Verification actually executed:
+- `cd backend && ./mvnw clean test` — passed: 90 tests, 0 failures, 0 errors, 17 skipped.
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && pnpm build` — passed.
+- `git diff --check` — passed before this log entry.
+
+PostgreSQL smoke-test execution (1 test) and local PostgreSQL operational tests (15 tests) were skipped because no database verification was configured. The Testcontainers test was skipped because Docker is unavailable. Therefore, this session did not apply the updated seed to the user's database or visually confirm the resulting Form Master row. To make the form appear locally, run from `backend/` with the intended local PostgreSQL environment configured: `ECABIN_DB_VERIFY=true ECABIN_SEED_DEMO=true ./mvnw -Dtest=PostgresMigrationSmokeTest test`. This applies Flyway and the opt-in demo seed; it does not run during production startup.
+
+2026-10-14 — Added safe Form Master lifecycle actions and immutable mapping snapshots
+
+Implementation: Form Master now provides a responsive row actions dialog for Duplicate, Rename, Remap, Delete permanently, Activate/Deactivate, and View Published Version, while retaining Edit Draft and New Version. All management routes use the existing validated tenant resolver and `ADMINISTER_ORGANIZATION` permission. Duplicate creates a separate form and draft transactionally; the current published version is the default source and an explicit source version may be selected. Draft selection is never implicit. Rename preserves published version names; remapping writes the new mapping into a draft snapshot, while the existing published version keeps its original mapping until a replacement is published. The Remap dialog reads active-area purpose/stage choices from `GET /api/v1/configuration/form-mappings`, which filters them through backend mapping rules. Deactivation checks active workflow coverage against the actual published version snapshot. Permanent deletion removes only never-published, unused drafts, rejects protected history with HTTP 409, and writes an independent append-only audit snapshot.
+
+Files created:
+- `backend/src/main/resources/db/migration/V37__snapshot_operational_form_mapping.sql` — add tenant-scoped version name/area/purpose/stage snapshots, backfill existing values, enforce mapping/area integrity, and keep legacy SQL seeds compatible.
+- `backend/src/main/java/com/ecabin/ledger/service/FormMasterMutationRules.java` — centralize key/name validation and deterministic source-version selection.
+- `backend/src/test/java/com/ecabin/ledger/service/FormMasterMutationRulesTest.java` — cover validation and published-versus-explicit-draft source selection.
+
+Files modified:
+- `backend/src/main/java/com/ecabin/ledger/api/FormModels.java` — add duplicate, rename, delete requests/results and version mapping snapshot fields.
+- `backend/src/main/java/com/ecabin/ledger/api/OperationalFormsController.java` — expose tenant-authorized mapping-options, duplicate, rename and delete endpoints and document source-version selection.
+- `backend/src/main/java/com/ecabin/ledger/service/OperationalFormService.java` — implement supported mapping options, transactional mutations, mapping snapshots, history/dependency guards, publication checks, audit records, snapshot-based form resolution, and deactivation safety.
+- `backend/src/test/java/com/ecabin/ledger/api/OperationalFormsControllerTest.java` — verify admin permission enforcement and tenant/actor resolution for mapping options and duplicate.
+- `backend/src/test/java/com/ecabin/ledger/service/OperationalFormServiceTest.java` — verify backend-supported area mappings and that remapping creates a draft snapshot instead of rewriting published version data.
+- `backend/src/test/java/com/ecabin/ledger/service/PostgresMigrationSmokeTest.java` — expect V37 and verify the version mapping fields and compatibility trigger.
+- `frontend/src/common/configuration/FormMasterPage.tsx` — add More actions and Duplicate, Rename, Remap, and Delete dialogs; keep deactivation distinct.
+- `frontend/src/app/configuration.css` — style actions dialogs and keep the table/action layout usable at narrow widths.
+- `README.md` and `docs/gap-analysis.md` — document endpoints, snapshot behavior, selection rules, deletion/deactivation constraints, V37 and verification boundaries.
+- `updatesfiles.me` — append this cumulative implementation record.
+
+Verification actually executed:
+- `cd backend && ./mvnw -Dtest=FormMasterMutationRulesTest,OperationalFormsControllerTest,OperationalFormServiceTest test` — passed: 14 tests, 0 failures, 0 errors, 0 skipped.
+- `cd backend && ./mvnw clean test` — passed: 96 tests, 0 failures, 0 errors, 17 skipped.
+- `cd backend && ./mvnw clean package` — passed: 96 tests, 0 failures, 0 errors, 17 skipped; executable JAR packaged.
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && pnpm build` — passed, including TypeScript and production compilation.
+- `git diff --check` — passed after the final documentation/log changes.
+
+Limitations: `PostgresMigrationSmokeTest` (1 test) and `LocalPostgresOperationalIntegrationTest` (15 tests) were skipped because opt-in PostgreSQL verification was not enabled. `TenantIsolationPostgresTest` (1 Testcontainers test) was skipped because Docker is unavailable. V37 was not applied to a database in this task, and no browser-based visual inspection was performed. Run the opt-in smoke test only after confirming that the configured local development database/schema is the intended target.

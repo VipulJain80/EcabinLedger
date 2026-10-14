@@ -28,7 +28,16 @@ public final class FormFieldBindingCatalog {
         binding(DefectFieldBinding.REMARKS,"Remarks","remarks","defects_dtl","description","varchar(4000)",List.of(FieldType.TEXTAREA),List.of("GALLEY"),"CONFIGURABLE",null,"Optional remarks are combined with the required condition description when creating a Galley defect.",false,null),
         binding(DefectFieldBinding.SEVERITY,"Severity","severityId","defects_dtl","severity_id","uuid",List.of(FieldType.DROPDOWN),DEFECT_AREAS,"REQUIRED","DEFECT_SEVERITIES","Active severity belonging to the authenticated organization.",true,null),
         binding(DefectFieldBinding.EVIDENCE_ATTACHMENTS,"Evidence attachments","attachments","attachments_dtl","object_key","private object reference",List.of(FieldType.FILE_UPLOAD,FieldType.IMAGE_UPLOAD),List.of("CABIN","GALLEY","LAVATORY","ENTRY_AREA","ATTENDANT_SEAT"),"CONFIGURABLE",null,"Private object storage; metadata is tenant-scoped and file must pass validation and malware scan.",true,null),
-        binding(DefectFieldBinding.AIRCRAFT_ID,"Aircraft registration","aircraftId","aircraft_mst","id","uuid",List.of(FieldType.AIRCRAFT_SELECT),DEFECT_AREAS,"REQUIRED","AIRCRAFT","Select an active aircraft from the authenticated tenant. The submitted UUID is resolved and validated by the defect service; it is not stored as a form answer.",false,null)
+        binding(DefectFieldBinding.AIRCRAFT_ID,"Aircraft registration","aircraftId","aircraft_mst","id","uuid",List.of(FieldType.AIRCRAFT_SELECT),DEFECT_AREAS,"REQUIRED","AIRCRAFT","Select an active aircraft from the authenticated tenant. The submitted UUID is resolved and validated by the defect service; it is not stored as a form answer.",false,null),
+        binding(DefectFieldBinding.REVIEW_DECISION,"Reviewer decision","decision","defect_events_dtl","new_state","workflow event",List.of(FieldType.DROPDOWN),List.of("GALLEY"),"REQUIRED","REVIEW_DECISIONS","Only APPROVE or REJECT is accepted by the authenticated Reviewer workflow endpoint.",false,null),
+        binding(DefectFieldBinding.REVIEW_MAINTENANCE_TEAM,"Maintenance team","maintenanceTeamId","defect_events_dtl","new_state","workflow event",List.of(FieldType.DROPDOWN),List.of("GALLEY"),"REQUIRED_ON_APPROVE","MAINTENANCE_TEAMS","Options and eligibility are resolved per case from the Reviewer decision-options endpoint; approval validates active tenant ownership and membership.",false,"REVIEW_DECISION"),
+        binding(DefectFieldBinding.REVIEW_REJECTION_REASON,"Rejection reason","rejectionReason","defect_events_dtl","new_state","varchar(2000) workflow event value",List.of(FieldType.TEXTAREA),List.of("GALLEY"),"REQUIRED_ON_REJECT",null,"Required on REJECT; maximum 2000 characters, stored in the immutable decision event.",false,"REVIEW_DECISION"),
+        binding(DefectFieldBinding.REVIEW_REMARK,"Reviewer remark","remark","defect_events_dtl","new_state","workflow event",List.of(FieldType.TEXTAREA),List.of("GALLEY"),"OPTIONAL",null,"Optional Reviewer context, maximum 2000 characters; recorded only through the append-only decision event.",false,null),
+        binding(DefectFieldBinding.MAINTENANCE_STATUS,"Maintenance status","status","corrective_actions_dtl","status","varchar(20)",List.of(FieldType.DROPDOWN),DEFECT_AREAS,"REQUIRED","MAINTENANCE_ACTION_STATUSES","Only Work in Progress, On Hold, or Close Submitted; each maps to a server-controlled action transition.",false,null),
+        binding(DefectFieldBinding.SLA_TARGET_DATE,"SLA target date","slaTargetDate","corrective_actions_dtl","due_at","timestamptz (business-timezone calendar date)",List.of(FieldType.DATE),DEFECT_AREAS,"REQUIRED",null,"SLA policy for the selected status is enforced by the workflow service.",false,null),
+        binding(DefectFieldBinding.MAINTENANCE_REMARK,"Maintenance remark","remark","defect_events_dtl","new_state","varchar(2000) workflow event value",List.of(FieldType.TEXTAREA),DEFECT_AREAS,"OPTIONAL",null,"Optional maintenance context, maximum 2000 characters; captured in append-only defect event history.",false,null)
+        ,binding(DefectFieldBinding.CLOSURE_DECISION,"Closure decision","decision","closure_approvals_dtl","decision","varchar(16) workflow decision",List.of(FieldType.DROPDOWN),List.of("GALLEY"),"REQUIRED","CLOSURE_DECISIONS","Only ACCEPT or DECLINE is accepted by the closure workflow.",false,null)
+        ,binding(DefectFieldBinding.CLOSURE_REMARK,"Closure remarks","remark","closure_approvals_dtl","reason","varchar(2000) workflow decision",List.of(FieldType.TEXTAREA),List.of("GALLEY"),"REQUIRED_ON_DECLINE",null,"Optional when accepting; required with DECLINE, maximum 2000 characters. Stored with immutable closure decision history.",false,"CLOSURE_DECISION")
     );
 
     private static FieldBindingDefinition binding(DefectFieldBinding key, String name, String property, String table,
@@ -36,10 +45,16 @@ public final class FormFieldBindingCatalog {
         String source, String validation, boolean multiple, String dependency) {
         OptionSource optionSource = source == null ? null : OptionSource.valueOf(source);
         List<FormPurpose> purposes = key==DefectFieldBinding.EVIDENCE_ATTACHMENTS
-            ? List.of(FormPurpose.values()) : List.of(FormPurpose.DEFECT_REPORT);
+            ? List.of(FormPurpose.DEFECT_REPORT,FormPurpose.INSPECTION,FormPurpose.CORRECTIVE_ACTION,FormPurpose.VERIFICATION,FormPurpose.CLOSURE_APPROVAL,FormPurpose.REOPEN)
+            : key==DefectFieldBinding.MAINTENANCE_STATUS||key==DefectFieldBinding.SLA_TARGET_DATE||key==DefectFieldBinding.MAINTENANCE_REMARK
+                ? List.of(FormPurpose.CORRECTIVE_ACTION)
+            : key==DefectFieldBinding.CLOSURE_DECISION||key==DefectFieldBinding.CLOSURE_REMARK
+                ? List.of(FormPurpose.CLOSURE_APPROVAL)
+            : key==DefectFieldBinding.REVIEW_DECISION||key==DefectFieldBinding.REVIEW_MAINTENANCE_TEAM||key==DefectFieldBinding.REVIEW_REJECTION_REASON||key==DefectFieldBinding.REVIEW_REMARK
+                ? List.of(FormPurpose.REVIEW_DECISION) : List.of(FormPurpose.DEFECT_REPORT);
         return new FieldBindingDefinition(key,key==DefectFieldBinding.AIRCRAFT_ID?"aircraftId":key.name().toLowerCase(java.util.Locale.ROOT),name,property,table,column,dataType,
             types,areas,purposes,required,optionSource,validation,
-            key==DefectFieldBinding.EVIDENCE_ATTACHMENTS?"SYSTEM_MANAGED_REFERENCE":key==DefectFieldBinding.AIRCRAFT_ID?"SYSTEM_CONTROLLED_SELECTION":"USER_EDITABLE",multiple,dependency);
+            key==DefectFieldBinding.EVIDENCE_ATTACHMENTS?"SYSTEM_MANAGED_REFERENCE":key==DefectFieldBinding.AIRCRAFT_ID?"SYSTEM_CONTROLLED_SELECTION":key==DefectFieldBinding.CLOSURE_DECISION||key==DefectFieldBinding.CLOSURE_REMARK||key==DefectFieldBinding.REVIEW_DECISION||key==DefectFieldBinding.REVIEW_MAINTENANCE_TEAM||key==DefectFieldBinding.REVIEW_REJECTION_REASON||key==DefectFieldBinding.REVIEW_REMARK||key==DefectFieldBinding.MAINTENANCE_STATUS||key==DefectFieldBinding.SLA_TARGET_DATE||key==DefectFieldBinding.MAINTENANCE_REMARK?"WORKFLOW_CONTROLLED":"USER_EDITABLE",multiple,dependency);
     }
 
     public List<FieldBindingDefinition> all() { return FIELDS; }

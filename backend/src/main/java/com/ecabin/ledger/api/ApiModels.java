@@ -6,6 +6,7 @@ import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.Size;
 import jakarta.validation.constraints.NotNull;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -72,6 +73,10 @@ public final class ApiModels {
     ) {}
 
     public record ActionCompletionRequest(@NotBlank @Size(max = 2000) String completionNotes) {}
+    public record MaintenanceActionUpdateRequest(@NotNull UUID formId,@NotNull UUID formVersionId,@NotBlank String status,LocalDate slaTargetDate,@Size(max=2000) String remark) {}
+    public record MaintenanceSlaPolicy(String statusKey,boolean configured,boolean dateRequired,boolean allowFuture,Integer maxFutureDays,boolean allowPast,Integer maxPastDays,String businessTimezone) {}
+    public record MaintenanceSlaPolicyUpdate(String statusKey,boolean dateRequired,boolean allowFuture,Integer maxFutureDays,boolean allowPast,Integer maxPastDays,String businessTimezone,@NotBlank @Size(max=1000) String reason) {}
+    public record MaintenanceSlaEffective(MaintenanceSlaPolicy policy,LocalDate today,LocalDate minDate,LocalDate maxDate) {}
 
     public record VerificationRequest(
         @NotBlank @Size(max = 16) String result,
@@ -81,21 +86,36 @@ public final class ApiModels {
 
     public record ApprovalRequest(
         @NotBlank @Size(max = 16) String decision,
-        @NotBlank @Size(max = 2000) String reason,
-        @Size(max = 240) String evidenceReference
-    ) {}
+        @Size(max = 2000) String reason,
+        @Size(max = 240) String evidenceReference,
+        UUID formId,
+        UUID versionId
+    ) {
+        public ApprovalRequest(String decision,String reason,String evidenceReference){this(decision,reason,evidenceReference,null,null);}
+    }
 
     public record ReviewerDecisionRequest(
         @NotBlank @Size(max = 16) String decision,
-        @NotBlank @Size(max = 2000) String reason
-    ) {}
+        UUID maintenanceTeamId,
+        @Size(max = 2000) String rejectionReason,
+        @Size(max = 2000) String remark,
+        @NotNull UUID formId,
+        @NotNull UUID versionId
+    ) {
+        public ReviewerDecisionRequest(String decision,UUID maintenanceTeamId,String remark,UUID formId,UUID versionId){this(decision,maintenanceTeamId,null,remark,formId,versionId);}
+        public ReviewerDecisionRequest(String decision,UUID maintenanceTeamId,String remark){this(decision,maintenanceTeamId,null,remark,null,null);}
+    }
+
+    public record ReviewerDecisionTeam(UUID id, String name) {}
+    public record ReviewerDecisionOptions(String areaName, String status, List<ReviewerDecisionTeam> maintenanceTeams) {}
 
     public record WorkflowRecord(UUID id, String status) {}
 
     public record DefectView(UUID id, String reference, String tailNumber, String aircraftType,
         String location, String category, String zone, Integer rowNumber, String seatReference,
         String component, UUID areaId, UUID componentId, UUID conditionId, String conditionName, String title, String description, String severity, String severityName, String status,
-        String reportedBy, String assignedTo, UUID activeActionId, Instant dueAt, Instant reportedAt, Instant updatedAt) {}
+        String reportedBy, String assignedTo, UUID activeActionId, Instant dueAt, Instant reportedAt, Instant updatedAt,
+        String assignedTeam, String routingAttention) {}
 
     public record DefectEventView(UUID id, String eventType, String fromStatus, String toStatus,
         String note, String evidenceReference, String inspectionOutcome, String actorId, Instant occurredAt) {}

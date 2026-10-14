@@ -54,28 +54,38 @@ public class OperationalFormService {
         return jdbc.query(sql, (rs,n) -> summary(rs),operatorId);
     }
 
+    /** Returns only mappings supported by the backend workflow rules for this tenant's active areas. */
+    public List<FormMappingOption> mappingOptions(UUID operatorId) {
+        List<Map<String,Object>> areas=jdbc.query("SELECT id,code FROM cabin_areas_mst WHERE operator_id=? AND isactive=1 ORDER BY name",new ColumnMapRowMapper(),operatorId);
+        List<FormMappingOption> options=new ArrayList<>();
+        for(Map<String,Object> area:areas){
+            UUID areaId=(UUID)area.get("id");String areaCode=String.valueOf(area.get("code"));
+            for(FormPurpose purpose:FormPurpose.values())for(WorkflowStage stage:WorkflowStage.values()){
+                try{FormResolutionRules.requireMapping(purpose,stage);}catch(IllegalArgumentException unsupported){continue;}
+                if((purpose==FormPurpose.REVIEW_DECISION||purpose==FormPurpose.CLOSURE_APPROVAL)&&!"GALLEY".equals(areaCode))continue;
+                options.add(new FormMappingOption(areaId,areaCode,purpose,stage));
+            }
+        }
+        return List.copyOf(options);
+    }
+
     @Transactional
     public void reassignArea(UUID operatorId,String actor,UUID formId,UUID areaId,String reason) {
-        auditActor(actor);
-        Map<String,Object> form=requireForm(operatorId,formId);
-        if(number(form.get("isactive"))!=1) throw new ResponseStatusException(HttpStatus.CONFLICT,"Reactivate the form before changing its cabin area.");
-        requireActiveArea(operatorId,areaId);
-        UUID previousArea=(UUID)form.get("area_id");
-        if(previousArea.equals(areaId)) return;
-        int changed=jdbc.update("UPDATE operational_forms_dtl SET area_id=?,updated_at=now(),updated_by=? WHERE operator_id=? AND id=? AND area_id=? AND isactive=1",areaId,actor,operatorId,formId,previousArea);
-        if(changed!=1) throw new ResponseStatusException(HttpStatus.CONFLICT,"The form mapping changed while saving. Reload and try again.");
-        audit(operatorId,actor,null,"FORM_AREA_REASSIGNED","FORM",formId,reason.trim(),Map.of("areaId",previousArea),Map.of("areaId",areaId));
+        Map<String,Object> form=lockForm(operatorId,formId);
+        updateMapping(operatorId,actor,formId,new UpdateFormMappingRequest(areaId,FormPurpose.valueOf(String.valueOf(form.get("purpose"))),WorkflowStage.valueOf(String.valueOf(form.get("workflow_stage"))),reason));
     }
 
     @Transactional
     public void updateMapping(UUID operatorId,String actor,UUID formId,UpdateFormMappingRequest request) {
         auditActor(actor);
-        Map<String,Object> form=requireForm(operatorId,formId);
+        Map<String,Object> form=lockForm(operatorId,formId);
         if(number(form.get("isactive"))!=1) throw new ResponseStatusException(HttpStatus.CONFLICT,"Reactivate the form before changing its mapping.");
         requireActiveArea(operatorId,request.areaId());
         FormResolutionRules.requireMapping(request.purpose(),request.workflowStage());
+        validateMappingArea(operatorId,request.areaId(),request.purpose());
         UUID previousArea=(UUID)form.get("area_id"); String previousPurpose=String.valueOf(form.get("purpose")); String previousStage=String.valueOf(form.get("workflow_stage"));
         if(previousArea.equals(request.areaId())&&previousPurpose.equals(request.purpose().name())&&previousStage.equals(request.workflowStage().name()))return;
+        prepareRemappedDraft(operatorId,actor,formId,request.areaId(),request.purpose(),request.workflowStage());
         int changed=jdbc.update("UPDATE operational_forms_dtl SET area_id=?,purpose=?,workflow_stage=?,updated_at=now(),updated_by=? WHERE operator_id=? AND id=? AND isactive=1",request.areaId(),request.purpose().name(),request.workflowStage().name(),actor,operatorId,formId);
         if(changed!=1)throw new ResponseStatusException(HttpStatus.CONFLICT,"The form mapping changed while saving. Reload and try again.");
         audit(operatorId,actor,null,"FORM_MAPPING_UPDATED","FORM",formId,request.reason().trim(),Map.of("areaId",previousArea,"purpose",previousPurpose,"workflowStage",previousStage),Map.of("areaId",request.areaId(),"purpose",request.purpose().name(),"workflowStage",request.workflowStage().name()));
@@ -110,25 +120,113 @@ public class OperationalFormService {
     @Transactional
     public FormSummary create(UUID operatorId, String actor, CreateFormRequest request) {
         auditActor(actor);
-        String key = request.formKey().trim().toUpperCase(java.util.Locale.ROOT);
-        if (!key.matches("[A-Z][A-Z0-9_-]{1,79}")) throw new IllegalArgumentException("Form key must use 2–80 uppercase letters, numbers, underscores or hyphens.");
+        String key = FormMasterMutationRules.normalizeKey(request.formKey());
+        String name = FormMasterMutationRules.validateName(request.name());
         requireActiveArea(operatorId, request.areaId());
         FormPurpose purpose=request.purpose()==null?FormPurpose.DEFECT_REPORT:request.purpose();
         WorkflowStage workflowStage=request.workflowStage()==null?(purpose==FormPurpose.DEFECT_REPORT?WorkflowStage.INITIAL_REPORT:null):request.workflowStage();
         FormResolutionRules.requireMapping(purpose,workflowStage);
         UUID id = UUID.randomUUID(), versionId = UUID.randomUUID();
-        jdbc.update("INSERT INTO operational_forms_dtl(id,operator_id,area_id,form_key,name,purpose,workflow_stage) VALUES(?,?,?,?,?,?,?)",id,operatorId,request.areaId(),key,request.name().trim(),purpose.name(),workflowStage.name());
-        jdbc.update("INSERT INTO operational_form_versions_dtl(id,operator_id,form_id,version_number,status,fields_json,created_by) VALUES(?,?,?,1,'DRAFT','{\"fields\":[]}'::jsonb,?)",versionId,operatorId,id,actor);
-        audit(operatorId,actor,null,"FORM_CREATED","FORM",id,"Form created: "+request.name(),null,Map.of("formKey",key,"areaId",request.areaId(),"purpose",purpose.name(),"workflowStage",workflowStage.name()));
+        jdbc.update("INSERT INTO operational_forms_dtl(id,operator_id,area_id,form_key,name,purpose,workflow_stage) VALUES(?,?,?,?,?,?,?)",id,operatorId,request.areaId(),key,name,purpose.name(),workflowStage.name());
+        jdbc.update("INSERT INTO operational_form_versions_dtl(id,operator_id,form_id,version_number,status,fields_json,created_by,form_name,area_id,purpose,workflow_stage) VALUES(?,?,?,1,'DRAFT','{\"fields\":[]}'::jsonb,?,?,?,?,?)",versionId,operatorId,id,actor,name,request.areaId(),purpose.name(),workflowStage.name());
+        audit(operatorId,actor,null,"FORM_CREATED","FORM",id,"Form created: "+name,null,Map.of("formKey",key,"areaId",request.areaId(),"purpose",purpose.name(),"workflowStage",workflowStage.name()));
         return list(operatorId,true).stream().filter(f -> f.id().equals(id)).findFirst().orElseThrow();
+    }
+
+    private void validateMappingArea(UUID operatorId,UUID areaId,FormPurpose purpose){if((purpose==FormPurpose.REVIEW_DECISION||purpose==FormPurpose.CLOSURE_APPROVAL)&&!"GALLEY".equals(jdbc.queryForObject("SELECT code FROM cabin_areas_mst WHERE operator_id=? AND id=? AND isactive=1",String.class,operatorId,areaId)))throw new IllegalArgumentException(purpose==FormPurpose.REVIEW_DECISION?"Reviewer Decision forms can only be mapped to the Galley area.":"Closure Review forms can only be mapped to the Galley area.");}
+
+    /** Remapping prepares a new draft snapshot; prior published versions retain their original area, purpose, stage and name. */
+    private void prepareRemappedDraft(UUID operatorId,String actor,UUID formId,UUID areaId,FormPurpose purpose,WorkflowStage stage){
+        List<Map<String,Object>> drafts=jdbc.query("SELECT id,fields_json::text AS fields_json FROM operational_form_versions_dtl WHERE operator_id=? AND form_id=? AND status='DRAFT' FOR UPDATE",new ColumnMapRowMapper(),operatorId,formId);
+        if(!drafts.isEmpty()){UUID draftId=(UUID)drafts.get(0).get("id");jdbc.update("UPDATE operational_form_versions_dtl SET form_name=?,area_id=?,purpose=?,workflow_stage=?,updated_by=?,updated_at=now() WHERE operator_id=? AND form_id=? AND id=? AND status='DRAFT'",String.valueOf(requireForm(operatorId,formId).get("name")),areaId,purpose.name(),stage.name(),actor,operatorId,formId,draftId);return;}
+        Map<String,Object> form=requireForm(operatorId,formId);Object published=form.get("published_version_id");String fields=published==null?"{\"fields\":[]}":jdbc.queryForObject("SELECT fields_json::text FROM operational_form_versions_dtl WHERE operator_id=? AND form_id=? AND id=? AND status='PUBLISHED'",String.class,operatorId,formId,published);Integer max=jdbc.queryForObject("SELECT COALESCE(max(version_number),0) FROM operational_form_versions_dtl WHERE operator_id=? AND form_id=?",Integer.class,operatorId,formId);int number=(max==null?0:max)+1;UUID id=UUID.randomUUID();
+        jdbc.update("INSERT INTO operational_form_versions_dtl(id,operator_id,form_id,version_number,status,fields_json,created_by,form_name,area_id,purpose,workflow_stage) VALUES(?,?,?,?,'DRAFT',?::jsonb,?,?,?,?,?)",id,operatorId,formId,number,fields,actor,String.valueOf(form.get("name")),areaId,purpose.name(),stage.name());
+        audit(operatorId,actor,null,"FORM_DRAFT_CREATED","FORM_VERSION",id,"Draft created to preserve the new mapping without changing published history.",null,Map.of("formId",formId,"versionNumber",number,"areaId",areaId,"purpose",purpose.name(),"workflowStage",stage.name()));
+    }
+
+    private void requireFormDeletable(UUID operatorId,UUID formId,Map<String,Object> form){
+        boolean published=Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM operational_form_versions_dtl WHERE operator_id=? AND form_id=? AND status='PUBLISHED')",Boolean.class,operatorId,formId));
+        if(published||form.get("published_version_id")!=null)throw new ResponseStatusException(HttpStatus.CONFLICT,"This form has published history and cannot be permanently deleted.");
+        if(Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM operational_form_submissions_dtl WHERE operator_id=? AND form_id=?)",Boolean.class,operatorId,formId)))throw new ResponseStatusException(HttpStatus.CONFLICT,"This form has submissions. Its historical answers and version links must be retained.");
+        if(Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM attachments_dtl WHERE operator_id=? AND form_id=?)",Boolean.class,operatorId,formId)))throw new ResponseStatusException(HttpStatus.CONFLICT,"This form is referenced by evidence attachments and cannot be deleted.");
+        if(Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM defect_events_dtl WHERE operator_id=? AND defect_id IS NOT NULL AND ((entity_type IN ('FORM','FORM_VERSION') AND entity_id IN (SELECT id FROM operational_form_versions_dtl WHERE operator_id=? AND form_id=? UNION SELECT ?::uuid)) OR previous_state->>'formId'=? OR new_state->>'formId'=? OR previous_state->>'formVersionId' IN (SELECT id::text FROM operational_form_versions_dtl WHERE operator_id=? AND form_id=?) OR new_state->>'formVersionId' IN (SELECT id::text FROM operational_form_versions_dtl WHERE operator_id=? AND form_id=?))",Boolean.class,operatorId,operatorId,formId,formId,formId.toString(),formId.toString(),operatorId,formId,operatorId,formId)))throw new ResponseStatusException(HttpStatus.CONFLICT,"This form is referenced by defect workflow history and cannot be permanently deleted.");
+        // Draft versions can be removed only when no other table points to them. Foreign keys remain enabled as the final guard.
+        if(Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM attachments_dtl a JOIN operational_form_versions_dtl v ON v.operator_id=a.operator_id AND (a.form_version_id=v.id) WHERE v.operator_id=? AND v.form_id=?)",Boolean.class,operatorId,formId)))throw new ResponseStatusException(HttpStatus.CONFLICT,"A draft version has attachment history and cannot be deleted.");
+    }
+
+    private void requireNoBrokenActiveWorkflow(UUID operatorId,UUID formId,Map<String,Object> form){
+        Object published=form.get("published_version_id");if(published==null)return;
+        FormVersion publishedVersion=requireVersion(operatorId,formId,(UUID)published);
+        FormPurpose purpose=publishedVersion.purpose();String[] statuses=switch(purpose){case DEFECT_REPORT->new String[]{"REPORTED"};case REVIEW_DECISION->new String[]{"REPORTED","UNDER_REVIEW"};case INSPECTION->new String[]{"INSPECTION_REQUIRED","INSPECTION_IN_PROGRESS"};case CORRECTIVE_ACTION->new String[]{"ACTION_ASSIGNED","IN_PROGRESS"};case VERIFICATION->new String[]{"AWAITING_VERIFICATION"};case CLOSURE_APPROVAL->new String[]{"APPROVAL_REQUIRED"};case REOPEN->new String[]{"CLOSED"};};
+        String marks=String.join(",",java.util.Collections.nCopies(statuses.length,"?"));String dependency="SELECT EXISTS(SELECT 1 FROM defects_dtl d WHERE d.operator_id=? AND d.area_id=? AND d.isactive=1 AND d.status IN ("+marks+") AND NOT EXISTS(SELECT 1 FROM operational_forms_dtl f JOIN operational_form_versions_dtl v ON v.operator_id=f.operator_id AND v.form_id=f.id AND v.id=f.published_version_id AND v.status='PUBLISHED' WHERE f.operator_id=d.operator_id AND f.id<>? AND f.isactive=1 AND v.area_id=d.area_id AND v.purpose=? AND v.workflow_stage=?))";
+        List<Object> args=new ArrayList<>();args.add(operatorId);args.add(publishedVersion.areaId());java.util.Collections.addAll(args,statuses);args.add(formId);args.add(purpose.name());args.add(publishedVersion.workflowStage().name());
+        if(Boolean.TRUE.equals(jdbc.queryForObject(dependency,Boolean.class,args.toArray())))throw new ResponseStatusException(HttpStatus.CONFLICT,"This is the only published form for a workflow stage with active cases. Configure and publish a replacement before deactivating it.");
+    }
+
+    private void validatePublishedForActivation(UUID operatorId,UUID formId,Map<String,Object> form){Object published=form.get("published_version_id");if(published==null)return;FormVersion version=requireVersion(operatorId,formId,(UUID)published);validateConfiguration(operatorId,version.areaId(),version.configuration(),version.purpose(),true);if(version.configuration().fields().isEmpty())throw new ResponseStatusException(HttpStatus.CONFLICT,"Publish a valid form version before reactivating this form.");}
+
+    /** Uses the source's current published version by default. Drafts are copied only when an administrator explicitly selects that version. */
+    @Transactional
+    public FormSummary duplicate(UUID operatorId,String actor,UUID sourceFormId,DuplicateFormRequest request) {
+        auditActor(actor);
+        Map<String,Object> source=lockForm(operatorId,sourceFormId);
+        String key=FormMasterMutationRules.normalizeKey(request.formKey());
+        String name=FormMasterMutationRules.validateName(request.name());
+        requireActiveArea(operatorId,request.areaId());
+        FormResolutionRules.requireMapping(request.purpose(),request.workflowStage());
+        validateMappingArea(operatorId,request.areaId(),request.purpose());
+        if(Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM operational_forms_dtl WHERE operator_id=? AND form_key=?)",Boolean.class,operatorId,key)))
+            throw new ResponseStatusException(HttpStatus.CONFLICT,"That form key is already in use. Choose a unique key.");
+        FormVersion selected=FormMasterMutationRules.selectSourceVersion(
+            versions(operatorId,sourceFormId),(UUID)source.get("published_version_id"),request.sourceVersionId());
+        validateConfiguration(operatorId,request.areaId(),selected.configuration(),request.purpose(),false);
+        UUID destinationId=UUID.randomUUID(),versionId=UUID.randomUUID();
+        jdbc.update("INSERT INTO operational_forms_dtl(id,operator_id,area_id,form_key,name,purpose,workflow_stage) VALUES(?,?,?,?,?,?,?)",destinationId,operatorId,request.areaId(),key,name,request.purpose().name(),request.workflowStage().name());
+        jdbc.update("INSERT INTO operational_form_versions_dtl(id,operator_id,form_id,version_number,status,fields_json,created_by,form_name,area_id,purpose,workflow_stage) VALUES(?,?,?,1,'DRAFT',?::jsonb,?,?,?,?,?)",versionId,operatorId,destinationId,json(selected.configuration()),actor,name,request.areaId(),request.purpose().name(),request.workflowStage().name());
+        audit(operatorId,actor,null,"FORM_DUPLICATED","FORM",destinationId,"Form definition copied into a new draft.",
+            Map.of("sourceFormId",sourceFormId,"sourceVersionId",selected.id()),Map.of("destinationFormId",destinationId,"destinationVersionId",versionId,"formKey",key));
+        return list(operatorId,true).stream().filter(form->form.id().equals(destinationId)).findFirst().orElseThrow();
+    }
+
+    @Transactional
+    public FormSummary rename(UUID operatorId,String actor,UUID formId,RenameFormRequest request) {
+        auditActor(actor);
+        Map<String,Object> before=lockForm(operatorId,formId);
+        String name=FormMasterMutationRules.validateName(request.name());
+        String previous=String.valueOf(before.get("name"));
+        if(previous.equals(name))return list(operatorId,true).stream().filter(form->form.id().equals(formId)).findFirst().orElseThrow();
+        int changed=jdbc.update("UPDATE operational_forms_dtl SET name=?,updated_by=?,updated_at=now() WHERE operator_id=? AND id=?",name,actor,operatorId,formId);
+        if(changed!=1)throw new ResponseStatusException(HttpStatus.CONFLICT,"The form changed while renaming. Reload and try again.");
+        jdbc.update("UPDATE operational_form_versions_dtl SET form_name=?,updated_by=?,updated_at=now() WHERE operator_id=? AND form_id=? AND status='DRAFT'",name,actor,operatorId,formId);
+        audit(operatorId,actor,null,"FORM_RENAMED","FORM",formId,request.reason().trim(),Map.of("name",previous,"formKey",before.get("form_key")),Map.of("name",name,"formKey",before.get("form_key")));
+        return list(operatorId,true).stream().filter(form->form.id().equals(formId)).findFirst().orElseThrow();
+    }
+
+    /** Deletes only an unused form that has never been published; all historical and workflow references are protected. */
+    @Transactional
+    public DeletedForm delete(UUID operatorId,String actor,UUID formId,DeleteFormRequest request) {
+        auditActor(actor);
+        Map<String,Object> form=lockForm(operatorId,formId);
+        requireFormDeletable(operatorId,formId,form);
+        UUID published=(UUID)form.get("published_version_id");
+        if(published!=null)throw new ResponseStatusException(HttpStatus.CONFLICT,"This form has a published version. Deactivate it or create a separate form; published form history cannot be deleted.");
+        List<UUID> versions=jdbc.query("SELECT id FROM operational_form_versions_dtl WHERE operator_id=? AND form_id=? AND status='DRAFT' FOR UPDATE",(rs,n)->rs.getObject(1,UUID.class),operatorId,formId);
+        for(UUID versionId:versions)jdbc.update("DELETE FROM operational_form_versions_dtl WHERE operator_id=? AND form_id=? AND id=? AND status='DRAFT'",operatorId,formId,versionId);
+        int removed=jdbc.update("DELETE FROM operational_forms_dtl WHERE operator_id=? AND id=? AND published_version_id IS NULL",operatorId,formId);
+        if(removed!=1)throw new ResponseStatusException(HttpStatus.CONFLICT,"The form changed while deletion was being checked. Reload and try again.");
+        DeletedForm deleted=new DeletedForm(formId,String.valueOf(form.get("form_key")),String.valueOf(form.get("name")),(UUID)form.get("area_id"),String.valueOf(form.get("area_name")),FormPurpose.valueOf(String.valueOf(form.get("purpose"))),WorkflowStage.valueOf(String.valueOf(form.get("workflow_stage"))));
+        Map<String,Object> snapshot=Map.ofEntries(Map.entry("operatorId",operatorId),Map.entry("formId",formId),Map.entry("formKey",deleted.formKey()),Map.entry("name",deleted.name()),Map.entry("areaId",deleted.areaId()),Map.entry("areaName",deleted.areaName()),Map.entry("purpose",deleted.purpose().name()),Map.entry("workflowStage",deleted.workflowStage().name()),Map.entry("deletedVersionIds",versions),Map.entry("mode","PERMANENT_DELETE"),Map.entry("outcome","DELETED"));
+        audit(operatorId,actor,null,"FORM_PERMANENTLY_DELETED","FORM",formId,request.reason().trim(),snapshot,Map.of("formId",formId,"formKey",deleted.formKey(),"mode","PERMANENT_DELETE","outcome","DELETED"));
+        return deleted;
     }
 
     @Transactional
     public FormVersion saveDraft(UUID operatorId, String actor, UUID formId, UUID versionId, FormConfiguration configuration) {
         auditActor(actor);
+        lockForm(operatorId,formId);
         FormVersion current = requireVersion(operatorId,formId,versionId);
         if (!"DRAFT".equals(current.status())) throw new ResponseStatusException(HttpStatus.CONFLICT,"Published form versions cannot be edited; create a new draft.");
-        validateConfiguration(operatorId, formArea(operatorId,formId), configuration, formPurpose(operatorId,formId), false);
+        validateConfiguration(operatorId, current.areaId(), configuration, current.purpose(), false);
         jdbc.update("UPDATE operational_form_versions_dtl SET fields_json=?::jsonb WHERE operator_id=? AND form_id=? AND id=? AND status='DRAFT'",json(configuration),operatorId,formId,versionId);
         jdbc.update("UPDATE operational_forms_dtl SET updated_at=now() WHERE operator_id=? AND id=?",operatorId,formId);
         audit(operatorId,actor,null,"FORM_DRAFT_UPDATED","FORM_VERSION",versionId,"Draft form fields updated.",null,Map.of("formId",formId,"fieldCount",configuration.fields().size()));
@@ -138,7 +236,7 @@ public class OperationalFormService {
     @Transactional
     public FormVersion createDraft(UUID operatorId, String actor, UUID formId) {
         auditActor(actor);
-        Map<String,Object> form = requireForm(operatorId,formId);
+        Map<String,Object> form = lockForm(operatorId,formId);
         if (number(form.get("isactive")) != 1) throw new ResponseStatusException(HttpStatus.CONFLICT,"Reactivate the form before creating a draft.");
         if (Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM operational_form_versions_dtl WHERE operator_id=? AND form_id=? AND status='DRAFT')",Boolean.class,operatorId,formId)))
             throw new ResponseStatusException(HttpStatus.CONFLICT,"This form already has an editable draft.");
@@ -146,7 +244,7 @@ public class OperationalFormService {
         UUID id=UUID.randomUUID();
         Object published=form.get("published_version_id");
         String fields = published == null ? "{\"fields\":[]}" : jdbc.queryForObject("SELECT fields_json::text FROM operational_form_versions_dtl WHERE operator_id=? AND form_id=? AND id=? AND status='PUBLISHED'",String.class,operatorId,formId,published);
-        jdbc.update("INSERT INTO operational_form_versions_dtl(id,operator_id,form_id,version_number,status,fields_json,created_by) VALUES(?,?,?,?,'DRAFT',?::jsonb,?)",id,operatorId,formId,(max==null?0:max)+1,fields,actor);
+        jdbc.update("INSERT INTO operational_form_versions_dtl(id,operator_id,form_id,version_number,status,fields_json,created_by,form_name,area_id,purpose,workflow_stage) VALUES(?,?,?,?,'DRAFT',?::jsonb,?,?,?,?,?)",id,operatorId,formId,(max==null?0:max)+1,fields,actor,String.valueOf(form.get("name")),form.get("area_id"),String.valueOf(form.get("purpose")),String.valueOf(form.get("workflow_stage")));
         jdbc.update("UPDATE operational_forms_dtl SET updated_at=now() WHERE operator_id=? AND id=?",operatorId,formId);
         audit(operatorId,actor,null,"FORM_DRAFT_CREATED","FORM_VERSION",id,"Draft form version created.",null,Map.of("formId",formId,"versionNumber",(max==null?0:max)+1));
         return requireVersion(operatorId,formId,id);
@@ -155,12 +253,14 @@ public class OperationalFormService {
     @Transactional
     public FormVersion publish(UUID operatorId,String actor,UUID formId,UUID versionId) {
         auditActor(actor);
-        if(number(requireForm(operatorId,formId).get("isactive"))!=1) throw new ResponseStatusException(HttpStatus.CONFLICT,"Reactivate the form before publishing a version.");
+        Map<String,Object> form=lockForm(operatorId,formId);
+        if(number(form.get("isactive"))!=1) throw new ResponseStatusException(HttpStatus.CONFLICT,"Reactivate the form before publishing a version.");
         FormVersion version=requireVersion(operatorId,formId,versionId);
         if (!"DRAFT".equals(version.status())) throw new ResponseStatusException(HttpStatus.CONFLICT,"This form version is already published.");
-        validateConfiguration(operatorId,formArea(operatorId,formId),version.configuration(),formPurpose(operatorId,formId),true);
-        if(formPurpose(operatorId,formId)==FormPurpose.DEFECT_REPORT) {
-            String areaCode=jdbc.queryForObject("SELECT code FROM cabin_areas_mst WHERE operator_id=? AND id=? AND isactive=1",String.class,operatorId,formArea(operatorId,formId));
+        if(!form.get("area_id").equals(version.areaId())||!form.get("purpose").equals(version.purpose().name())||!form.get("workflow_stage").equals(version.workflowStage().name()))throw new ResponseStatusException(HttpStatus.CONFLICT,"This draft uses an older form mapping. Create or remap a draft before publishing.");
+        validateConfiguration(operatorId,version.areaId(),version.configuration(),version.purpose(),true);
+        if(version.purpose()==FormPurpose.DEFECT_REPORT) {
+            String areaCode=jdbc.queryForObject("SELECT code FROM cabin_areas_mst WHERE operator_id=? AND id=? AND isactive=1",String.class,operatorId,version.areaId());
             if(areaCode.equals("GALLEY")&&DefectReportBindingRules.isGalleyCompact(version.configuration().fields()))DefectReportBindingRules.requireGalleyReport(version.configuration().fields());
             else DefectReportBindingRules.requireComplete(version.configuration().fields());
         }
@@ -175,16 +275,18 @@ public class OperationalFormService {
     @Transactional
     public void setActive(UUID operatorId,String actor,UUID formId,boolean active,String reason) {
         auditActor(actor);
-        Map<String,Object> before=requireForm(operatorId,formId);
+        Map<String,Object> before=lockForm(operatorId,formId);
         int target=active?1:2;
         if(number(before.get("isactive"))==target) return;
+        if(active) validatePublishedForActivation(operatorId,formId,before);
+        else requireNoBrokenActiveWorkflow(operatorId,formId,before);
         jdbc.update("UPDATE operational_forms_dtl SET isactive=?,updated_at=now() WHERE operator_id=? AND id=?",target,operatorId,formId);
         audit(operatorId,actor,null,active?"FORM_REACTIVATED":"FORM_DEACTIVATED","FORM",formId,reason,Map.of("isactive",before.get("isactive")),Map.of("isactive",target));
     }
 
     public List<FormVersion> versions(UUID operatorId,UUID formId) {
         requireForm(operatorId,formId);
-        return jdbc.query("SELECT * FROM operational_form_versions_dtl WHERE operator_id=? AND form_id=? ORDER BY version_number DESC",(rs,n)->mapVersion(rs.getObject("id",UUID.class),formId,rs.getInt("version_number"),rs.getString("status"),rs.getString("fields_json"),rs.getString("created_by"),rs.getTimestamp("created_at").toInstant(),rs.getString("published_by"),rs.getTimestamp("published_at")==null?null:rs.getTimestamp("published_at").toInstant()),operatorId,formId);
+        return jdbc.query("SELECT * FROM operational_form_versions_dtl WHERE operator_id=? AND form_id=? ORDER BY version_number DESC",(rs,n)->mapVersion(rs.getObject("id",UUID.class),formId,rs.getInt("version_number"),rs.getString("status"),rs.getString("fields_json"),rs.getString("created_by"),rs.getTimestamp("created_at").toInstant(),rs.getString("published_by"),rs.getTimestamp("published_at")==null?null:rs.getTimestamp("published_at").toInstant(),rs.getString("form_name"),rs.getObject("area_id",UUID.class),rs.getString("purpose"),rs.getString("workflow_stage")),operatorId,formId);
     }
 
     public FormVersion version(UUID operatorId,UUID formId,UUID versionId) { return requireVersion(operatorId,formId,versionId); }
@@ -196,7 +298,23 @@ public class OperationalFormService {
     public List<FormForArea> publishedForArea(UUID operatorId,UUID areaId,FormPurpose purpose,WorkflowStage stage) {
         requireActiveArea(operatorId,areaId);
         FormResolutionRules.requireMapping(purpose,stage);
-        List<FormForArea> published=jdbc.query("SELECT f.id,f.form_key,f.name,f.area_id,f.purpose,f.workflow_stage,v.id AS version_id,v.version_number,v.fields_json::text FROM operational_forms_dtl f JOIN operational_form_versions_dtl v ON v.operator_id=f.operator_id AND v.form_id=f.id AND v.id=f.published_version_id AND v.status='PUBLISHED' WHERE f.operator_id=? AND f.area_id=? AND f.purpose=? AND f.workflow_stage=? AND f.isactive=1 ORDER BY f.name",(rs,n)->formForArea(rs),operatorId,areaId,purpose.name(),stage.name());
+        if(purpose==FormPurpose.REVIEW_DECISION&&!"GALLEY".equals(jdbc.queryForObject("SELECT code FROM cabin_areas_mst WHERE operator_id=? AND id=? AND isactive=1",String.class,operatorId,areaId)))return List.of();
+        List<FormForArea> published=jdbc.query("SELECT f.id,f.form_key,v.form_name,v.area_id AS version_area_id,v.purpose AS version_purpose,v.workflow_stage AS version_workflow_stage,v.id AS version_id,v.version_number,v.fields_json::text FROM operational_forms_dtl f JOIN operational_form_versions_dtl v ON v.operator_id=f.operator_id AND v.form_id=f.id AND v.id=f.published_version_id AND v.status='PUBLISHED' WHERE f.operator_id=? AND v.area_id=? AND v.purpose=? AND v.workflow_stage=? AND f.isactive=1 ORDER BY v.form_name",(rs,n)->formForArea(rs),operatorId,areaId,purpose.name(),stage.name());
+        if(purpose==FormPurpose.REVIEW_DECISION){
+            List<FormForArea> eligible=new ArrayList<>();List<String> issues=new ArrayList<>();
+            for(FormForArea form:published){try{ReviewerDecisionFormRules.requireValid(form.configuration());eligible.add(form);}catch(IllegalArgumentException invalid){issues.add(form.name()+": "+invalid.getMessage());}}
+            if(!eligible.isEmpty())return List.copyOf(eligible);
+            if(!issues.isEmpty())throw new ResponseStatusException(HttpStatus.CONFLICT,"No published Reviewer Decision form for this stage has a valid configuration. Create or edit a draft in Form Master, fix the configuration issue below, then publish a new version. "+issues.get(0));
+            return List.of();
+        }
+        if(purpose==FormPurpose.CLOSURE_APPROVAL){
+            if(!"GALLEY".equals(jdbc.queryForObject("SELECT code FROM cabin_areas_mst WHERE operator_id=? AND id=? AND isactive=1",String.class,operatorId,areaId)))return List.of();
+            List<FormForArea> eligible=new ArrayList<>();List<String> issues=new ArrayList<>();
+            for(FormForArea form:published){try{ClosureApprovalFormRules.requireValid(form.configuration());eligible.add(form);}catch(IllegalArgumentException invalid){issues.add(form.name()+": "+invalid.getMessage());}}
+            if(!eligible.isEmpty())return List.copyOf(eligible);
+            if(!issues.isEmpty())throw new ResponseStatusException(HttpStatus.CONFLICT,"No published Galley Closure Review form has a valid configuration. Fix the draft in Form Master and publish a new version. "+issues.get(0));
+            return List.of();
+        }
         if(purpose!=FormPurpose.DEFECT_REPORT)return published;
         String areaCode=jdbc.queryForObject("SELECT code FROM cabin_areas_mst WHERE operator_id=? AND id=? AND isactive=1",String.class,operatorId,areaId);
         List<FormForArea> eligible=new ArrayList<>();List<String> configurationIssues=new ArrayList<>();
@@ -281,19 +399,38 @@ public class OperationalFormService {
     private boolean blank(Object value){return value==null||(value instanceof String text&&text.isBlank());}
 
     public FormForArea published(UUID operatorId,UUID formId,UUID versionId) {
-        return jdbc.query("SELECT f.id,f.form_key,f.name,f.area_id,f.purpose,f.workflow_stage,v.id AS version_id,v.version_number,v.fields_json::text FROM operational_forms_dtl f JOIN operational_form_versions_dtl v ON v.operator_id=f.operator_id AND v.form_id=f.id AND v.id=f.published_version_id WHERE f.operator_id=? AND f.id=? AND f.isactive=1 AND v.id=? AND v.status='PUBLISHED'",(rs,n)->formForArea(rs),operatorId,formId,versionId).stream().findFirst().orElseThrow(()->new ResponseStatusException(HttpStatus.NOT_FOUND,"Published form was not found for this organization."));
+        return jdbc.query("SELECT f.id,f.form_key,v.form_name,v.area_id AS version_area_id,v.purpose AS version_purpose,v.workflow_stage AS version_workflow_stage,v.id AS version_id,v.version_number,v.fields_json::text FROM operational_forms_dtl f JOIN operational_form_versions_dtl v ON v.operator_id=f.operator_id AND v.form_id=f.id AND v.id=f.published_version_id WHERE f.operator_id=? AND f.id=? AND f.isactive=1 AND v.id=? AND v.status='PUBLISHED'",(rs,n)->formForArea(rs),operatorId,formId,versionId).stream().findFirst().orElseThrow(()->new ResponseStatusException(HttpStatus.NOT_FOUND,"Published form was not found for this organization."));
     }
 
     public List<FormForArea> publishedForDefect(UUID operatorId,UUID defectId,FormPurpose purpose) {
         Map<String,Object> defect=jdbc.query("SELECT area_id,status FROM defects_dtl WHERE operator_id=? AND id=? AND isactive=1",new ColumnMapRowMapper(),operatorId,defectId).stream().findFirst().orElseThrow(()->new ResponseStatusException(HttpStatus.NOT_FOUND,"Defect not found for this organization."));
         String status=String.valueOf(defect.get("status"));
+        UUID areaId=(UUID)defect.get("area_id");
+        if(purpose==FormPurpose.CORRECTIVE_ACTION&&!Set.of("ACTION_ASSIGNED","IN_PROGRESS").contains(status))return List.of();
+        if(purpose==FormPurpose.DEFECT_REPORT&&!isReturnedGalleyReport(operatorId,defectId,areaId))return List.of();
+        if(purpose==FormPurpose.REVIEW_DECISION){
+            String areaCode=jdbc.queryForObject("SELECT code FROM cabin_areas_mst WHERE operator_id=? AND id=? AND isactive=1",String.class,operatorId,areaId);
+            if(!"GALLEY".equals(areaCode)||!Set.of("REPORTED","UNDER_REVIEW").contains(status)||reviewDecisionAwaitingCorrection(operatorId,defectId))return List.of();
+        }
         WorkflowStage stage=FormResolutionRules.stageForDefect(purpose,status);
-        return publishedForArea(operatorId,(UUID)defect.get("area_id"),purpose,stage);
+        return publishedForArea(operatorId,areaId,purpose,stage);
+    }
+
+    private boolean defectReportSubmissionAllowed(UUID operatorId,UUID defectId,UUID areaId){
+        boolean alreadySubmitted=Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM operational_form_submissions_dtl WHERE operator_id=? AND defect_id=? AND purpose='DEFECT_REPORT')",Boolean.class,operatorId,defectId));
+        return !alreadySubmitted||isReturnedGalleyReport(operatorId,defectId,areaId);
     }
 
     public FormForArea requireOperationalForm(UUID operatorId,UUID defectId,UUID formId,UUID versionId) {
         FormForArea form=published(operatorId,formId,versionId);
-        return publishedForDefect(operatorId,defectId,form.purpose()).stream()
+        if(form.purpose()==FormPurpose.REVIEW_DECISION)throw new ResponseStatusException(HttpStatus.CONFLICT,"Reviewer decisions must use the authorized decision workflow endpoint.");
+        List<FormForArea> eligible;
+        if(form.purpose()==FormPurpose.DEFECT_REPORT){
+            Map<String,Object> defect=jdbc.query("SELECT area_id,status FROM defects_dtl WHERE operator_id=? AND id=? AND isactive=1",new ColumnMapRowMapper(),operatorId,defectId).stream().findFirst().orElseThrow(()->new ResponseStatusException(HttpStatus.NOT_FOUND,"Defect not found for this organization."));
+            if(!"REPORTED".equals(String.valueOf(defect.get("status")))||!defectReportSubmissionAllowed(operatorId,defectId,(UUID)defect.get("area_id")))throw new ResponseStatusException(HttpStatus.CONFLICT,"This form is not eligible for the defect's current workflow stage.");
+            eligible=publishedForArea(operatorId,(UUID)defect.get("area_id"),FormPurpose.DEFECT_REPORT,WorkflowStage.INITIAL_REPORT);
+        }else eligible=publishedForDefect(operatorId,defectId,form.purpose());
+        return eligible.stream()
             .filter(candidate->candidate.id().equals(formId)&&candidate.versionId().equals(versionId))
             .findFirst().orElseThrow(()->new ResponseStatusException(HttpStatus.CONFLICT,"This form is not eligible for the defect's current workflow stage."));
     }
@@ -303,6 +440,7 @@ public class OperationalFormService {
         if(areaId!=null&&!areaId.equals(form.areaId())) throw new ResponseStatusException(HttpStatus.NOT_FOUND,"Area was not found for this form.");
         FieldDefinition field=findField(form.configuration(),fieldKey);
         if(field==null || field.optionSource()==null) throw new ResponseStatusException(HttpStatus.NOT_FOUND,"Dropdown field was not found.");
+        if(field.binding()==DefectFieldBinding.REVIEW_MAINTENANCE_TEAM)throw new ResponseStatusException(HttpStatus.CONFLICT,"Maintenance-team choices must be loaded from the case-scoped Reviewer decision options endpoint.");
         return optionsFor(operatorId,form.areaId(),field,areaId,componentId);
     }
 
@@ -310,15 +448,23 @@ public class OperationalFormService {
     public FormSubmission submit(UUID operatorId,String actor,UUID defectId,SubmitFormRequest request) {
         auditActor(actor);
         FormForArea form=published(operatorId,request.formId(),request.versionId());
-        Map<String,Object> defect=jdbc.query("SELECT area_id,status FROM defects_dtl WHERE operator_id=? AND id=? AND isactive=1",new ColumnMapRowMapper(),operatorId,defectId).stream().findFirst().orElseThrow(()->new ResponseStatusException(HttpStatus.NOT_FOUND,"Defect was not found for this organization."));
-        if(!form.areaId().equals(defect.get("area_id"))) throw new IllegalArgumentException("The selected form is not assigned to the defect's area.");
+        if(form.purpose()==FormPurpose.REVIEW_DECISION)throw new ResponseStatusException(HttpStatus.CONFLICT,"Reviewer decisions must use the authorized case decision endpoint.");
+        Map<String,Object> defect=jdbc.query("SELECT area_id,status FROM defects_dtl WHERE operator_id=? AND id=? AND isactive=1 FOR UPDATE",new ColumnMapRowMapper(),operatorId,defectId).stream().findFirst().orElseThrow(()->new ResponseStatusException(HttpStatus.NOT_FOUND,"Defect was not found for this organization."));
+        if(!form.areaId().equals(defect.get("area_id"))) throw new IllegalArgumentException("The selected form version is not assigned to the defect's area.");
         FormPurpose purpose=request.purpose()==null?form.purpose():request.purpose();
+        if(purpose==FormPurpose.CORRECTIVE_ACTION)throw new ResponseStatusException(HttpStatus.CONFLICT,"Corrective-action forms must be submitted through the assigned maintenance workflow endpoint.");
         if(purpose!=form.purpose())throw new IllegalArgumentException("The selected form is not configured for the requested purpose.");
         String status=String.valueOf(defect.get("status"));
         WorkflowStage current=FormResolutionRules.stageForDefect(purpose,status);
-        if(form.workflowStage()!=current)throw new ResponseStatusException(HttpStatus.CONFLICT,"The published form is not configured for the defect's current workflow stage.");
+        if(form.workflowStage()!=current)throw new ResponseStatusException(HttpStatus.CONFLICT,"The published form version is not configured for the defect's current workflow stage.");
+        if(purpose==FormPurpose.DEFECT_REPORT&&!defectReportSubmissionAllowed(operatorId,defectId,form.areaId()))throw new ResponseStatusException(HttpStatus.CONFLICT,"A defect report has already been submitted for this case. A new report is accepted only after the Reviewer returns it for correction.");
         Map<String,Object> answers=request.answers()==null?Map.of():request.answers();
         validateAnswers(operatorId,defectId,form,answers);
+        boolean galleyCorrection=purpose==FormPurpose.DEFECT_REPORT&&"REPORTED".equals(status)&&isReturnedGalleyReport(operatorId,defectId,form.areaId());
+        if(galleyCorrection){
+            Map<String,Object> mapped=resolveDefectReport(operatorId,form.areaId(),form.id(),form.versionId(),answers);
+            persistCorrectedGalleyReport(operatorId,defectId,mapped);
+        }
         FormDataSnapshot snapshot=purpose==FormPurpose.DEFECT_REPORT?reportSnapshot(operatorId,defectId,form,answers):null;
         UUID submissionId=UUID.randomUUID();
         jdbc.update("INSERT INTO operational_form_submissions_dtl(id,operator_id,defect_id,form_id,form_version_id,purpose,workflow_stage,submitted_by,snapshot_defect_category,snapshot_component_id,snapshot_condition_id,snapshot_zone,snapshot_row_number,snapshot_seat_reference,snapshot_title,snapshot_description,snapshot_severity_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -332,7 +478,30 @@ public class OperationalFormService {
             }
         }
         audit(operatorId,actor,defectId,"FORM_SUBMITTED","FORM_SUBMISSION",submissionId,"Operational form submitted.",null,Map.of("formId",form.id(),"versionId",form.versionId()));
+        if(galleyCorrection){
+            int changed=jdbc.update("UPDATE defects_dtl SET status='UNDER_REVIEW',updated_at=now(),version=version+1 WHERE operator_id=? AND id=? AND status='REPORTED' AND isactive=1",operatorId,defectId);
+            if(changed!=1)throw new ResponseStatusException(HttpStatus.CONFLICT,"The defect changed while the corrected report was being submitted. Reload and try again.");
+            jdbc.update("INSERT INTO defect_events_dtl(operator_id,defect_id,event_type,from_status,to_status,note,actor_id,entity_type,entity_id,previous_state,new_state) VALUES(?,?,'REPORT_CORRECTED','REPORTED','UNDER_REVIEW','Corrected Galley report submitted for Reviewer decision.',?,'DEFECT',?,jsonb_build_object('status','REPORTED'),jsonb_build_object('status','UNDER_REVIEW','formId',CAST(? AS text),'versionId',CAST(? AS text),'submissionId',CAST(? AS text)))",operatorId,defectId,actor,defectId,form.id(),form.versionId(),submissionId);
+        }
         return submission(operatorId,submissionId);
+    }
+
+    private boolean isReturnedGalleyReport(UUID operatorId,UUID defectId,UUID areaId){
+        String areaCode=jdbc.queryForObject("SELECT code FROM cabin_areas_mst WHERE operator_id=? AND id=? AND isactive=1",String.class,operatorId,areaId);
+        if(!"GALLEY".equals(areaCode))return false;
+        return Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM defect_events_dtl r WHERE r.operator_id=? AND r.defect_id=? AND r.event_type='REVIEW_REJECTED' AND r.occurred_at>(SELECT COALESCE(max(s.submitted_at),'-infinity'::timestamptz) FROM operational_form_submissions_dtl s WHERE s.operator_id=r.operator_id AND s.defect_id=r.defect_id AND s.purpose='DEFECT_REPORT'))",Boolean.class,operatorId,defectId));
+    }
+
+    private boolean reviewDecisionAwaitingCorrection(UUID operatorId,UUID defectId){
+        return Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM defect_events_dtl r WHERE r.operator_id=? AND r.defect_id=? AND r.event_type='REVIEW_REJECTED' AND r.occurred_at >= COALESCE((SELECT max(s.submitted_at) FROM operational_form_submissions_dtl s WHERE s.operator_id=r.operator_id AND s.defect_id=r.defect_id AND s.purpose='DEFECT_REPORT'),'-infinity'::timestamptz))",Boolean.class,operatorId,defectId));
+    }
+
+    private void persistCorrectedGalleyReport(UUID operatorId,UUID defectId,Map<String,Object> mapped){
+        String component=jdbc.queryForObject("SELECT name FROM cabin_components_mst WHERE operator_id=? AND id=? AND isactive=1",String.class,operatorId,mapped.get("componentId"));
+        String condition=jdbc.queryForObject("SELECT c.name FROM component_conditions_mst m JOIN defect_conditions_mst c ON c.operator_id=m.operator_id AND c.id=m.condition_id WHERE m.operator_id=? AND m.component_id=? AND m.condition_id=? AND m.isactive=1 AND c.isactive=1",String.class,operatorId,mapped.get("componentId"),mapped.get("conditionId"));
+        UUID severityId=jdbc.queryForObject("SELECT id FROM defect_severities_mst WHERE operator_id=? AND severity_code=? AND isactive=1",UUID.class,operatorId,mapped.get("severity"));
+        int changed=jdbc.update("UPDATE defects_dtl SET location=?,category=?,zone=?,row_number=?,seat_reference=?,component_id=?,component=?,condition_id=?,condition_name_snapshot=?,title=?,description=?,severity=?,severity_id=?,updated_at=now(),version=version+1 WHERE operator_id=? AND id=? AND status='REPORTED' AND isactive=1",mapped.get("location"),mapped.get("category"),mapped.get("zone"),mapped.get("rowNumber"),mapped.get("seatReference"),mapped.get("componentId"),component,mapped.get("conditionId"),condition,mapped.get("title"),mapped.get("description"),mapped.get("severity"),severityId,operatorId,defectId);
+        if(changed!=1)throw new ResponseStatusException(HttpStatus.CONFLICT,"This report is no longer available for correction.");
     }
 
     public List<FormSubmission> submissions(UUID operatorId,UUID defectId) {
@@ -341,7 +510,7 @@ public class OperationalFormService {
     }
 
     public List<FormSubmission> submissions(UUID operatorId,UUID defectId,String externalUserId,boolean teamScoped,boolean reporterScoped) {
-        String teamVisibility = "EXISTS (SELECT 1 FROM corrective_actions_dtl ca JOIN operator_membership_teams_mst omt ON omt.operator_id=ca.operator_id AND omt.team_name=ca.assigned_team AND omt.external_user_id=? AND omt.isactive=1 JOIN operator_memberships_mst om ON om.operator_id=omt.operator_id AND om.external_user_id=omt.external_user_id AND om.isactive=1 JOIN maintenance_teams_mst mt ON mt.operator_id=omt.operator_id AND mt.name=omt.team_name AND mt.isactive=1 WHERE ca.operator_id=d.operator_id AND ca.defect_id=d.id AND ca.assigned_team=d.assigned_team AND ca.isactive=1 AND ca.status IN ('ASSIGNED','IN_PROGRESS') AND d.status IN ('ACTION_ASSIGNED','IN_PROGRESS'))";
+        String teamVisibility = "EXISTS (SELECT 1 FROM corrective_actions_dtl ca JOIN operator_membership_teams_mst omt ON omt.operator_id=ca.operator_id AND omt.team_name=ca.assigned_team AND omt.external_user_id=? AND omt.isactive=1 JOIN operator_memberships_mst om ON om.operator_id=omt.operator_id AND om.external_user_id=omt.external_user_id AND om.isactive=1 JOIN maintenance_teams_mst mt ON mt.operator_id=omt.operator_id AND mt.name=omt.team_name AND mt.isactive=1 WHERE ca.operator_id=d.operator_id AND ca.defect_id=d.id AND ca.assigned_team=d.assigned_team AND ca.isactive=1 AND ca.status IN ('ASSIGNED','IN_PROGRESS','ON_HOLD') AND d.status IN ('ACTION_ASSIGNED','IN_PROGRESS'))";
         Boolean visible=jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM defects_dtl d WHERE d.operator_id=? AND d.id=? AND d.isactive=1 AND (?=false OR d.reported_by=?) AND (?=false OR "+teamVisibility+"))",Boolean.class,operatorId,defectId,reporterScoped,externalUserId,teamScoped,externalUserId);
         if(!Boolean.TRUE.equals(visible)) throw new ResponseStatusException(HttpStatus.NOT_FOUND,"Defect not found.");
         return submissions(operatorId,defectId);
@@ -405,6 +574,11 @@ public class OperationalFormService {
                 if(!approved.cabinAreaCodes().contains(areaCode))throw new IllegalArgumentException(approved.name()+" is not applicable to the selected cabin area.");
             }
         }
+        if(purpose==FormPurpose.REVIEW_DECISION)validateReviewerDecisionConfiguration(operatorId,formArea,config,publishing);
+        if(purpose==FormPurpose.CLOSURE_APPROVAL){String code=jdbc.queryForObject("SELECT code FROM cabin_areas_mst WHERE operator_id=? AND id=? AND isactive=1",String.class,operatorId,formArea);if(!"GALLEY".equals(code))throw new IllegalArgumentException("Closure Review forms are currently supported only for the Galley area.");ClosureApprovalFormRules.requireValid(config);}
+        if(purpose==FormPurpose.CORRECTIVE_ACTION)MaintenanceActionFormRules.requireValid(config);
+        else if(config.fields().stream().anyMatch(field->field.visibleWhen()!=null)&&purpose!=FormPurpose.CLOSURE_APPROVAL)throw new IllegalArgumentException("Conditional visibility is currently supported only for approved Reviewer Decision fields.");
+        for(FieldDefinition field:config.fields())if(field.requiredWhen()!=null){if(purpose!=FormPurpose.CLOSURE_APPROVAL||field.binding()!=DefectFieldBinding.CLOSURE_REMARK||field.required()||!config.fields().stream().anyMatch(parent->parent.binding()==DefectFieldBinding.CLOSURE_DECISION&&parent.key().equals(field.requiredWhen().fieldKey()))||!"DECLINE".equals(field.requiredWhen().expectedValue()))throw new IllegalArgumentException("Conditional requiredness is supported only for Closure Remarks when Closure Decision is DECLINE.");}
         for(FieldDefinition f:config.fields()) {
             if(f.optionFilter()!=null) {
                 if(f.optionFilter().areaFieldKey()!=null && (!keys.contains(f.optionFilter().areaFieldKey()) || f.key().equals(f.optionFilter().areaFieldKey()))) throw new IllegalArgumentException("The area filter must reference another configured field.");
@@ -434,6 +608,9 @@ public class OperationalFormService {
             case DEFECT_CATEGORIES -> jdbc.query("SELECT id,code,name FROM defect_categories_mst WHERE operator_id=? AND isactive=1 ORDER BY name LIMIT 500",(rs,n)->new FormOption(rs.getObject("id",UUID.class),rs.getString("code"),rs.getString("name")),operatorId);
             case DEFECT_SEVERITIES -> jdbc.query("SELECT id,severity_code AS code,severity_name AS name FROM defect_severities_mst WHERE operator_id=? AND isactive=1 ORDER BY sort_order,severity_code LIMIT 500",(rs,n)->new FormOption(rs.getObject("id",UUID.class),rs.getString("code"),rs.getString("name")),operatorId);
             case GALLEY_SEVERITIES -> {String code=jdbc.queryForObject("SELECT code FROM cabin_areas_mst WHERE operator_id=? AND id=? AND isactive=1",String.class,operatorId,formArea);if(!code.equals("GALLEY"))throw new IllegalArgumentException("Galley severity options are only available for Galley forms.");yield jdbc.query("SELECT id,severity_code AS code,severity_name AS name FROM defect_severities_mst WHERE operator_id=? AND isactive=1 AND severity_code IN ('CRITICAL','MAJOR','MINOR','OBSERVATION') ORDER BY CASE severity_code WHEN 'CRITICAL' THEN 1 WHEN 'MAJOR' THEN 2 WHEN 'MINOR' THEN 3 ELSE 4 END",(rs,n)->new FormOption(rs.getObject("id",UUID.class),rs.getString("code"),rs.getString("name")),operatorId);}
+            case REVIEW_DECISIONS -> {String code=jdbc.queryForObject("SELECT code FROM cabin_areas_mst WHERE operator_id=? AND id=? AND isactive=1",String.class,operatorId,formArea);if(!code.equals("GALLEY"))throw new IllegalArgumentException("Reviewer decision options are only available for Galley forms.");yield List.of(new FormOption(UUID.nameUUIDFromBytes("REVIEW_DECISION:APPROVE".getBytes(java.nio.charset.StandardCharsets.UTF_8)),"APPROVE","Approve"),new FormOption(UUID.nameUUIDFromBytes("REVIEW_DECISION:REJECT".getBytes(java.nio.charset.StandardCharsets.UTF_8)),"REJECT","Reject / Return for Correction"));}
+            case CLOSURE_DECISIONS -> {String code=jdbc.queryForObject("SELECT code FROM cabin_areas_mst WHERE operator_id=? AND id=? AND isactive=1",String.class,operatorId,formArea);if(!code.equals("GALLEY"))throw new IllegalArgumentException("Closure decision options are only available for Galley forms.");yield List.of(new FormOption(UUID.nameUUIDFromBytes("CLOSURE_DECISION:ACCEPT".getBytes(java.nio.charset.StandardCharsets.UTF_8)),"ACCEPT","Accept"),new FormOption(UUID.nameUUIDFromBytes("CLOSURE_DECISION:DECLINE".getBytes(java.nio.charset.StandardCharsets.UTF_8)),"DECLINE","Decline"));}
+            case MAINTENANCE_ACTION_STATUSES -> List.of("WORK_IN_PROGRESS","ON_HOLD","CLOSE_SUBMITTED").stream().map(code->new FormOption(UUID.nameUUIDFromBytes(("MAINTENANCE_ACTION:"+code).getBytes(java.nio.charset.StandardCharsets.UTF_8)),code,switch(code){case "WORK_IN_PROGRESS"->"Work in Progress";case "ON_HOLD"->"On Hold";default->"Close Submitted";})).toList();
             case CABIN_AREAS -> jdbc.query("SELECT id,code,name FROM cabin_areas_mst WHERE operator_id=? AND id=? AND isactive=1",(rs,n)->new FormOption(rs.getObject("id",UUID.class),rs.getString("code"),rs.getString("name")),operatorId,formArea);
             // Compatibility for already-published immutable definitions: old CABIN_ZONES
             // option sources resolve against cabin areas and never query the retired master.
@@ -450,9 +627,17 @@ public class OperationalFormService {
         };
     }
 
+    private void validateReviewerDecisionConfiguration(UUID operatorId,UUID formArea,FormConfiguration config,boolean publishing){
+        String areaCode=jdbc.queryForObject("SELECT code FROM cabin_areas_mst WHERE operator_id=? AND id=? AND isactive=1",String.class,operatorId,formArea);
+        if(!"GALLEY".equals(areaCode))throw new IllegalArgumentException("Reviewer Decision forms are supported only for the Galley area.");
+        if(!publishing)return;
+        ReviewerDecisionFormRules.requireValid(config);
+    }
+
     public UUID formArea(UUID operatorId,UUID formId) { return (UUID)requireForm(operatorId,formId).get("area_id"); }
     private FormPurpose formPurpose(UUID operatorId,UUID formId) { return FormPurpose.valueOf(String.valueOf(requireForm(operatorId,formId).get("purpose"))); }
-    public Map<String,Object> requireForm(UUID operatorId,UUID id) { return jdbc.query("SELECT * FROM operational_forms_dtl WHERE operator_id=? AND id=?",new ColumnMapRowMapper(),operatorId,id).stream().findFirst().orElseThrow(()->new ResponseStatusException(HttpStatus.NOT_FOUND,"Form was not found for this organization.")); }
+    public Map<String,Object> requireForm(UUID operatorId,UUID id) { return jdbc.query("SELECT f.*,a.name AS area_name FROM operational_forms_dtl f JOIN cabin_areas_mst a ON a.operator_id=f.operator_id AND a.id=f.area_id WHERE f.operator_id=? AND f.id=?",new ColumnMapRowMapper(),operatorId,id).stream().findFirst().orElseThrow(()->new ResponseStatusException(HttpStatus.NOT_FOUND,"Form was not found for this organization.")); }
+    private Map<String,Object> lockForm(UUID operatorId,UUID id) { return jdbc.query("SELECT f.*,a.name AS area_name FROM operational_forms_dtl f JOIN cabin_areas_mst a ON a.operator_id=f.operator_id AND a.id=f.area_id WHERE f.operator_id=? AND f.id=? FOR UPDATE OF f",new ColumnMapRowMapper(),operatorId,id).stream().findFirst().orElseThrow(()->new ResponseStatusException(HttpStatus.NOT_FOUND,"Form was not found for this organization.")); }
 
     private void validateAnswers(UUID operatorId,UUID defectId,FormForArea form,Map<String,Object> answers) {
         Map<String,FieldDefinition> fields=new LinkedHashMap<>(); for(FieldDefinition f:form.configuration().fields()) if(f.type()!=FieldType.SECTION) fields.put(f.key(),f);
@@ -532,12 +717,12 @@ public class OperationalFormService {
     private void validateSafePattern(String pattern) {if(pattern==null)return;if(pattern.length()>128||pattern.contains("(?")||pattern.matches(".*\\\\[1-9].*")||pattern.matches(".*\\([^)]*[+*][^)]*\\)[+*{].*"))throw new IllegalArgumentException("Validation patterns must be simple, bounded expressions without backreferences or nested quantifiers.");try{Pattern.compile(pattern);}catch(Exception ex){throw new IllegalArgumentException("The configured validation pattern is invalid.");}}
     private LocalDate parseDateRule(String value){if(value==null||value.isBlank())return null;try{return LocalDate.parse(value);}catch(Exception ex){throw new IllegalArgumentException("Date limits must use YYYY-MM-DD.");}}
     private FieldDefinition findField(FormConfiguration configuration,String key){return configuration.fields().stream().filter(field->field.key().equals(key)).findFirst().orElse(null);}
-    private FormVersion requireVersion(UUID operatorId,UUID formId,UUID versionId){return jdbc.query("SELECT * FROM operational_form_versions_dtl WHERE operator_id=? AND form_id=? AND id=?",(rs,n)->mapVersion(versionId,formId,rs.getInt("version_number"),rs.getString("status"),rs.getString("fields_json"),rs.getString("created_by"),rs.getTimestamp("created_at").toInstant(),rs.getString("published_by"),rs.getTimestamp("published_at")==null?null:rs.getTimestamp("published_at").toInstant()),operatorId,formId,versionId).stream().findFirst().orElseThrow(()->new ResponseStatusException(HttpStatus.NOT_FOUND,"Form version not found for this organization."));}
+    private FormVersion requireVersion(UUID operatorId,UUID formId,UUID versionId){return jdbc.query("SELECT * FROM operational_form_versions_dtl WHERE operator_id=? AND form_id=? AND id=?",(rs,n)->mapVersion(versionId,formId,rs.getInt("version_number"),rs.getString("status"),rs.getString("fields_json"),rs.getString("created_by"),rs.getTimestamp("created_at").toInstant(),rs.getString("published_by"),rs.getTimestamp("published_at")==null?null:rs.getTimestamp("published_at").toInstant(),rs.getString("form_name"),rs.getObject("area_id",UUID.class),rs.getString("purpose"),rs.getString("workflow_stage")),operatorId,formId,versionId).stream().findFirst().orElseThrow(()->new ResponseStatusException(HttpStatus.NOT_FOUND,"Form version not found for this organization."));}
     private FormSummary summary(java.sql.ResultSet rs)throws java.sql.SQLException{return new FormSummary(rs.getObject("id",UUID.class),rs.getString("form_key"),rs.getString("name"),rs.getObject("area_id",UUID.class),rs.getString("area_name"),FormPurpose.valueOf(rs.getString("purpose")),WorkflowStage.valueOf(rs.getString("workflow_stage")),rs.getInt("isactive"),nullableInt(rs,"published_version"),rs.getObject("published_version_id",UUID.class),nullableInt(rs,"draft_version"),rs.getObject("draft_version_id",UUID.class),rs.getTimestamp("updated_at").toInstant());}
 
-    private FormForArea formForArea(java.sql.ResultSet rs)throws java.sql.SQLException{return new FormForArea(rs.getObject("id",UUID.class),rs.getString("form_key"),rs.getString("name"),rs.getObject("area_id",UUID.class),FormPurpose.valueOf(rs.getString("purpose")),WorkflowStage.valueOf(rs.getString("workflow_stage")),rs.getObject("version_id",UUID.class),rs.getInt("version_number"),parseConfiguration(rs.getString("fields_json")));}
+    private FormForArea formForArea(java.sql.ResultSet rs)throws java.sql.SQLException{return new FormForArea(rs.getObject("id",UUID.class),rs.getString("form_key"),rs.getString("form_name"),rs.getObject("version_area_id",UUID.class),FormPurpose.valueOf(rs.getString("version_purpose")),WorkflowStage.valueOf(rs.getString("version_workflow_stage")),rs.getObject("version_id",UUID.class),rs.getInt("version_number"),parseConfiguration(rs.getString("fields_json")));}
 
-    private FormVersion mapVersion(UUID id,UUID formId,int number,String status,String fields,String createdBy,Instant createdAt,String publishedBy,Instant publishedAt){return new FormVersion(id,formId,number,status,parseConfiguration(fields),createdBy,createdAt,publishedBy,publishedAt);}
+    private FormVersion mapVersion(UUID id,UUID formId,int number,String status,String fields,String createdBy,Instant createdAt,String publishedBy,Instant publishedAt,String formName,UUID areaId,String purpose,String stage){return new FormVersion(id,formId,number,status,parseConfiguration(fields),createdBy,createdAt,publishedBy,publishedAt,formName,areaId,FormPurpose.valueOf(purpose),WorkflowStage.valueOf(stage));}
     private FormConfiguration parseConfiguration(String json){try{return mapper.readValue(json,FormConfiguration.class);}catch(Exception ex){throw new IllegalStateException("Stored form configuration is invalid.",ex);}}
     private String json(Object value){try{return mapper.writeValueAsString(value);}catch(JsonProcessingException ex){throw new IllegalStateException("Form configuration could not be serialized.",ex);}}
     private Map<String,Object> readMap(String json){try{return mapper.readValue(json,mapper.getTypeFactory().constructMapType(LinkedHashMap.class,String.class,Object.class));}catch(Exception ex){throw new IllegalStateException("Stored form answers could not be read.",ex);}}
