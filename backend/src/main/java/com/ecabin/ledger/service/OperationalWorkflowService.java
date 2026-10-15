@@ -171,16 +171,20 @@ public class OperationalWorkflowService {
         if (!from.equals("APPROVAL_REQUIRED")) throw new IllegalStateException("The defect is not awaiting closure approval.");
         String areaCode=jdbc.query("SELECT a.code FROM defects_dtl d JOIN cabin_areas_mst a ON a.operator_id=d.operator_id AND a.id=d.area_id WHERE d.operator_id=? AND d.id=?",rs->rs.next()?rs.getString(1):null,organizationId,defectId);
         String submittedDecision=request.decision().trim().toUpperCase(java.util.Locale.ROOT);
-        if("GALLEY".equals(areaCode)&&!Set.of("ACCEPT","DECLINE").contains(submittedDecision))throw new IllegalArgumentException("Decision must be ACCEPT or DECLINE.");
+        if(!Set.of("ACCEPT","DECLINE").contains(submittedDecision))throw new IllegalArgumentException("Decision must be ACCEPT or DECLINE.");
         String decision=ClosureDecisionRules.normalize(submittedDecision);
         String reason=ClosureDecisionRules.validateReason(decision,request.reason());
+        boolean hasForm=request.formId()!=null||request.versionId()!=null;
+        if((request.formId()==null)!=(request.versionId()==null))throw new IllegalArgumentException("Select both the published form and its version.");
         UUID closureTeamId=null;
-        if("GALLEY".equals(areaCode)){
+        if("GALLEY".equals(areaCode)||hasForm){
             if(closureAccess==null||forms==null)throw new AccessDeniedException("Closure review is not configured for this application instance.");
             closureTeamId=closureAccess.requireEligibleReviewer(organizationId,actorId);
-            if(request.formId()==null||request.versionId()==null)throw new IllegalArgumentException("Select the published Galley Closure Review form before submitting a decision.");
-            FormForArea selected=forms.published(organizationId,request.formId(),request.versionId());
-            if(selected.purpose()!=FormPurpose.CLOSURE_APPROVAL||selected.workflowStage()!=WorkflowStage.APPROVAL_REQUIRED||!"GALLEY".equals(jdbc.queryForObject("SELECT code FROM cabin_areas_mst WHERE operator_id=? AND id=? AND isactive=1",String.class,organizationId,selected.areaId())))throw new IllegalArgumentException("The selected published form is not eligible for Galley closure review.");
+            if(!hasForm)throw new IllegalArgumentException("Select the published Closure Review form before submitting a decision.");
+            UUID defectAreaId=jdbc.query("SELECT area_id FROM defects_dtl WHERE operator_id=? AND id=? AND isactive=1",rs->rs.next()?rs.getObject(1,UUID.class):null,organizationId,defectId);
+            if(defectAreaId==null)throw new ResponseStatusException(HttpStatus.NOT_FOUND,"Defect not found.");
+            FormForArea selected=forms.published(organizationId,request.formId(),request.versionId(),defectAreaId);
+            if(selected.purpose()!=FormPurpose.CLOSURE_APPROVAL||selected.workflowStage()!=WorkflowStage.APPROVAL_REQUIRED)throw new IllegalArgumentException("The selected published form is not eligible for closure review.");
             ClosureApprovalFormRules.requireValid(selected.configuration());
             boolean eligible=forms.publishedForDefect(organizationId,defectId,FormPurpose.CLOSURE_APPROVAL).stream().anyMatch(form->form.id().equals(selected.id())&&form.versionId().equals(selected.versionId()));
             if(!eligible)throw new ResponseStatusException(HttpStatus.CONFLICT,"The selected closure form version is stale or not eligible for this defect.");

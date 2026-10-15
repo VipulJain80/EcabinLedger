@@ -106,3 +106,10 @@
 .report-system-context{display:flex;flex-wrap:wrap;gap:12px;margin:14px 0;padding:12px 14px;border:1px solid #e2e8e2;border-radius:10px;background:#f7faf7}
 .report-system-context span{display:grid;gap:3px;color:#77837a;font-size:11px}
 .report-system-context b{color:#34443a;font-size:13px}
+.app-logo-button{padding:0;border:0;background:transparent;cursor:pointer}
+
+.form-area-choice-list { display: flex; flex-wrap: wrap; gap: .55rem .9rem; margin: .45rem 0; }
+.form-area-choice-list label { display: inline-flex; align-items: center; gap: .4rem; width: auto; min-width: 0; }
+.form-area-choice-list input { width: auto; }
+.master-form-content fieldset { min-width: 0; border: 1px solid var(--line, #dce5df); border-radius: 12px; padding: .8rem 1rem; }
+.master-form-content fieldset legend { padding: 0 .25rem; font-weight: 600; }

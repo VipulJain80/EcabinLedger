@@ -7,13 +7,13 @@ import com.ecabin.ledger.api.FormModels.FormConfiguration;
 import com.ecabin.ledger.api.FormModels.OptionSource;
 import java.util.List;
 
-/** Validates the exact, workflow-controlled fields for the Galley closure decision form. */
+/** Validates the exact, workflow-controlled fields for a cabin-area closure decision form. */
 public final class ClosureApprovalFormRules {
     private ClosureApprovalFormRules() {}
 
     public static void requireValid(FormConfiguration configuration) {
         List<FieldDefinition> fields=configuration.fields().stream().filter(f->f.type()!=FieldType.SECTION).toList();
-        if(fields.size()!=2)throw new IllegalArgumentException("A Galley Closure Review form must contain exactly Closure Decision and Remarks.");
+        if(fields.size()!=2)throw new IllegalArgumentException("A Closure Review form must contain exactly Closure Decision and Remarks.");
         FieldDefinition decision=fields.stream().filter(f->f.binding()==DefectFieldBinding.CLOSURE_DECISION).findFirst().orElse(null);
         FieldDefinition remark=fields.stream().filter(f->f.binding()==DefectFieldBinding.CLOSURE_REMARK).findFirst().orElse(null);
         if(decision==null||remark==null)throw new IllegalArgumentException("Configure the approved Closure Decision and Closure Remarks bindings exactly once.");

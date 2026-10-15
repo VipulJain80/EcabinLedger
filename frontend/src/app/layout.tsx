@@ -4,6 +4,8 @@ import "./globals.css";
 import "./details.css";
 import "./login.css";
 import "./configuration.css";
+import "./tailwind.css";
+import "./responsive.css";
 import "sweetalert2/dist/sweetalert2.min.css";
 import QueryProvider from "@/common/query/QueryProvider";
 

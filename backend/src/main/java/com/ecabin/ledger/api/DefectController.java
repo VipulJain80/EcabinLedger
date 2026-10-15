@@ -96,7 +96,7 @@ public class DefectController {
             throw new org.springframework.web.server.ResponseStatusException(HttpStatus.CONFLICT, "No published operational form is configured for the selected cabin area.");
         if (request.aircraftId() == null || request.formId() == null || request.formVersionId() == null)
             throw new IllegalArgumentException("Select an aircraft and a published form version for the chosen cabin area.");
-        var selectedForm = forms.published(user.organizationId(), request.formId(), request.formVersionId());
+        var selectedForm = forms.published(user.organizationId(), request.formId(), request.formVersionId(),request.areaId());
         if (!request.areaId().equals(selectedForm.areaId()))
             throw new IllegalArgumentException("The selected published form is not configured for the chosen cabin area.");
         var mapped=forms.resolveDefectReport(user.organizationId(),request.areaId(),request.formId(),request.formVersionId(),request.formAnswers());

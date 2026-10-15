@@ -393,3 +393,374 @@ Verification actually executed:
 - `git diff --check` — passed after the final documentation/log changes.
 
 Limitations: `PostgresMigrationSmokeTest` (1 test) and `LocalPostgresOperationalIntegrationTest` (15 tests) were skipped because opt-in PostgreSQL verification was not enabled. `TenantIsolationPostgresTest` (1 Testcontainers test) was skipped because Docker is unavailable. V37 was not applied to a database in this task, and no browser-based visual inspection was performed. Run the opt-in smoke test only after confirming that the configured local development database/schema is the intended target.
+
+2026-10-14 — Added configurable stable-URL application shell
+
+Implementation: moved the existing authenticated application page to `/loginhome`; internal screen changes, selected aircraft/defects/areas, dialogs, and Form Master filters stay in React state and no longer write screen identifiers, IDs, filters, query strings, hashes, or internal routes to browser history. Added `/login`, `/loginhome`, and `/logout` under a validated build-time Next.js `basePath`, with `/` redirecting to the configured login URL. The configured prefix applies to frontend routes/assets only; API requests continue using the existing unprefixed `NEXT_PUBLIC_API_BASE_URL` and `/api/v1`. The local development login retains its existing `/api/dev/token` flow and stores the short-lived token in tab-scoped session storage so refresh can revalidate it. Expired/revoked API sessions replace the current page with login. The logout route clears the browser-held local token. The existing gateway adapter exposes token retrieval only and no upstream logout/session-revocation contract is available. Added backend startup rejection when `local-auth` is combined with `uat`, `staging`, `prod`, or `production`.
+
+Files created:
+- `frontend/src/app/login/page.tsx` — separate existing local development sign-in and enterprise gateway guidance.
+- `frontend/src/app/loginhome/page.tsx` — persistent authenticated shell containing the existing application screens and workflow components.
+- `frontend/src/app/logout/page.tsx` — clear local browser credentials and redirect to login.
+- `frontend/src/common/auth/localSession.ts` — development-only session-storage token handling and shared base-path value.
+- `frontend/appBasePath.mjs` — validate configurable one-segment prefixes.
+- `frontend/appBasePath.test.mjs` — prefix validation test coverage.
+- `frontend/appRouting.test.mjs` — route structure and URL-stability regression checks.
+- `backend/src/test/java/com/ecabin/ledger/config/LocalAuthConfigTest.java` — local profile acceptance and deployed-profile rejection checks.
+
+Files modified:
+- `frontend/src/app/page.tsx` — root route redirects to login.
+- `frontend/next.config.ts` — apply validated `APP_BASE_PATH`, configure the root redirect, remove the aircraft URL rewrite, and pass the compiled prefix to the client.
+- `frontend/src/app/configuration.tsx` — keep configuration filters/sort state in React rather than URL/history.
+- `frontend/src/app/globals.css` — preserve the logo button's existing appearance after replacing its fragment link with state navigation.
+- `frontend/src/app/login.css` — remove the root-relative login image; its URL now includes the configured application prefix.
+- `backend/src/main/java/com/ecabin/ledger/config/LocalAuthConfig.java` — reject local-auth combined with deployed profiles.
+- `.env.example` — document the build-time `APP_BASE_PATH` default.
+- `README.md` — document routes, basePath build requirements, URL-state behavior, local token lifecycle, and upstream logout limitation.
+- `updatesfiles.me` — append this cumulative implementation record.
+
+No database/API route or schema changes were made. Existing Spring authorization, tenant checks, business screens, request DTOs, and workflow APIs remain in use. No existing published form or database record was modified.
+
+Verification actually executed:
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && node --test appBasePath.test.mjs appRouting.test.mjs` — passed, 5 tests.
+- `cd frontend && pnpm build` — passed; generated routes were `/`, `/login`, `/loginhome`, and `/logout` (plus Next's built-in not-found route), using the default `/ecabin` prefix.
+- `cd frontend && APP_BASE_PATH=/fleetcare pnpm build` — passed; `.next/routes-manifest.json` confirmed `basePath: /fleetcare` and `/` → `/fleetcare/login`.
+- `cd backend && ./mvnw -Dtest=LocalAuthConfigTest test` — passed, 2 tests.
+- `cd backend && ./mvnw clean test` — passed, 98 tests, 0 failures, 0 errors, 17 skipped.
+- `cd backend && ./mvnw clean package` — passed, 98 tests, 0 failures, 0 errors, 17 skipped; executable JAR packaged.
+- `git diff --check` — passed.
+
+Skipped checks and limitations: the PostgreSQL smoke test (1) and local PostgreSQL integration tests (15) were skipped because database verification was not enabled. The Testcontainers tenant-isolation test (1) was skipped because Docker is unavailable. HTTP/browser interaction testing could not be run: starting the Next server in this execution environment failed with `EPERM` when binding to localhost. No upstream gateway logout/revocation endpoint is implemented or documented, and stateless bearer tokens are not server-revocable through the current application contract; the app clears its own local browser-held token and relies on token expiry and backend authorization.
+2026-10-15 — Added versioned multi-area mappings for operational forms
+
+Implemented Form Master support for mapping a form to multiple active cabin areas. V38 adds tenant-scoped mutable form-area rows and per-version area snapshots, backfills both from existing single-area records, and blocks edits to published snapshots. Create, duplicate, and mapping-update requests accept `areaIds`; mapping choices expose existing selections; Form Master displays and edits multiple area selections. Saving a changed mapping creates/updates a draft and preserves existing published applicability until publication. All form discovery and selected-version checks now resolve through the exact published version's area snapshot, including report, options, submission, upload, maintenance, and Galley closure paths. Mapping mutations validate active tenant areas and purpose compatibility and append the existing audit event. README and `docs/gap-analysis.md` document the data model and API.
+
+Files created: `backend/src/main/resources/db/migration/V38__multi_area_operational_forms.sql` adds the two relation tables, data backfill, indexes, tenant-composite foreign keys, and published snapshot immutability trigger.
+Files modified: `backend/src/main/java/com/ecabin/ledger/api/FormModels.java` adds backward-compatible `areaIds` request/response fields; `backend/src/main/java/com/ecabin/ledger/api/OperationalFormsController.java` accepts mapping filters and requested area for definition lookups; `backend/src/main/java/com/ecabin/ledger/api/DefectController.java`, `backend/src/main/java/com/ecabin/ledger/service/MaintenanceActionService.java`, and `backend/src/main/java/com/ecabin/ledger/service/OperationalWorkflowService.java` resolve selected forms against the actual case area; `backend/src/main/java/com/ecabin/ledger/service/OperationalFormService.java` validates and persists multi-area mappings and resolves published snapshots; `backend/src/test/java/com/ecabin/ledger/service/OperationalFormServiceTest.java` covers tenant/area snapshot query behavior and mapping reassignment; `backend/src/test/java/com/ecabin/ledger/service/PostgresMigrationSmokeTest.java` includes the new tables and migration in smoke expectations; `frontend/src/common/configuration/FormMasterPage.tsx` adds multi-area creation/remapping and area-list display; `frontend/src/common/forms/OperationalFormRenderer.tsx` requests the definition for the selected area; `frontend/src/app/globals.css` styles multi-area choices; `README.md` and `docs/gap-analysis.md` document the feature.
+
+Verification: implementation and documentation reviewed. Backend/frontend checks are pending in this entry until their results are recorded below. PostgreSQL migration execution has not been established; the V38 migration must be applied through the configured Flyway process before the updated application uses the new relations. Existing published configurations are backfilled from the version-area metadata available at migration time. No live database changes were performed by this entry.
+
+Verification update (2026-10-15): `cd backend && ./mvnw clean test` passed (100 tests, 0 failures/errors, 17 skipped); the 1 PostgreSQL migration smoke test and 15 local PostgreSQL tests were skipped because database verification was not enabled, and the Testcontainers isolation test was skipped because Docker is unavailable. `cd backend && ./mvnw package` passed (100 tests, 0 failures/errors, 17 skipped; executable JAR packaged). `cd frontend && pnpm lint && pnpm build` passed. `git diff --check` passed. V38 has not been applied to PostgreSQL in this run, so SQL runtime validation remains outstanding.
+
+PostgreSQL verification follow-up (2026-10-15): The user's run successfully applied V38 but exposed a smoke-test assertion error: `information_schema.triggers` reports the single `INSERT OR UPDATE OR DELETE` trigger in three rows. Updated the smoke test to count distinct trigger names. With the local datasource environment variables configured, `ECABIN_DB_VERIFY=true ./mvnw -Dtest=PostgresMigrationSmokeTest test` passed against `postgres` / `ecabin_ledger`: 1 test passed; Flyway validated 39 migrations and confirmed schema version 38 is up to date. V38 is now runtime-verified on this local database. PostgreSQL 18.6 produced Flyway's compatibility warning (the bundled Flyway version officially supports through PostgreSQL 17).
+
+2026-10-15 — Consolidated Form Master rename, remap, and duplicate actions
+
+Replaced the separate Rename, Remap, and Duplicate entry points with one row-level **Manage** button and a responsive tabbed Manage Form dialog. The operations continue to call their existing tenant-scoped APIs, preserving server-side `ADMINISTER_ORGANIZATION` enforcement, rename/remap audit reasons, immutable published-version mappings, and independent draft duplication. Remapping continues to save a draft mapping snapshot; the published mapping is unchanged until that draft is published. Duplicate supports multi-area selection and requires an explicit source version when no published version exists. The actions remain grouped in the Manage Forms modal.
+
+Files modified:
+- `frontend/src/common/configuration/FormMasterPage.tsx` — added the initial Manage dialog and tabs, consolidated existing forms and API calls, retained unrelated row workflows, and removed separate Rename/Remap/Duplicate dialogs/actions.
+- `frontend/src/app/configuration.css` — added responsive tab, form, and scroll styling for the Manage dialog.
+- `README.md` — documented the consolidated actions and preserved server/data behavior.
+
+No database migration was added by this change. Initial verification: `cd frontend && pnpm lint` passed; `cd frontend && pnpm build` passed (Next.js production compilation and TypeScript checks); `git diff --check` passed. No browser-based interaction test was run.
+
+2026-10-15 — Expanded Form Master Manage Forms workflow
+
+Extended the single row-level **Manage Forms** modal with Overview, Mapping, Versions, and Actions tabs. Version history shows source version details and an inline preview of the exact selected definition. Published versions can be restored only by creating a new draft; the published version and pointer remain unchanged. Replacing an existing draft requires explicit confirmation and a matching current draft ID to prevent replacing a draft changed by another session. Drafts with submission or attachment references are protected. Restored mapping/version events record actor and reason through the existing append-only audit mechanism. Operational form-resolution errors no longer direct end users to Form Master or expose publication setup guidance.
+
+Files modified for this change:
+- `backend/src/main/java/com/ecabin/ledger/api/FormModels.java` — added the restore request model and explicit draft replacement fields.
+- `backend/src/main/java/com/ecabin/ledger/api/OperationalFormsController.java` — added the tenant/admin-authorized published-version restore POST endpoint.
+- `backend/src/main/java/com/ecabin/ledger/service/OperationalFormService.java` — implemented transactional restoration into a fresh draft, conflict checks, reference protection, mapping snapshot handling, and audit events; made runtime resolution messages generic.
+- `backend/src/main/java/com/ecabin/ledger/service/FormMasterMutationRules.java` — added explicit existing-draft replacement rule.
+- `backend/src/test/java/com/ecabin/ledger/service/FormMasterMutationRulesTest.java` — covered draft replacement confirmation behavior.
+- `frontend/src/common/configuration/FormMasterPage.tsx` — added overview, mapping, version history, exact-version preview, restore-as-new-draft flow, and consolidated action controls.
+- `frontend/src/common/configuration/formMasterVersionRules.ts` — added testable rules for version restore availability, empty-draft preview, current published state, and deletion eligibility.
+- `frontend/src/common/configuration/formMasterVersionRules.test.mjs` — covered the shared version-state rules.
+- `frontend/src/app/configuration.css` — styled the responsive tabs, version list, and inline preview.
+- `frontend/src/common/forms/OperationalFormRenderer.tsx` — replaced publication configuration detail shown to reporters with a generic unavailable-form message.
+- `frontend/src/common/forms/defectReportMapping.ts` and `frontend/src/common/forms/defectReportMapping.test.mjs` — made binding guidance accurate for draft publication and adjusted assertions.
+- `README.md` — documented Manage Forms behavior and restore API/security/version semantics.
+- `updatesfiles.me` — appended this implementation record.
+
+No database migration or new table was added. The restore API reuses existing form version, mapping snapshot, and audit storage. Backend authorization remains `ADMINISTER_ORGANIZATION` with server-resolved tenant scope; no permission grants were changed. Frontend and backend automated checks actually run: `cd backend && ./mvnw clean test` passed (101 tests, 0 failures, 0 errors, 17 skipped); `cd backend && ./mvnw clean package` passed with the same test totals and packaged the executable JAR; `cd frontend && pnpm lint` passed; `cd frontend && pnpm build` passed; `cd frontend && node --test src/common/configuration/formMasterVersionRules.test.mjs` passed (3 tests); `git diff --check` passed. The skipped backend checks include PostgreSQL-dependent integration/smoke tests because database verification was not enabled and a Docker/Testcontainers test because Docker is unavailable. No browser interaction test was run. The new restore transaction was compile- and unit-suite-verified but has not been executed against PostgreSQL in this run.
+
+2026-10-15 — Simplified Form Master version column values
+
+Removed the redundant `PUBLISHED ·` and `DRAFT ·` prefixes from the version table cells. The **Published version** and **Draft version** column headings already convey the status, so cells now show only `vN` or an em dash when absent. Updated README's UI description to match.
+
+Files modified: `frontend/src/common/configuration/FormMasterPage.tsx` (render concise version values), `README.md` (document the clarified table behavior), and `updatesfiles.me` (append this entry). Verification after the UI change: `cd frontend && pnpm lint` passed; `cd frontend && pnpm build` passed; `cd frontend && node --test src/common/configuration/formMasterVersionRules.test.mjs` passed (3 tests). The existing test warning about the package's unspecified module type remains; no browser visual inspection was run.
+
+2026-10-15 — Fixed Manage Forms modal scrolling
+
+Constrained the Manage Forms dialog to a viewport-relative height so the flex layout has a bounded scroll area. The tab content now scrolls independently while the heading, tab bar, and footer remain accessible; mobile uses the available dynamic viewport height and safe-area padding. Updated the README description.
+
+Files modified: `frontend/src/app/configuration.css` (viewport-bound dialog and mobile sizing), `README.md` (document scroll behavior), and `updatesfiles.me` (this entry). Verification: `cd frontend && pnpm lint` passed; `cd frontend && pnpm build` passed; `git diff --check` passed. No browser-based visual inspection was run.
+
+2026-10-15 — Investigated Form Master `actionsFor` runtime error
+
+The reported development runtime stack showed an obsolete `actionsFor` JSX block from an earlier compiled Form Master module. The current `frontend/src/common/configuration/FormMasterPage.tsx` contains no `actionsFor` reference, and the current frontend source passes lint and production build. No application-code workaround was added because the reported symbol is absent from the current source; restarting the existing Next.js development server is needed to reload its stale Turbopack module graph. Added this troubleshooting guidance to README.
+
+Files modified: `README.md` (document stale development bundle recovery) and `updatesfiles.me` (this investigation record). Verification: `cd frontend && pnpm lint` passed; `cd frontend && pnpm build` passed; `rg -n "actionsFor" frontend/src` returned no matches. A live browser/server restart could not be performed from this workspace session.
+
+2026-10-15 — Removed search from Form Master area mapping
+
+Removed the area search control from Manage Forms → Mapping and display all active cabin areas directly as selectable checkboxes. Search remains available in create/duplicate flows where area lists are configurable separately. Updated README to match.
+
+Files modified: `frontend/src/common/configuration/FormMasterPage.tsx` (remove mapping-only search and render the full active-area list), `README.md` (document the mapping control), and `updatesfiles.me` (this entry). Verification: `cd frontend && pnpm lint` passed; `cd frontend && pnpm build` passed; `git diff --check` passed. No browser interaction test was run.
+
+2026-10-15 — Made the Form Master Manage Forms modal scrollable and added draft-only deletion.
+
+Implementation: The Manage Forms dialog now uses a constrained grid layout with a dedicated vertically scrollable content region, so long version history and mapping/actions content can be reached on desktop and mobile while the header and close controls remain visible. In Manage Forms → Versions, each DRAFT now has a Delete Draft action. The inline confirmation requires an audit reason, warns that only the unpublished draft will be removed, and refreshes version history after success. The backend POST endpoint uses the authenticated organization administrator, locks the tenant-owned form and version, rejects published or otherwise referenced versions, removes only the draft, and appends a FORM_DRAFT_DISCARDED event. No migration was required.
+
+Files modified for this change:
+- frontend/src/app/configuration.css — constrain the Manage Forms modal and assign scrolling to its content region.
+- frontend/src/common/configuration/FormMasterPage.tsx — add the draft deletion interaction, reason, confirmation, API call, loading/error/success handling, and modal dismissal guards.
+- backend/src/main/java/com/ecabin/ledger/service/FormMasterMutationRules.java — enforce draft-only, non-published-pointer deletion.
+- backend/src/main/java/com/ecabin/ledger/service/OperationalFormService.java — perform tenant-scoped, locked, reference-checked draft deletion and append-only audit logging.
+- backend/src/main/java/com/ecabin/ledger/api/OperationalFormsController.java — expose the ADMINISTER_ORGANIZATION-protected POST endpoint.
+- backend/src/test/java/com/ecabin/ledger/service/FormMasterMutationRulesTest.java — cover allowed draft deletion and rejection of published/current pointer versions.
+- backend/src/test/java/com/ecabin/ledger/api/OperationalFormsControllerTest.java — verify only organization administrators can invoke draft deletion and that tenant/actor identity comes from the authenticated principal.
+- README.md — document the route, scroll behavior, and draft deletion protections.
+- updatesfiles.me — append this implementation record.
+
+Verification executed on 2026-10-15:
+- `cd backend && ./mvnw test` — passed: 102 tests, 0 failures, 0 errors, 17 skipped (before adding the final controller authorization assertions). PostgreSQL verification and Testcontainers-dependent tests were skipped because the required local database configuration and Docker environment were unavailable.
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && pnpm build` — passed, including TypeScript checks and static generation.
+- `cd backend && ./mvnw -Dtest=OperationalFormsControllerTest,FormMasterMutationRulesTest test` — passed: 8 tests, 0 failures, 0 errors, 0 skipped.
+- `git diff --check` — passed.
+
+Remaining limitation: drafts referenced by submissions or attachments cannot be deleted and receive a conflict response. The Manage Forms modal was verified by source/style review; interactive browser visual verification was not performed.
+
+2026-10-15 — Added Tailwind CSS 4 and responsive layout hardening
+
+The frontend now has Tailwind CSS 4.3 installed as an additive utility layer. The CSS entry point imports only theme and utility layers, omitting Preflight so existing global styles, controls, design tokens, fonts, and component appearance remain authoritative. Its source paths cover the App Router and shared frontend components, and the theme maps existing Montserrat/color tokens. Existing CSS architecture and breakpoints were retained. Shared DataTable wrappers now have min-width and max-width constraints so they can shrink within grid/flex parents while preserving their own horizontal scrolling. Added narrow-screen-only shell heading, table footer, and profile/header wrapping protections; desktop rules are unchanged. No backend, API, business behavior, or permissions changed.
+
+Files created: `frontend/postcss.config.mjs` (Tailwind PostCSS integration), `frontend/src/app/tailwind.css` (utility-only Tailwind entry with existing design-token mappings), and `frontend/src/app/responsive.css` (focused narrow-screen layout safeguards).
+Files modified: `frontend/package.json` and `frontend/pnpm-lock.yaml` (add Tailwind CSS 4.3.3 and its PostCSS plugin without upgrading Next/React), `frontend/src/app/layout.tsx` (load the two CSS additions after the existing stylesheets), `frontend/src/common/tables/DataTable.tsx` (constrain the shared scroll wrapper), `README.md` (document the styling architecture), and `updatesfiles.me` (append this record).
+
+Verification executed on 2026-10-15:
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && node --test $(rg --files src appRouting.test.mjs appBasePath.test.mjs | rg '\\.test\\.mjs$')` — passed: 33 tests, 0 failures (the existing Node module-type performance warnings remain).
+- `cd frontend && NEXT_TELEMETRY_DISABLED=1 pnpm exec next build --webpack` — passed; production compilation, TypeScript, and static generation completed.
+- `cd frontend && NEXT_TELEMETRY_DISABLED=1 pnpm build` — did not complete: Next.js 16.3.3's default Turbopack build remained at “Creating an optimized production build ...” for 30 seconds with no diagnostic output; it was interrupted. This is not reported as a pass. The webpack production build passed as the available alternate check.
+- `git diff --check` — passed before the final documentation append; rerun after this entry.
+
+Responsive review used the existing CSS source: the shell, navigation, configuration screens, forms, tables, and dialogs already have multiple responsive breakpoints and internal table scrolling. The added CSS addresses the reviewed narrow-width intrinsic sizing and header/heading wrap risks. No viewport resizing or before/after screenshots were completed in this run, so cross-device visual verification remains outstanding. The browser was available at a desktop viewport, but no safe viewport override was used through the current browser-control surface.
+
+2026-10-15 — Added tenant-scoped User Login Monitoring
+
+Implemented an organization-admin monitoring page using server-backed summary counts, bounded user/event pagination, name/identity search, membership and activity filters, sortable last-login fields, and a per-membership login/logout history dialog. Administration navigation is permission filtered and the backend requires the existing `ADMINISTER_ORGANIZATION` permission at the central route policy, controller, and service. No role permissions were added.
+
+Flyway V39 adds nullable `operator_memberships_mst.last_login_at`, a tenant/date index, `user_login_events_dtl` with a composite foreign key to the existing membership key, event-type validation, tenant/time indexes, and append-only UPDATE/DELETE/TRUNCATE triggers. Local demo authentication writes LOGIN only after allow-list, membership, organization, and token checks succeed. The authenticated logout endpoint records an explicit application LOGOUT; the frontend always clears local credentials and redirects even when the call fails. Event timestamps and last-login projection use server UTC; `GREATEST` prevents last_login_at moving backwards. No historical timestamps are backfilled.
+
+The existing Users and roles table now displays last login, days since login, and inactivity classification. Its existing audited deactivation action remains the only deactivation path; user deactivation now serializes by tenant root lock, rechecks active status within the transaction, and checks the last-administrator constraint before updating. Login history is retained. Enterprise Microsoft login callbacks remain unavailable because the gateway owner has not provided a confirmed event contract; `/me`, refreshes, and ordinary API calls are not counted as sign-ins.
+
+Files created:
+- `backend/src/main/resources/db/migration/V39__user_login_monitoring.sql` — add login projection, event history, indexes, immutable protections, and permission-filtered navigation seed/trigger.
+- `backend/src/main/java/com/ecabin/ledger/api/AuthenticationEventController.java` — authenticated explicit application logout endpoint.
+- `backend/src/main/java/com/ecabin/ledger/api/UserLoginMonitoringController.java` — authorized summary, user search, and event-history GET APIs.
+- `backend/src/main/java/com/ecabin/ledger/service/UserLoginMonitoringService.java` — trusted local login recording, logout recording, UTC inactivity rules, tenant-scoped bounded queries, and safe persistence-failure logging.
+- `backend/src/test/java/com/ecabin/ledger/service/UserLoginMonitoringServiceTest.java` — test trusted writes, monotonic projection SQL, inactive-membership rejection, role authorization, exact 30-day cutoff, tenant-scoped search/paging SQL, logout source handling, and guessed cross-tenant event access.
+- `frontend/src/common/configuration/UserLoginMonitoringPage.tsx` — summary, filterable server-paged activity table, and paginated event-history dialog.
+
+Files modified for this feature:
+- `backend/src/main/java/com/ecabin/ledger/api/LocalDevAuthController.java` — record only successful local-demo authentication.
+- `backend/src/main/java/com/ecabin/ledger/config/SecurityConfig.java` — require active member access for logout and organization-administrator permission for monitoring APIs.
+- `backend/src/main/java/com/ecabin/ledger/service/ConfigurationService.java` — permit the navigation route, expose last-login/activity columns in the paged Users table, and serialize/recheck membership deactivation with the existing audit reason and last-admin guard.
+- `backend/src/test/java/com/ecabin/ledger/api/LocalDevAuthControllerTest.java` — assert local login recording occurs after a successful token issuance path.
+- `backend/src/test/java/com/ecabin/ledger/service/ConfigurationServiceRouteTest.java` — cover the supported monitoring navigation route.
+- `backend/src/test/java/com/ecabin/ledger/service/PostgresMigrationSmokeTest.java` — expect V39 and verify the migration-owned login column, FK, indexes, and append-only triggers when PostgreSQL verification is enabled.
+- `frontend/src/app/loginhome/page.tsx` — render the protected monitoring page in the persistent authenticated shell.
+- `frontend/src/app/configuration.tsx` and `frontend/src/app/configuration.css` — add the monitoring route option, Users login/inactivity columns, and responsive monitoring/dialog styles.
+- `frontend/src/app/logout/page.tsx` — post explicit logout while a bearer token is available, then clear local credentials and navigate in a finally path.
+- `README.md` — document V39, APIs, auth-event boundaries, UTC classification, deactivation reuse, retention, and enterprise gateway dependency.
+- `updatesfiles.me` — append this cumulative implementation record.
+
+Verification actually run:
+- `cd backend && ./mvnw clean test` — passed, 110 tests, 0 failures, 0 errors, 17 skipped.
+- `cd backend && ./mvnw clean package` — passed, packaged the executable JAR; 110 tests, 0 failures, 0 errors, 17 skipped.
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && pnpm build` — remained at “Creating an optimized production build” for 90 seconds and was interrupted (exit 130); not counted as passing.
+- `cd frontend && NEXT_TELEMETRY_DISABLED=1 pnpm exec next build --webpack` — passed compilation, TypeScript, static generation, and build tracing.
+- `git diff --check` — passed before this append.
+
+The 17 skipped backend tests comprise the opt-in PostgreSQL smoke test, 15 local PostgreSQL integration tests, and a Testcontainers test. No datasource environment variables were configured in this session; the Testcontainers check reported no Docker socket. The migration was not applied to PostgreSQL and has not been integration-tested. Enterprise login history remains unavailable until a confirmed gateway event callback is supplied. Event retention/archival requires an approved policy. Both `README.md` and this cumulative log were updated.
+
+2026-10-15 verification addendum — Final `git diff --check` passed after the login-monitoring entry was appended. No database migration or browser-based visual inspection was performed.
+
+2026-10-15 — Area Master shortcodes and human-readable defect references
+
+Implemented required organization-unique Area Master shortcodes, with uppercase A–Z/0–9 normalization and 2–10 character validation. V40 explicitly backfills the known stable codes `CABIN→CBN`, `GALLEY→GLY`, `LAVATORY→LAV`, `ENTRY_AREA→ENT`, and `ATTENDANT_SEAT→ATS`; it aborts if the database contains an unmapped/invalid area or an in-tenant collision. It updates the tenant onboarding area seed function so future organizations receive the same shortcodes. The existing `defects_dtl.reference` field and tenant-unique key from the original schema are retained; its capacity is expanded to 48 characters, and historic EL identifiers are not rewritten.
+
+All new defect creation funnels through `DefectService.create` and `DefectReferenceService`. The reference is `YYYYMMDD-SHORTCODE-NN`; UTC is used as the server business-date policy until the organization has an authoritative timezone setting. PostgreSQL uses a tenant/date/shortcode primary-key counter and atomic `INSERT ... ON CONFLICT ... DO UPDATE ... RETURNING`. The counter allocation, defect row, and initial append-only event share the creation transaction. Standard failed creates roll counter changes back; a concurrent idempotency retry can consume a committed sequence while returning the original defect, so documented sequence gaps can occur but IDs are never reused. Existing idempotency behavior and internal UUID relationships remain intact.
+
+Area Master now displays and edits Shortcode; server filtering, sorting, XLSX export, and the backend CSV template/import flow include the field. The field remains tenant-scoped and existing `ADMINISTER_ORGANIZATION` checks and append-only configuration audit continue to apply. Existing defect screens already render/search/export the API's `reference` property, so they use the generated IDs without duplicating ID-generation logic or changing route UUIDs.
+
+Files created:
+- `backend/src/main/resources/db/migration/V40__area_shortcodes_and_defect_references.sql` — verified-code backfill, shortcode constraints, reference capacity, atomic counter table, and onboarding trigger update.
+- `backend/src/main/java/com/ecabin/ledger/service/DefectReferenceService.java` — area shortcode lookup/lock, UTC business date, atomic counter allocation and formatter.
+- `backend/src/main/java/com/ecabin/ledger/service/AreaShortcodeRules.java` — reusable shortcode normalization/validation.
+- `backend/src/test/java/com/ecabin/ledger/service/DefectReferenceServiceTest.java` — format, date, area-specific value and 99-to-100 sequence formatting checks.
+- `backend/src/test/java/com/ecabin/ledger/service/AreaShortcodeRulesTest.java` — uppercase normalization and invalid length/character checks.
+
+Files modified:
+- `backend/src/main/java/com/ecabin/ledger/service/ConfigurationService.java` — Area Master persistence, validation, search, sort and export mappings.
+- `backend/src/main/java/com/ecabin/ledger/service/ConfigurationImportService.java` — shortcode CSV template, row mapping, validation and duplicate detection.
+- `backend/src/main/java/com/ecabin/ledger/service/DefectService.java` — centralized generated reference used for every defect creation path.
+- `backend/src/test/java/com/ecabin/ledger/service/ConfigurationImportServiceTest.java` — verify the Area CSV template includes shortcode.
+- `backend/src/test/java/com/ecabin/ledger/service/LocalPostgresOperationalIntegrationTest.java` — include shortcode in fixtures and add real-PostgreSQL concurrent counter allocation coverage plus generated-reference assertion.
+- `backend/src/test/java/com/ecabin/ledger/service/PostgresMigrationSmokeTest.java` — expect migration V40 and check shortcode/counter/reference uniqueness schema.
+- `frontend/src/app/configuration.tsx` — shortcode field, table column, sorting and client-side format feedback.
+- `README.md` — document mappings, format, UTC policy, atomicity, gaps and migration behavior.
+- `updatesfiles.me` — append this implementation record.
+
+Verification actually run:
+- `cd backend && ./mvnw clean test` — passed: 115 tests, 0 failures, 0 errors, 18 skipped.
+- `cd backend && ./mvnw clean package` — passed and packaged the Spring Boot JAR; 115 tests, 0 failures, 0 errors, 18 skipped.
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && pnpm build` — stalled in Turbopack at optimized production build and was interrupted after about 60 seconds (exit 130); not counted as passing.
+- `cd frontend && NEXT_TELEMETRY_DISABLED=1 pnpm exec next build --webpack` — passed compilation, TypeScript, static generation, and build tracing.
+- `git diff --check` — passed after source and documentation changes.
+
+The local PostgreSQL smoke/integration tests, including the new multi-threaded counter test and V40 migration verification, were skipped: `SPRING_DATASOURCE_URL` and `ECABIN_DB_VERIFY` were unset and `pg_isready` was unavailable. Testcontainers also had no Docker socket. V40 has not been applied to a database, and actual migration/concurrency behavior remains to be verified against PostgreSQL. The migration intentionally fails closed if any pre-existing cabin area has a code outside the five explicit mappings; review and add an explicit mapping before deployment if that prerequisite occurs.
+
+2026-10-15 — Cabin Area–Team Mapping and Maintenance SLA administration UI
+
+Files modified:
+- `frontend/src/common/configuration/AreaTeamRoutingPage.tsx` — clarified the page introduction; added four live-data summary indicators; visually separated initial defect workflow, the independent Galley closure route, and area-to-Maintenance mapping; improved the first-mapping empty state. Summary values are derived from existing active-area, mapping, eligible-team, and closure-team API responses. Existing endpoints, requests, confirmation prompts, reasons, query behavior, and mutations remain in place.
+- `frontend/src/common/configuration/MaintenanceSlaPoliciesPage.tsx` — reorganized each existing policy into date requirements, boundaries, and timezone sections; added a current-rule explanation, explicit configured/unconfigured status, a shared audit-reason panel, per-policy save feedback/duplicate-submit protection, and confirmation before discarding edited values. IANA options come from the browser runtime timezone catalog; current stored values are retained and the backend remains authoritative. Close Submitted is still unconfigured until explicitly edited and saved.
+- `frontend/src/app/configuration.css` — added scoped desktop and responsive styles for routing summary/sections and the SLA cards and grouped controls. Existing global tokens and other administration pages were not intentionally changed.
+- `README.md` — documented the two UI updates, live summary sources, current client-side mapping table pagination limitation, and SLA configuration semantics.
+
+No backend, API, database, migration, permission, routing, SLA calculation, or audit behavior was changed. The mapping endpoint returns all tenant mappings in one response, so existing filtering, sorting, and pagination stay client-side; no API pagination was invented. Closure-route eligibility and mapping validity indicators reflect only the eligibility data returned by existing APIs.
+
+Verification actually run:
+- `cd frontend && pnpm lint` — passed (ESLint exited 0).
+- `cd frontend && pnpm build` — did not complete; it remained at “Creating an optimized production build” and was interrupted (exit 130), so this command is not reported as passed.
+- `cd frontend && NEXT_TELEMETRY_DISABLED=1 pnpm exec next build --webpack` — passed compilation, TypeScript checks, static page generation, and build tracing.
+- `git diff --check` — passed.
+- Opened the running local application in Chrome and reviewed the updated Cabin Area–Team Mapping page at the available desktop viewport; it rendered real tenant data and showed area and route statuses. The SLA screen was not separately opened, and mobile/tablet viewport resizing and mutation flows were not exercised. No backend permission/API tests were rerun because this task changed only frontend presentation.
+
+Remaining verification: manually inspect both screens at 320–430px, 768px, 1024px and 1440px+, and exercise authorized saves, cancellation, backend validation errors, reviewer/direct mode confirmation, closure routing, and unconfigured Close Submitted enforcement in a configured local environment. No PostgreSQL state or production data was modified.
+
+2026-10-15 — Migration smoke-test inventory and closure-route panel clarification
+
+The reported PostgreSQL smoke-test failure was an expected-table inventory omission: V40 creates `defect_reference_counters_dtl`, but `PostgresMigrationSmokeTest.EXPECTED_APPLICATION_TABLES` did not include it. Added the table to both required and exact application-table inventory sets. Updated the README's `_dtl` inventory accordingly. No migration was edited or rerun against a database.
+
+Confirmed from the existing backend implementation that closure-review forms can only map to `GALLEY`, and closure submissions explicitly validate the Galley area. The selected closure team is stored at organization scope and used for the supported Galley closure workflow; eligible choices are active `CLOSURE` or `REVIEWER` teams with active members holding existing `APPROVE`. The UI section is already labeled Galley closure review; added explicit text to the README clarifying the organization-level setting versus Galley-only workflow scope. Wrapped the current team label/value in a padded, responsive panel so it aligns with the section's other controls.
+
+Files changed:
+- `backend/src/test/java/com/ecabin/ledger/service/PostgresMigrationSmokeTest.java` — include the V40 counter table in required and exact table inventories.
+- `frontend/src/common/configuration/AreaTeamRoutingPage.tsx` — render the current closure-review team in its own labeled panel.
+- `frontend/src/app/configuration.css` — style the current team panel with consistent inset spacing and a mobile margin adjustment.
+- `README.md` — include `defect_reference_counters_dtl` in the schema inventory and document that the organization-level closure-team pointer currently supports Galley-only closure review.
+- `updatesfiles.me` — append this entry.
+
+Verification actually run:
+- `cd backend && ./mvnw clean test` — passed: 115 tests, 0 failures, 0 errors, 18 skipped. The PostgreSQL smoke test was skipped because `ECABIN_DB_VERIFY` and datasource environment variables were not configured; 16 local PostgreSQL tests and the Testcontainers tenant-isolation test were also skipped (Docker unavailable).
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && NEXT_TELEMETRY_DISABLED=1 pnpm exec next build --webpack` — passed compilation, TypeScript, static generation, and tracing.
+- `git diff --check` — pending at time of this entry; final result is reported below if run.
+
+The revised smoke-test inventory compiled successfully under the full Maven test command, but the failing PostgreSQL assertion was not exercised against a database in this run. A future opt-in run with `ECABIN_DB_VERIFY=true` and an explicitly configured safe local schema is still needed to confirm the migration inventory end to end.
+
+2026-10-15 verification addendum — `git diff --check` passed after the above changes and log entry.
+
+2026-10-15 — Equal-width SLA policy cards and status accents
+
+Updated the Maintenance SLA Policies card grid to explicitly stretch three equal-width cards across the available desktop row, with responsive equal columns at tablet size and a single full-width card on mobile. Added distinct top accents: green for Work in Progress, blue for On Hold, and the existing amber attention treatment for Close Submitted. Close Submitted remains unconfigured until explicitly edited and saved. No policy data, API, validation, or status behavior changed.
+
+Files changed:
+- `frontend/src/common/configuration/MaintenanceSlaPoliciesPage.tsx` — attach a stable status-specific styling class to each existing policy card.
+- `frontend/src/app/configuration.css` — enforce equal-width grid tracks and card fill; style the three status accent colors while retaining existing breakpoints.
+- `README.md` — document the card sizing and status accents.
+- `updatesfiles.me` — append this change record.
+
+Verification:
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && NEXT_TELEMETRY_DISABLED=1 pnpm exec next build --webpack` — passed compilation, TypeScript, static generation, and build tracing.
+- `git diff --check` — pending final check.
+
+No browser viewport resizing or interaction test was performed for this small styling-only change.
+
+Verification addendum (2026-10-15): `git diff --check` completed successfully with no whitespace errors.
+
+2026-10-15 — Form Master closure mapping options
+
+Fixed the Form Master mapping editor so purposes and stages are offered based on any selected compatible area. This makes the supported Galley-only `CLOSURE_APPROVAL` purpose and `APPROVAL_REQUIRED` stage selectable even when a form was previously mapped to several cabin areas. Selecting Closure Approval narrows the area selection to compatible areas (currently Galley), preserving the existing server-side mapping constraints and draft/publication workflow. Added guidance in the editor and README. No backend mapping rules or published form versions changed.
+
+Files changed:
+- `frontend/src/common/configuration/FormMasterPage.tsx` — derive purpose/stage options from backend-provided mappings, narrow area selection when a purpose requires it, and show the Galley-only constraint.
+- `README.md` — document the supported closure mapping behavior.
+- `updatesfiles.me` — append this entry.
+
+Verification actually run:
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && NEXT_TELEMETRY_DISABLED=1 pnpm exec next build --webpack` — passed compilation, TypeScript, static generation, and build tracing.
+- `git diff --check` — passed.
+
+No backend tests or live browser interaction were run; backend mapping rules are unchanged, and visual behavior was verified through the frontend build only.
+
+2026-10-15 — Enable Closure Approval form mapping for all cabin areas
+
+Expanded `CLOSURE_APPROVAL / APPROVAL_REQUIRED` mapping, binding-catalog eligibility, publication validation, reference-option retrieval, and published-form resolution to all active tenant-owned cabin areas. The area choices continue to come from `cabin_areas_mst`, so future active areas appear without hardcoded UI changes. Closure forms remain tied to exact published area/version snapshots. The organization-level closure team and existing `APPROVE` permission still gate closure review; the Galley-only Reviewer Decision workflow remains unchanged. The closure field catalog uses `*` to mean any active tenant cabin-area code, and the service verifies the selected area is active before publication. When an area-specific Closure Review form is included in an approval request, the backend validates the exact published form/version and tenant route. Existing non-Galley approval requests without form IDs remain compatible. No database migration was needed; the existing schema already supports the purpose/stage and version-area relationships.
+
+Files changed:
+- `backend/src/main/java/com/ecabin/ledger/service/OperationalFormService.java` — remove Galley-only closure mapping, publication, resolution, and decision-option restrictions while retaining the separate Galley-only Reviewer Decision restriction.
+- `backend/src/main/java/com/ecabin/ledger/service/FormFieldBindingCatalog.java` — allow closure decision and remark bindings for all supported cabin-area codes.
+- `backend/src/main/java/com/ecabin/ledger/service/ClosureApprovalFormRules.java` — make validation errors describe the general Closure Review form.
+- `backend/src/main/java/com/ecabin/ledger/service/OperationalWorkflowService.java` — validate any supplied area-specific closure form/version and preserve existing non-Galley no-form compatibility.
+- `backend/src/main/java/com/ecabin/ledger/api/OperationalFormsController.java` — use area-neutral closure-form eligibility messaging.
+- `frontend/src/common/configuration/FormMasterPage.tsx` — offer closure purpose/stage for all selected supported active areas without Galley-only narrowing.
+- `frontend/src/common/configuration/AreaTeamRoutingPage.tsx` — clarify that the organization closure-review team applies to every cabin area.
+- `backend/src/test/java/com/ecabin/ledger/service/OperationalFormServiceTest.java` — assert closure mapping options include both Galley and Cabin and test area-neutral closure resolution.
+- `backend/src/test/java/com/ecabin/ledger/service/FormFieldBindingCatalogTest.java` — assert closure bindings support all currently supported cabin area codes.
+- `README.md` and `docs/gap-analysis.md` — document all-area closure mapping and the Galley-only local demo fixture.
+- `updatesfiles.me` — append this implementation record.
+
+Verification actually run:
+- `cd backend && ./mvnw test` — passed: 117 tests, 0 failures, 0 errors, 18 skipped. `PostgresMigrationSmokeTest` (1) and `LocalPostgresOperationalIntegrationTest` (16) were skipped because PostgreSQL verification was not configured; `TenantIsolationPostgresTest` (1) was skipped because Docker was unavailable.
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && NEXT_TELEMETRY_DISABLED=1 pnpm exec next build --webpack` — passed compilation, TypeScript, static generation, and build tracing.
+- `git diff --check` — passed.
+
+No database migration was needed or executed, and no live browser/API check was performed.
+
+Limitations: no PostgreSQL migration or live UI/API workflow was executed in this change. A form must still be configured, saved as a draft, and published for an area before it resolves for defects in that area. Future active cabin-area codes are accepted by the closure binding wildcard and mapping API without a source change; administrators still need to publish a form mapped to the new area before the case resolver can return it.
+
+Verification addendum (2026-10-15): After extending the closure binding catalog to support future area codes via its `*` active-area marker, `cd backend && ./mvnw -Dtest=OperationalFormServiceTest,FormFieldBindingCatalogTest test` passed (15 tests, 0 failures/errors/skips). `git diff --check` passed after the final edits.
+
+2026-10-15 — Clarify all-area closure-review routing in Area–Team Mapping
+
+Confirmed the closure-review team configuration is organization-scoped: GET/POST `/api/v1/configuration/area-team-routing/closure-team` reads and updates `operators_mst.default_closure_team_id`, while closure access checks the configured tenant team, active membership, and existing `APPROVE` permission without restricting cabin area. The section now explicitly says the single configured team applies to all active cabin areas, including future areas. Area-specific Maintenance mappings remain distinct. The README also notes that a new area still needs a published Closure Review form mapping before that area's cases can resolve a form.
+
+Files modified:
+- `frontend/src/common/configuration/AreaTeamRoutingPage.tsx` — clarify all-area scope in the route summary, section heading, explanatory text, current-team label, and selector label; behavior and API calls are unchanged.
+- `README.md` — document the organization-wide (not per-area) closure team and the separate published-form requirement for newly added areas.
+- `updatesfiles.me` — append this change record.
+
+Verification actually run:
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && NEXT_TELEMETRY_DISABLED=1 pnpm exec next build --webpack` — passed, including TypeScript and production build.
+- `git diff --check` — passed.
+
+2026-10-15 — Distinct attention accent for SLA cards
+
+Changed the Maintenance SLA card's Needs attention top border from amber to a muted coral (`#d97862`) so attention states have a distinct visual treatment from the amber Close Submitted status. Work in Progress remains green and On Hold remains blue. The attention rule is ordered after status accents so it wins when a card is both unconfigured and has a status color. No behavior or policy data changed.
+
+Files modified:
+- `frontend/src/app/configuration.css` — add the coral attention-state border override.
+- `README.md` — document the distinct attention accent.
+- `updatesfiles.me` — append this change record.
+
+Verification actually run:
+- `cd frontend && pnpm lint` — passed.
+- `git diff --check` — passed.
+
+2026-10-15 — Correct SLA status-border precedence
+
+Follow-up to the attention-accent change: the screenshot showed the coral attention rule overriding Close Submitted's intended amber border, while the green and blue status accents were not visibly taking effect against the shared configuration-card border reset. Removed the generic attention override and applied each status border with selectors scoped under `.app-shell`, preserving Close Submitted amber (`#d2a34f`) and explicitly rendering Work in Progress green (`#4f8a66`) and On Hold blue (`#6388ad`).
+
+Files modified:
+- `frontend/src/app/configuration.css` — remove the coral override and apply higher-specificity, status-specific 3px top borders.
+- `README.md` — document the three status colors without implying an attention-state override.
+- `updatesfiles.me` — append this correction; earlier history remains intact.
+
+Verification actually run:
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && NEXT_TELEMETRY_DISABLED=1 pnpm exec next build --webpack` — passed, including TypeScript and production build.
+- `git diff --check` — passed.

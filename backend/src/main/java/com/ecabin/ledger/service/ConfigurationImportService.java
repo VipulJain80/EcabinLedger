@@ -42,7 +42,7 @@ public class ConfigurationImportService {
     private static final Map<String, Definition> DEFINITIONS = Map.ofEntries(
         Map.entry("fleets", new Definition("Fleets", List.of("fleet_name"), List.of("Main Fleet"), "name")),
         Map.entry("aircraft", new Definition("Aircraft", List.of("msn_number","registration","aircraft_type","fleet_name"), List.of("MSN-001","VT-ABC","A320-200","Main Fleet"), "tailNumber")),
-        Map.entry("areas", new Definition("Area Master", List.of("area_code","area_name","description"), List.of("ENTRY_AREA","Entry Area","Aircraft entry area"), "code")),
+        Map.entry("areas", new Definition("Area Master", List.of("area_code","area_name","shortcode","description"), List.of("GALLEY","Galley","GLY","Aircraft galley"), "code")),
         Map.entry("defect-categories", new Definition("Defect Categories", List.of("category_code","category_name","description"), List.of("SEAT","Passenger Seat","Passenger seating component"), "code")),
         Map.entry("defect-conditions", new Definition("Defect Conditions", List.of("condition_code","condition_name","description","applicable_component_codes"), List.of("CRACKED","Cracked","Illustrative condition label only; not an approved maintenance procedure.","TRAY_TABLE|VINYL"), "code")),
         Map.entry("components", new Definition("Components", List.of("component_code","component_name","area_code","description"), List.of("VINYL","Vinyl","ENTRY_AREA","Entry area vinyl flooring"), "code")),
@@ -101,6 +101,12 @@ public class ConfigurationImportService {
                     String unique = uniqueValue(resource, raw, valid);
                     if (!seen.add(unique.toLowerCase(Locale.ROOT))) throw new IllegalArgumentException("Duplicate unique value in this CSV file.");
                     if (existsAlready(operatorId, resource, unique)) throw new IllegalArgumentException("A record with this unique value already exists; imports use create-only mode and do not overwrite existing records.");
+                    if (resource.equals("areas")) {
+                        String shortcode = valid.get("shortcode").toLowerCase(Locale.ROOT);
+                        if (!seen.add("shortcode:" + shortcode)) throw new IllegalArgumentException("Duplicate area shortcode in this CSV file.");
+                        if (Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM cabin_areas_mst WHERE operator_id=? AND shortcode=?)", Boolean.class, operatorId, valid.get("shortcode"))))
+                            throw new IllegalArgumentException("This area shortcode is already in use in your organization.");
+                    }
                     accepted.add(new Staged(rowNumber, valid));
                 } catch (RuntimeException ex) {
                     String message = safeMessage(ex);
@@ -152,7 +158,7 @@ public class ConfigurationImportService {
     private Map<String,String> resolve(UUID operatorId, String resource, Map<String,String> raw) {
         Map<String,String> fields = new LinkedHashMap<>();
         switch (resource) {
-            case "areas" -> { fields.put("code", raw.get("area_code")); fields.put("name", raw.get("area_name")); fields.put("description", raw.get("description")); }
+            case "areas" -> { fields.put("code", raw.get("area_code")); fields.put("name", raw.get("area_name")); fields.put("shortcode", raw.get("shortcode")); fields.put("description", raw.get("description")); }
             case "components" -> { fields.put("code", raw.get("component_code")); fields.put("name", raw.get("component_name")); fields.put("description", raw.get("description")); fields.put("areaId", activeId("cabin_areas_mst","code",raw.get("area_code"),operatorId,"area_code")); }
             case "fleets" -> fields.put("name", raw.get("fleet_name"));
             case "aircraft" -> { fields.put("msnNumber",raw.get("msn_number")); fields.put("tailNumber",raw.get("registration")); fields.put("aircraftType",raw.get("aircraft_type")); fields.put("fleetId",activeId("fleets","name",raw.get("fleet_name"),operatorId,"fleet_name")); }
@@ -222,7 +228,7 @@ public class ConfigurationImportService {
         return switch(resource) {
             case "aircraft" -> value.contains("fleet")?"fleet_name":value.contains("aircrafttype")?"aircraft_type":value.contains("msn")?"msn_number":"registration";
             case "components" -> value.contains("area")?"area_code":value.contains("name")?"component_name":value.contains("description")?"description":"component_code";
-            case "areas" -> value.contains("name")?"area_name":value.contains("description")?"description":"area_code";
+            case "areas" -> value.contains("shortcode")?"shortcode":value.contains("name")?"area_name":value.contains("description")?"description":"area_code";
             case "defect-categories" -> value.contains("name")?"category_name":value.contains("description")?"description":"category_code";
             case "defect-conditions" -> value.contains("component")?"applicable_component_codes":value.contains("name")?"condition_name":value.contains("description")?"description":"condition_code";
             case "users" -> value.contains("role")?"role":value.contains("display")?"display_name":"external_user_id";

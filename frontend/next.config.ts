@@ -1,10 +1,15 @@
 import type { NextConfig } from "next";
+import { normalizeAppBasePath } from "./appBasePath.mjs";
+
+const appBasePath = normalizeAppBasePath(process.env.APP_BASE_PATH);
 
 const nextConfig: NextConfig = {
+  basePath: appBasePath,
+  env: { NEXT_PUBLIC_APP_BASE_PATH: appBasePath },
   output: "standalone",
   poweredByHeader: false,
-  async rewrites() {
-    return [{ source: "/aircraft/:aircraftId/defects", destination: "/?aircraft=:aircraftId" }];
+  async redirects() {
+    return [{ source: "/", destination: `${appBasePath}/login`, permanent: false, basePath: false }];
   },
   async headers() {
     return [{ source: "/:path*", headers: [

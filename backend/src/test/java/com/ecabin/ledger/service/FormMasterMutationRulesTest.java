@@ -41,6 +41,24 @@ class FormMasterMutationRulesTest {
         assertThrows(IllegalArgumentException.class,()->FormMasterMutationRules.validateName("x".repeat(161)));
     }
 
+    @Test void restoreRequiresExplicitConfirmationBeforeReplacingAnExistingDraft() {
+        assertDoesNotThrow(()->FormMasterMutationRules.requireExplicitDraftReplacement(false,false));
+        ResponseStatusException conflict=assertThrows(ResponseStatusException.class,
+            ()->FormMasterMutationRules.requireExplicitDraftReplacement(true,false));
+        assertEquals(HttpStatus.CONFLICT,conflict.getStatusCode());
+        assertDoesNotThrow(()->FormMasterMutationRules.requireExplicitDraftReplacement(true,true));
+    }
+
+    @Test void onlyUnpublishedDraftVersionsCanBeDiscarded() {
+        assertDoesNotThrow(()->FormMasterMutationRules.requireDraftVersionDelete("DRAFT",false));
+        ResponseStatusException published=assertThrows(ResponseStatusException.class,
+            ()->FormMasterMutationRules.requireDraftVersionDelete("PUBLISHED",false));
+        assertEquals(HttpStatus.CONFLICT,published.getStatusCode());
+        ResponseStatusException pointer=assertThrows(ResponseStatusException.class,
+            ()->FormMasterMutationRules.requireDraftVersionDelete("DRAFT",true));
+        assertEquals(HttpStatus.CONFLICT,pointer.getStatusCode());
+    }
+
     private FormVersion version(String status,int number) {
         return new FormVersion(UUID.randomUUID(),formId,number,status,new FormConfiguration(List.of()),"admin",
             Instant.parse("2026-10-14T00:00:00Z"),null,null,"Galley",UUID.randomUUID(),

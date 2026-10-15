@@ -39,7 +39,7 @@ public class MaintenanceActionService {
         if(!Set.of("ASSIGNED","IN_PROGRESS","ON_HOLD").contains(actionStatus))throw new ResponseStatusException(HttpStatus.CONFLICT,"The corrective action is no longer active.");
         String statusKey=request.status();
         if(!Set.of("WORK_IN_PROGRESS","ON_HOLD","CLOSE_SUBMITTED").contains(statusKey))throw new IllegalArgumentException("Choose Work in Progress, On Hold, or Close Submitted.");
-        FormForArea form=forms.published(tenant,request.formId(),request.formVersionId());
+        FormForArea form=forms.published(tenant,request.formId(),request.formVersionId(),(UUID)current.get("areaId"));
         if(form.purpose()!=FormPurpose.CORRECTIVE_ACTION||!form.areaId().equals(current.get("areaId"))||form.workflowStage()!=WorkflowStage.IN_PROGRESS)
             throw new ResponseStatusException(HttpStatus.CONFLICT,"The selected form version is not the published maintenance-action form for this case.");
         boolean eligible=forms.publishedForDefect(tenant,defectId,FormPurpose.CORRECTIVE_ACTION).stream().anyMatch(candidate->candidate.id().equals(form.id())&&candidate.versionId().equals(form.versionId()));

@@ -50,4 +50,11 @@ class FormFieldBindingCatalogTest {
     @Test void unsupportedBindingsFailClosedWithActionableMessage(){
         assertThrows(IllegalArgumentException.class,()->catalog.require(null));
     }
+
+    @Test void closureBindingsAreApprovedForEveryActiveAndFutureCabinArea(){
+        Set<String> expected=Set.of("*");
+        assertEquals(expected,Set.copyOf(catalog.require(DefectFieldBinding.CLOSURE_DECISION).cabinAreaCodes()));
+        assertEquals(expected,Set.copyOf(catalog.require(DefectFieldBinding.CLOSURE_REMARK).cabinAreaCodes()));
+        assertTrue(catalog.require(DefectFieldBinding.CLOSURE_DECISION).formPurposes().contains(FormPurpose.CLOSURE_APPROVAL));
+    }
 }

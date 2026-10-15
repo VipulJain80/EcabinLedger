@@ -45,6 +45,7 @@ class OperationalFormsControllerTest {
             new DuplicateFormRequest("GALLEY_COPY","Galley Copy",UUID.randomUUID(),FormPurpose.DEFECT_REPORT,WorkflowStage.INITIAL_REPORT,null)));
         assertThrows(AccessDeniedException.class,()->controller.rename(auth,UUID.randomUUID(),new RenameFormRequest("Renamed","reason")));
         assertThrows(AccessDeniedException.class,()->controller.delete(auth,UUID.randomUUID(),new DeleteFormRequest("reason")));
+        assertThrows(AccessDeniedException.class,()->controller.deleteDraftVersion(auth,UUID.randomUUID(),UUID.randomUUID(),new DeleteFormRequest("reason")));
         assertThrows(AccessDeniedException.class,()->controller.formMappings(auth));
         verifyNoInteractions(forms);
     }
@@ -64,5 +65,9 @@ class OperationalFormsControllerTest {
 
         assertEquals(expected,controller.duplicate(auth,formId,request));
         verify(forms).duplicate(tenant,"tenant-admin",formId,request);
+        UUID versionId=UUID.randomUUID();
+        DeleteFormRequest deleteRequest=new DeleteFormRequest("discard obsolete draft");
+        controller.deleteDraftVersion(auth,formId,versionId,deleteRequest);
+        verify(forms).deleteDraftVersion(tenant,"tenant-admin",formId,versionId,deleteRequest);
     }
 }

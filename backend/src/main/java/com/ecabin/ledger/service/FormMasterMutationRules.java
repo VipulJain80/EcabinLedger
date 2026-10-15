@@ -10,6 +10,20 @@ import org.springframework.web.server.ResponseStatusException;
 final class FormMasterMutationRules {
     private FormMasterMutationRules() {}
 
+    static void requireExplicitDraftReplacement(boolean hasDraft, boolean replaceExistingDraft) {
+        if (hasDraft && !replaceExistingDraft) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                "This form already has an editable draft. Choose to keep it, cancel, or explicitly replace it with the restored copy.");
+        }
+    }
+
+    static void requireDraftVersionDelete(String status, boolean isPublishedPointer) {
+        if (!"DRAFT".equals(status) || isPublishedPointer) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                "Only an unpublished draft version can be deleted.");
+        }
+    }
+
     static String normalizeKey(String raw) {
         String key=raw==null?"":raw.trim().toUpperCase(java.util.Locale.ROOT);
         if(!key.matches("[A-Z][A-Z0-9_-]{1,79}"))throw new IllegalArgumentException("Form key must use 2–80 uppercase letters, numbers, underscores or hyphens.");

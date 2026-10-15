@@ -1,0 +1,69 @@
+/* Narrow-screen hardening for the persistent authenticated shell. Existing desktop styling is unchanged. */
+.app-shell .workspace,
+.app-shell .content,
+.configuration-table-card,
+.admin-table-tools,
+.admin-data-table-wrap {
+  min-width: 0;
+}
+
+@media (max-width: 480px) {
+  .app-shell .heading {
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 12px;
+  }
+
+  .app-shell .heading > div {
+    min-width: 0;
+    flex: 1 1 100%;
+  }
+
+  .app-shell .heading h1,
+  .app-shell .heading p {
+    overflow-wrap: anywhere;
+  }
+
+  .app-shell .heading .button-primary {
+    max-width: 100%;
+    white-space: normal;
+  }
+
+  .admin-table-footer > span {
+    overflow-wrap: anywhere;
+  }
+}
+
+@media (max-width: 380px) {
+  .app-shell .app-topbar {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 7px 8px;
+    padding-inline: 10px;
+  }
+
+  .app-shell .app-logo {
+    min-width: 0;
+    gap: 6px;
+    font-size: 12px;
+  }
+
+  .app-shell .app-logo > span {
+    width: 29px;
+    height: 29px;
+    flex: none;
+  }
+
+  .app-shell .app-profile {
+    min-width: 0;
+    gap: 5px;
+  }
+
+  .app-shell .app-profile-copy {
+    max-width: 52px;
+  }
+
+  .app-shell .app-profile-copy b {
+    font-size: 9px;
+  }
+}
+

@@ -37,6 +37,8 @@ class ConfigurationImportServiceTest {
             assertEquals(2, template.sample().lines().count());
         }
         assertThrows(IllegalArgumentException.class, () -> imports.template("cabin-zones"));
+        assertEquals(List.of("area_code", "area_name", "shortcode", "description"), imports.template("areas").headers());
+        assertTrue(imports.template("areas").sample().contains("GLY"));
     }
 
     @Test

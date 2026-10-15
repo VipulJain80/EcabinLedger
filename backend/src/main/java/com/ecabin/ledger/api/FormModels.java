@@ -43,25 +43,41 @@ public final class FormModels {
         }
     }
     public record FormConfiguration(@NotNull @Size(max=100) List<@NotNull FieldDefinition> fields) {}
-    public record CreateFormRequest(@NotBlank @Size(max=80) String formKey, @NotBlank @Size(max=160) String name, @NotNull UUID areaId, FormPurpose purpose, WorkflowStage workflowStage) {
-        public CreateFormRequest(String formKey,String name,UUID areaId) { this(formKey,name,areaId,FormPurpose.DEFECT_REPORT,WorkflowStage.INITIAL_REPORT); }
+    public record CreateFormRequest(@NotBlank @Size(max=80) String formKey, @NotBlank @Size(max=160) String name, UUID areaId, List<UUID> areaIds, FormPurpose purpose, WorkflowStage workflowStage) {
+        public CreateFormRequest(String formKey,String name,UUID areaId,FormPurpose purpose,WorkflowStage workflowStage) { this(formKey,name,areaId,areaId==null?List.of():List.of(areaId),purpose,workflowStage); }
+        public CreateFormRequest(String formKey,String name,UUID areaId) { this(formKey,name,areaId,areaId==null?List.of():List.of(areaId),FormPurpose.DEFECT_REPORT,WorkflowStage.INITIAL_REPORT); }
+        public List<UUID> effectiveAreaIds(){return areaIds==null||areaIds.isEmpty()?(areaId==null?List.of():List.of(areaId)):areaIds;}
     }
     public record DuplicateFormRequest(@NotBlank @Size(max=80) String formKey,@NotBlank @Size(max=160) String name,
-        @NotNull UUID areaId,@NotNull FormPurpose purpose,@NotNull WorkflowStage workflowStage,UUID sourceVersionId) {}
+        UUID areaId,List<UUID> areaIds,@NotNull FormPurpose purpose,@NotNull WorkflowStage workflowStage,UUID sourceVersionId) {
+        public DuplicateFormRequest(String formKey,String name,UUID areaId,FormPurpose purpose,WorkflowStage workflowStage,UUID sourceVersionId){this(formKey,name,areaId,areaId==null?List.of():List.of(areaId),purpose,workflowStage,sourceVersionId);}
+        public List<UUID> effectiveAreaIds(){return areaIds==null||areaIds.isEmpty()?(areaId==null?List.of():List.of(areaId)):areaIds;}
+    }
     public record RenameFormRequest(@NotBlank @Size(max=160) String name,@NotBlank @Size(max=2000) String reason) {}
     public record DeleteFormRequest(@NotBlank @Size(max=1000) String reason) {}
     public record ReassignFormAreaRequest(@NotNull UUID areaId, @NotBlank @Size(max=2000) String reason) {}
-    public record UpdateFormMappingRequest(@NotNull UUID areaId,@NotNull FormPurpose purpose,@NotNull WorkflowStage workflowStage,@NotBlank @Size(max=2000) String reason) {}
-    public record FormMappingOption(UUID areaId,String areaCode,FormPurpose purpose,WorkflowStage workflowStage) {}
+    public record UpdateFormMappingRequest(UUID areaId,List<UUID> areaIds,@NotNull FormPurpose purpose,@NotNull WorkflowStage workflowStage,@NotBlank @Size(max=2000) String reason) {
+        public UpdateFormMappingRequest(UUID areaId,FormPurpose purpose,WorkflowStage workflowStage,String reason){this(areaId,areaId==null?List.of():List.of(areaId),purpose,workflowStage,reason);}
+        public List<UUID> effectiveAreaIds(){return areaIds==null||areaIds.isEmpty()?(areaId==null?List.of():List.of(areaId)):areaIds;}
+    }
+    public record FormMappingOption(UUID areaId,String areaCode,FormPurpose purpose,WorkflowStage workflowStage,boolean mapped) {
+        public FormMappingOption(UUID areaId,String areaCode,FormPurpose purpose,WorkflowStage workflowStage){this(areaId,areaCode,purpose,workflowStage,false);}
+    }
+    public record FormArea(UUID id,String name,String code) {}
     public record SaveDraftRequest(@NotNull FormConfiguration configuration) {}
     public record PublishRequest(@NotNull UUID versionId) {}
+    public record RestoreFormVersionRequest(@NotNull Boolean replaceExistingDraft,UUID expectedDraftVersionId,@NotBlank @Size(max=2000) String reason) {}
     public record DeactivateRequest(@NotBlank @Size(max=1000) String reason) {}
-    public record FormSummary(UUID id, String formKey, String name, UUID areaId, String areaName, FormPurpose purpose, WorkflowStage workflowStage, int isactive,
-        Integer publishedVersion, UUID publishedVersionId, Integer draftVersion, UUID draftVersionId, Instant updatedAt) {}
+    public record FormSummary(UUID id, String formKey, String name, UUID areaId, String areaName, String areaNames, FormPurpose purpose, WorkflowStage workflowStage, int isactive,
+        Integer publishedVersion, UUID publishedVersionId, Integer draftVersion, UUID draftVersionId, Instant updatedAt) {
+        public FormSummary(UUID id,String formKey,String name,UUID areaId,String areaName,FormPurpose purpose,WorkflowStage workflowStage,int isactive,Integer publishedVersion,UUID publishedVersionId,Integer draftVersion,UUID draftVersionId,Instant updatedAt){this(id,formKey,name,areaId,areaName,areaName,purpose,workflowStage,isactive,publishedVersion,publishedVersionId,draftVersion,draftVersionId,updatedAt);}
+    }
     public record FormTablePage(List<FormSummary> items,int page,int size,long totalElements,int totalPages) {}
     public record FormVersion(UUID id, UUID formId, int versionNumber, String status, FormConfiguration configuration,
         String createdBy, Instant createdAt, String publishedBy, Instant publishedAt, String formName, UUID areaId,
-        FormPurpose purpose, WorkflowStage workflowStage) {}
+        FormPurpose purpose, WorkflowStage workflowStage,List<UUID> areaIds) {
+        public FormVersion(UUID id,UUID formId,int versionNumber,String status,FormConfiguration configuration,String createdBy,Instant createdAt,String publishedBy,Instant publishedAt,String formName,UUID areaId,FormPurpose purpose,WorkflowStage workflowStage){this(id,formId,versionNumber,status,configuration,createdBy,createdAt,publishedBy,publishedAt,formName,areaId,purpose,workflowStage,areaId==null?List.of():List.of(areaId));}
+    }
     public record DeletedForm(UUID id,String formKey,String name,UUID areaId,String areaName,FormPurpose purpose,WorkflowStage workflowStage) {}
     public record FormForArea(UUID id, String formKey, String name, UUID areaId, FormPurpose purpose, WorkflowStage workflowStage, UUID versionId, int versionNumber,
         FormConfiguration configuration) {}

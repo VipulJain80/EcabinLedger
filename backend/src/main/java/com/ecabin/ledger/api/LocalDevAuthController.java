@@ -1,6 +1,7 @@
 package com.ecabin.ledger.api;
 
 import com.ecabin.ledger.config.LocalAuthConfig;
+import com.ecabin.ledger.service.UserLoginMonitoringService;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
@@ -31,12 +32,15 @@ public class LocalDevAuthController {
 
     private final JdbcTemplate jdbc;
     private final JwtEncoder encoder;
+    private final UserLoginMonitoringService loginMonitoring;
     private final List<String> allowedEmails;
 
-    public LocalDevAuthController(JdbcTemplate jdbc, JwtEncoder encoder,
+    @org.springframework.beans.factory.annotation.Autowired
+    public LocalDevAuthController(JdbcTemplate jdbc, JwtEncoder encoder, UserLoginMonitoringService loginMonitoring,
             @Value("${app.local-auth.emails:abc@gmail.com}") String allowedEmails) {
         this.jdbc = jdbc;
         this.encoder = encoder;
+        this.loginMonitoring = loginMonitoring;
         this.allowedEmails = List.of(allowedEmails.split(",")).stream()
             .map(email -> email.trim().toLowerCase(Locale.ROOT))
             .filter(email -> !email.isBlank()).distinct().toList();
@@ -69,7 +73,13 @@ public class LocalDevAuthController {
             .build();
         String token = encoder.encode(JwtEncoderParameters.from(
             JwsHeader.with(MacAlgorithm.HS256).build(), claims)).getTokenValue();
+        if (loginMonitoring != null) loginMonitoring.recordSuccessfulLogin(DEMO_OPERATOR_ID, email, UserLoginMonitoringService.LoginSource.LOCAL_DEMO);
         return new TokenResponse(token, expiresAt);
+    }
+
+    /** Compatibility constructor for controller unit tests that do not exercise event persistence. */
+    public LocalDevAuthController(JdbcTemplate jdbc, JwtEncoder encoder, String allowedEmails) {
+        this(jdbc, encoder, null, allowedEmails);
     }
 
     public record TokenRequest(@NotBlank @Email String email) {}

@@ -41,12 +41,14 @@ public class DefectService {
     private final JdbcTemplate jdbc;
     private final NotificationService notifications;
     private final AreaMaintenanceRoutingService areaRouting;
+    private final DefectReferenceService defectReferences;
 
     @org.springframework.beans.factory.annotation.Autowired
-    public DefectService(JdbcTemplate jdbc, NotificationService notifications, AreaMaintenanceRoutingService areaRouting) { this.jdbc = jdbc; this.notifications = notifications; this.areaRouting = areaRouting; }
+    public DefectService(JdbcTemplate jdbc, NotificationService notifications, AreaMaintenanceRoutingService areaRouting, DefectReferenceService defectReferences) { this.jdbc = jdbc; this.notifications = notifications; this.areaRouting = areaRouting; this.defectReferences = defectReferences; }
     /** Compatibility constructor for isolated legacy unit tests. */
-    public DefectService(JdbcTemplate jdbc, NotificationService notifications) { this(jdbc, notifications, null); }
-    public DefectService(JdbcTemplate jdbc) { this(jdbc, null, null); }
+    public DefectService(JdbcTemplate jdbc, NotificationService notifications, AreaMaintenanceRoutingService areaRouting) { this(jdbc, notifications, areaRouting, new DefectReferenceService(jdbc)); }
+    public DefectService(JdbcTemplate jdbc, NotificationService notifications) { this(jdbc, notifications, null, new DefectReferenceService(jdbc)); }
+    public DefectService(JdbcTemplate jdbc) { this(jdbc, null, null, new DefectReferenceService(jdbc)); }
 
     public DefectPage list(UUID operatorId, String externalUserId, String status, String location, String query, String searchBy, String aircraftType,
             Instant fromDate, Instant toDate, boolean mine, String cursor, int limit) {
@@ -414,7 +416,7 @@ public class DefectService {
         String conditionName = jdbc.query("SELECT c.name FROM component_conditions_mst m JOIN defect_conditions_mst c ON c.operator_id=m.operator_id AND c.id=m.condition_id AND c.isactive=1 WHERE m.operator_id=? AND m.component_id=? AND m.condition_id=? AND m.isactive=1", rs -> rs.next() ? rs.getString(1) : null, operatorId, input.componentId(), input.conditionId());
         if (conditionName == null) throw new IllegalArgumentException("Choose an active condition mapped to the selected component and organization.");
         UUID id = UUID.randomUUID();
-        String reference = "EL-" + id.toString().replace("-", "").substring(0, 21).toUpperCase();
+        String reference = defectReferences.next(operatorId, input.areaId());
         AreaMaintenanceRoutingService.Route configuredRoute = areaRouting == null ? null : areaRouting.route(operatorId,input.areaId());
         boolean direct = configuredRoute != null && "DIRECT_MAINTENANCE".equals(configuredRoute.mode());
         UUID workflowVersionId = configuredRoute == null ? null : configuredRoute.workflowVersionId();

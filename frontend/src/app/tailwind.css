@@ -1,0 +1,13 @@
+/* Tailwind v4 is utility-only here. Omitting preflight preserves the existing UI reset and design system. */
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+
+@source "./";
+@source "../common";
+
+@theme inline {
+  --font-sans: var(--sans);
+  --color-brand-green: var(--green);
+  --color-brand-deep: var(--deep);
+  --color-brand-paper: var(--paper);
+}

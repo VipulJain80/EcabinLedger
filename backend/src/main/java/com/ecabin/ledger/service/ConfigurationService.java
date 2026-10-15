@@ -40,7 +40,7 @@ public class ConfigurationService {
         AIRCRAFT("aircraft", "Aircraft", "aircraft_mst", "id,fleet_id AS \"fleetId\",msn_number AS \"msnNumber\",tail_number AS \"tailNumber\",aircraft_type AS \"aircraftType\",isactive,created_at,updated_at", Map.of("fleetId", "fleet_id", "msnNumber", "msn_number", "tailNumber", "tail_number", "aircraftType", "aircraft_type"), true),
         CATEGORIES("defect-categories", "Defect categories", "defect_categories_mst", "id,code,name,description,isactive,created_at,updated_at", Map.of("code", "code", "name", "name", "description", "description"), true),
         CONDITIONS("defect-conditions", "Defect conditions", "defect_conditions_mst", "id,code,name,description,isactive,created_at,updated_at", Map.of("code", "code", "name", "name", "description", "description"), true),
-        AREAS("areas", "Area Master", "cabin_areas_mst", "id,code,name,description,isactive,created_at,updated_at", Map.of("code", "code", "name", "name", "description", "description"), true),
+        AREAS("areas", "Area Master", "cabin_areas_mst", "id,code,name,shortcode,description,isactive,created_at,updated_at", Map.of("code", "code", "name", "name", "shortcode", "shortcode", "description", "description"), true),
         COMPONENTS("components", "Components", "cabin_components_mst", "id,code,name,area_id AS \"areaId\",description,isactive,created_at,updated_at", Map.of("code", "code", "name", "name", "areaId", "area_id", "description", "description"), true),
         TEAMS("maintenance-teams", "Teams", "maintenance_teams_mst", "id,name,team_type AS \"teamType\",isactive,created_at,updated_at", Map.of("name", "name", "teamType", "team_type"), true),
         USERS("users", "Users and roles", "operator_memberships_mst", "external_user_id AS id,external_user_id AS \"externalUserId\",display_name AS \"displayName\",role,(SELECT COALESCE(string_agg(DISTINCT omt.team_name,'|' ORDER BY omt.team_name),'') FROM operator_membership_teams_mst omt JOIN maintenance_teams_mst mt ON mt.operator_id=omt.operator_id AND mt.name=omt.team_name AND mt.isactive=1 WHERE omt.operator_id=operator_memberships_mst.operator_id AND omt.external_user_id=operator_memberships_mst.external_user_id AND omt.isactive=1) AS \"teamNames\",(SELECT COALESCE(string_agg(DISTINCT mt.id::text,'|' ORDER BY mt.id::text),'') FROM operator_membership_teams_mst omt JOIN maintenance_teams_mst mt ON mt.operator_id=omt.operator_id AND mt.name=omt.team_name AND mt.isactive=1 WHERE omt.operator_id=operator_memberships_mst.operator_id AND omt.external_user_id=operator_memberships_mst.external_user_id AND omt.isactive=1) AS \"teamIds\",isactive,created_at,updated_at", Map.of("externalUserId", "external_user_id", "displayName", "display_name", "role", "role"), true),
@@ -63,7 +63,7 @@ public class ConfigurationService {
     }
 
     private static final Set<String> PERMISSIONS = java.util.Arrays.stream(Permission.values()).map(Enum::name).collect(java.util.stream.Collectors.toUnmodifiableSet());
-    private static final Set<String> NAVIGATION_ROUTE_KEYS = Set.of("home","operations","reports","audit","configuration","defects","fleet","quality","organizations","fleets","aircraft","areas","defect-categories","defect-conditions","components","maintenance-teams","reviewer-routing","area-team-mapping","maintenance-sla-policies","review-queue","users","menu-items","roles","severities","permissions","role-permissions","api-rate-limits","report-defect");
+    private static final Set<String> NAVIGATION_ROUTE_KEYS = Set.of("home","operations","reports","audit","configuration","defects","fleet","quality","organizations","fleets","aircraft","areas","defect-categories","defect-conditions","components","maintenance-teams","reviewer-routing","area-team-mapping","maintenance-sla-policies","review-queue","users","menu-items","roles","severities","permissions","role-permissions","api-rate-limits","user-login-monitoring","report-defect");
     private final JdbcTemplate jdbc;
     private final ObjectMapper mapper;
 
@@ -269,7 +269,7 @@ public class ConfigurationService {
             case ORGANIZATION -> "operators_mst o";
             case AIRCRAFT -> "aircraft_mst r JOIN fleets_mst f ON f.operator_id=r.operator_id AND f.id=r.fleet_id";
             case COMPONENTS -> "cabin_components_mst r JOIN cabin_areas_mst a ON a.operator_id=r.operator_id AND a.id=r.area_id";
-            case USERS -> "operator_memberships_mst r";
+            case USERS -> "operator_memberships_mst r LEFT JOIN LATERAL (SELECT max(e.occurred_at) AS last_activity_at,max(e.occurred_at) FILTER (WHERE e.event_type='LOGOUT') AS last_logout_at FROM user_login_events_dtl e WHERE e.operator_id=r.operator_id AND e.external_user_id=r.external_user_id) ev ON true";
             case NAVIGATION -> "navigation_menu_items_mst r LEFT JOIN navigation_menu_items_mst p ON p.operator_id=r.operator_id AND p.id=r.parent_id";
             case ROLES -> "operator_roles_mst r";
             case SEVERITIES -> "defect_severities_mst r";
@@ -284,12 +284,12 @@ public class ConfigurationService {
             case ORGANIZATION -> "o.id,o.name,o.isactive,o.created_at,o.updated_at";
             case FLEETS -> "r.id,r.name,r.isactive,r.created_at,r.updated_at";
             case AIRCRAFT -> "r.id,r.msn_number AS \"msnNumber\",r.tail_number AS \"tailNumber\",r.aircraft_type AS \"aircraftType\",r.fleet_id AS \"fleetId\",f.name AS \"fleetName\",r.isactive,r.created_at,r.updated_at";
-            case AREAS -> "r.id,r.code,r.name,r.description,r.isactive,r.created_at,r.updated_at";
+            case AREAS -> "r.id,r.code,r.name,r.shortcode,r.description,r.isactive,r.created_at,r.updated_at";
             case CATEGORIES -> "r.id,r.code,r.name,r.description,r.isactive,r.created_at,r.updated_at";
             case CONDITIONS -> "r.id,r.code,r.name,r.description,COALESCE((SELECT string_agg(DISTINCT c.name,', ' ORDER BY c.name) FROM component_conditions_mst m JOIN cabin_components_mst c ON c.operator_id=m.operator_id AND c.id=m.component_id AND c.isactive=1 WHERE m.operator_id=r.operator_id AND m.condition_id=r.id AND m.isactive=1),'') AS \"applicableComponents\",r.isactive,r.created_at,r.updated_at";
             case COMPONENTS -> "r.id,r.code,r.name,r.area_id AS \"areaId\",a.code AS \"areaCode\",a.name AS \"areaName\",r.description,r.isactive,r.created_at,r.updated_at";
             case TEAMS -> "r.id,r.name,r.team_type AS \"teamType\",r.isactive,r.created_at,r.updated_at";
-            case USERS -> "r.external_user_id AS id,r.external_user_id AS \"externalUserId\",r.display_name AS \"displayName\",r.role,COALESCE((SELECT string_agg(DISTINCT omt.team_name,'|' ORDER BY omt.team_name) FROM operator_membership_teams_mst omt JOIN maintenance_teams_mst mt ON mt.operator_id=omt.operator_id AND mt.name=omt.team_name AND mt.isactive=1 WHERE omt.operator_id=r.operator_id AND omt.external_user_id=r.external_user_id AND omt.isactive=1),'') AS \"teamNames\",COALESCE((SELECT string_agg(DISTINCT mt.id::text,'|' ORDER BY mt.id::text) FROM operator_membership_teams_mst omt JOIN maintenance_teams_mst mt ON mt.operator_id=omt.operator_id AND mt.name=omt.team_name AND mt.isactive=1 WHERE omt.operator_id=r.operator_id AND omt.external_user_id=r.external_user_id AND omt.isactive=1),'') AS \"teamIds\",r.isactive,r.created_at,r.updated_at";
+            case USERS -> "r.external_user_id AS id,r.external_user_id AS \"externalUserId\",r.display_name AS \"displayName\",r.role,r.last_login_at AS \"lastLoginAt\",ev.last_logout_at AS \"lastLogoutAt\",ev.last_activity_at AS \"lastActivityAt\",CASE WHEN r.last_login_at IS NULL THEN NULL ELSE floor(extract(epoch FROM (now()-r.last_login_at))/86400)::bigint END AS \"daysSinceLogin\",CASE WHEN r.last_login_at IS NULL THEN 'NEVER_LOGGED_IN' WHEN r.last_login_at > now()-interval '30 days' THEN 'ACTIVE_RECENTLY' ELSE 'INACTIVE_30_DAYS' END AS \"inactivityStatus\",COALESCE((SELECT string_agg(DISTINCT omt.team_name,'|' ORDER BY omt.team_name) FROM operator_membership_teams_mst omt JOIN maintenance_teams_mst mt ON mt.operator_id=omt.operator_id AND mt.name=omt.team_name AND mt.isactive=1 WHERE omt.operator_id=r.operator_id AND omt.external_user_id=r.external_user_id AND omt.isactive=1),'') AS \"teamNames\",COALESCE((SELECT string_agg(DISTINCT mt.id::text,'|' ORDER BY mt.id::text) FROM operator_membership_teams_mst omt JOIN maintenance_teams_mst mt ON mt.operator_id=omt.operator_id AND mt.name=omt.team_name AND mt.isactive=1 WHERE omt.operator_id=r.operator_id AND omt.external_user_id=r.external_user_id AND omt.isactive=1),'') AS \"teamIds\",r.isactive,r.created_at,r.updated_at";
             case NAVIGATION -> "r.id,r.menu_key AS key,r.label,r.parent_id AS \"parentId\",p.label AS \"parentLabel\",r.required_permissions AS \"requiredPermissions\",r.icon,r.route_key AS \"routeKey\",r.display_order AS \"displayOrder\",r.isactive,r.created_at,r.updated_at";
             case ROLES -> "r.id,r.role_key AS \"roleKey\",r.name,r.description,r.permissions,r.isactive,r.system_role AS \"systemRole\",r.created_at,r.updated_at";
             case SEVERITIES -> "r.id,r.severity_code AS code,r.severity_name AS name,r.description,r.sort_order AS \"sortOrder\",r.isactive,r.created_at,r.updated_at";
@@ -304,7 +304,7 @@ public class ConfigurationService {
             case FLEETS -> List.of("r.name");
             case TEAMS -> List.of("r.name","r.team_type");
             case AIRCRAFT -> List.of("r.msn_number","r.tail_number","r.aircraft_type");
-            case AREAS -> List.of("r.code","r.name","r.description");
+            case AREAS -> List.of("r.code","r.name","r.shortcode","r.description");
             case CATEGORIES -> List.of("r.code","r.name","r.description");
             case CONDITIONS -> List.of("r.code","r.name","r.description","COALESCE((SELECT string_agg(c.name,', ' ORDER BY c.name) FROM component_conditions_mst m JOIN cabin_components_mst c ON c.operator_id=m.operator_id AND c.id=m.component_id AND c.isactive=1 WHERE m.operator_id=r.operator_id AND m.condition_id=r.id AND m.isactive=1),'')");
             case COMPONENTS -> List.of("r.code","r.name","a.code","a.name");
@@ -322,12 +322,12 @@ public class ConfigurationService {
             case ORGANIZATION -> Map.of("name","o.name","created_at","o.created_at","updated_at","o.updated_at");
             case FLEETS -> Map.of("name","r.name","created_at","r.created_at","updated_at","r.updated_at");
             case AIRCRAFT -> Map.of("msnNumber","r.msn_number","tailNumber","r.tail_number","aircraftType","r.aircraft_type","fleetName","f.name","created_at","r.created_at");
-            case AREAS -> Map.of("code","r.code","name","r.name","description","r.description","created_at","r.created_at");
+            case AREAS -> Map.of("code","r.code","name","r.name","shortcode","r.shortcode","description","r.description","created_at","r.created_at");
             case CATEGORIES -> Map.of("code","r.code","name","r.name","description","r.description","created_at","r.created_at");
             case CONDITIONS -> Map.of("code","r.code","name","r.name","description","r.description","applicableComponents","COALESCE((SELECT string_agg(c.name,', ' ORDER BY c.name) FROM component_conditions_mst m JOIN cabin_components_mst c ON c.operator_id=m.operator_id AND c.id=m.component_id AND c.isactive=1 WHERE m.operator_id=r.operator_id AND m.condition_id=r.id AND m.isactive=1),'')","created_at","r.created_at");
             case COMPONENTS -> Map.of("code","r.code","name","r.name","areaCode","a.code","areaName","a.name","created_at","r.created_at");
             case TEAMS -> Map.of("name","r.name","teamType","r.team_type","created_at","r.created_at","updated_at","r.updated_at");
-            case USERS -> Map.of("displayName","r.display_name","externalUserId","r.external_user_id","role","r.role","created_at","r.created_at");
+            case USERS -> Map.of("displayName","r.display_name","externalUserId","r.external_user_id","role","r.role","lastLoginAt","r.last_login_at","lastLogoutAt","ev.last_logout_at","lastActivityAt","ev.last_activity_at","daysSinceLogin","r.last_login_at","inactivityStatus","r.last_login_at","created_at","r.created_at");
             case NAVIGATION -> Map.of("label","r.label","key","r.menu_key","parentLabel","p.label","requiredPermissions","r.required_permissions","routeKey","r.route_key","displayOrder","r.display_order","created_at","r.created_at");
             case ROLES -> Map.of("roleKey","r.role_key","name","r.name","description","r.description","permissions","r.permissions","created_at","r.created_at");
             case SEVERITIES -> Map.of("code","r.severity_code","name","r.severity_name","description","r.description","sortOrder","r.sort_order","created_at","r.created_at","updated_at","r.updated_at");
@@ -341,12 +341,12 @@ public class ConfigurationService {
             case ORGANIZATION -> List.of(new String[]{"Organization","name"},new String[]{"Status","isactive"},new String[]{"Created","created_at"});
             case FLEETS -> List.of(new String[]{"Fleet","name"},new String[]{"Status","isactive"},new String[]{"Created","created_at"});
             case AIRCRAFT -> List.of(new String[]{"MSN Number","msnNumber"},new String[]{"Registration","tailNumber"},new String[]{"Aircraft type","aircraftType"},new String[]{"Fleet","fleetName"},new String[]{"Status","isactive"},new String[]{"Created","created_at"});
-            case AREAS -> List.of(new String[]{"Area code","code"},new String[]{"Area name","name"},new String[]{"Description","description"},new String[]{"Status","isactive"},new String[]{"Created","created_at"});
+            case AREAS -> List.of(new String[]{"Area code","code"},new String[]{"Area name","name"},new String[]{"Shortcode","shortcode"},new String[]{"Description","description"},new String[]{"Status","isactive"},new String[]{"Created","created_at"});
             case CATEGORIES -> List.of(new String[]{"Code","code"},new String[]{"Category","name"},new String[]{"Description","description"},new String[]{"Status","isactive"},new String[]{"Created","created_at"});
             case CONDITIONS -> List.of(new String[]{"Condition code","code"},new String[]{"Condition","name"},new String[]{"Description","description"},new String[]{"Applicable components","applicableComponents"},new String[]{"Status","isactive"},new String[]{"Created","created_at"});
             case COMPONENTS -> List.of(new String[]{"Code","code"},new String[]{"Component","name"},new String[]{"Area","areaName"},new String[]{"Area code","areaCode"},new String[]{"Status","isactive"},new String[]{"Created","created_at"});
             case TEAMS -> List.of(new String[]{"Team","name"},new String[]{"Type","teamType"},new String[]{"Status","isactive"},new String[]{"Created","created_at"});
-            case USERS -> List.of(new String[]{"Name","displayName"},new String[]{"Enterprise identity","externalUserId"},new String[]{"Role","role"},new String[]{"Teams","teamNames"},new String[]{"Status","isactive"},new String[]{"Created","created_at"});
+            case USERS -> List.of(new String[]{"Name","displayName"},new String[]{"Enterprise identity","externalUserId"},new String[]{"Role","role"},new String[]{"Teams","teamNames"},new String[]{"Last login","lastLoginAt"},new String[]{"Last logout","lastLogoutAt"},new String[]{"Days since login","daysSinceLogin"},new String[]{"Inactivity status","inactivityStatus"},new String[]{"Status","isactive"},new String[]{"Created","created_at"});
             case NAVIGATION -> List.of(new String[]{"Menu / submenu","label"},new String[]{"Key","key"},new String[]{"Parent menu","parentLabel"},new String[]{"Visible permissions","requiredPermissions"},new String[]{"Application section","routeKey"},new String[]{"Order","displayOrder"},new String[]{"Status","isactive"},new String[]{"Created","created_at"});
             case ROLES -> List.of(new String[]{"Role key","roleKey"},new String[]{"Role","name"},new String[]{"Description","description"},new String[]{"Permissions","permissions"},new String[]{"System role","systemRole"},new String[]{"Status","isactive"},new String[]{"Created","created_at"});
             case SEVERITIES -> List.of(new String[]{"Code","code"},new String[]{"Severity","name"},new String[]{"Description","description"},new String[]{"Order","sortOrder"},new String[]{"Status","isactive"},new String[]{"Created","created_at"});
@@ -382,6 +382,8 @@ public class ConfigurationService {
         } else if (creating) entityId = values.get("externalUserId");
         if (resource == Resource.AIRCRAFT) requireActiveFleet(operatorId, values.get("fleetId"));
         if (resource == Resource.COMPONENTS) requireActiveArea(operatorId, values.get("areaId"));
+        if (resource == Resource.AREAS && exists("SELECT 1 FROM cabin_areas_mst WHERE operator_id=? AND shortcode=? AND isactive IN (1,2) AND id<>COALESCE(CAST(? AS uuid),'00000000-0000-0000-0000-000000000000'::uuid)", operatorId, values.get("shortcode"), creating ? null : request.id()))
+            throw new IllegalArgumentException("This area shortcode is already in use in your organization. Choose a different shortcode.");
         List<UUID> selectedTeamIds = resource == Resource.USERS && request.fields().containsKey("teamIds")
             ? validateTeamIds(operatorId, request.fields().get("teamIds")) : null;
 
@@ -441,8 +443,14 @@ public class ConfigurationService {
         if (reason == null || reason.isBlank() || reason.length() > 1000) throw new IllegalArgumentException("A reason of up to 1000 characters is required.");
         String entityId = id;
         if (resource != Resource.USERS) entityId = parseUuid(id).toString();
+        if (resource == Resource.USERS) {
+            // Serialize membership deactivation within the tenant so concurrent requests cannot both remove
+            // the final active administrator after independently observing a count of two.
+            jdbc.query("SELECT id FROM operators_mst WHERE id=? FOR UPDATE", (ResultSetExtractor<Boolean>) rs -> rs.next(), operatorId);
+        }
         Map<String, Object> previous = find(resource, operatorId, entityId);
         if (previous == null) throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.NOT_FOUND, "Configuration record was not found or is already inactive.");
+        if (((Number) previous.get("isactive")).intValue() != 1) throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.NOT_FOUND, "Configuration record was not found or is already inactive.");
         if (resource == Resource.FLEETS && exists("SELECT 1 FROM aircraft_mst WHERE operator_id=? AND fleet_id=? AND isactive=1 LIMIT 1", operatorId, UUID.fromString(entityId)))
             throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.CONFLICT, "Move or deactivate the fleet's aircraft before deactivating this fleet.");
         if (resource == Resource.AREAS && (exists("SELECT 1 FROM cabin_components_mst WHERE operator_id=? AND area_id=? AND isactive=1 LIMIT 1", operatorId, UUID.fromString(entityId)) || exists("SELECT 1 FROM defects_dtl WHERE operator_id=? AND area_id=? AND isactive=1 AND status NOT IN ('CLOSED','CANCELLED','REJECTED') LIMIT 1", operatorId, UUID.fromString(entityId))))
@@ -468,7 +476,8 @@ public class ConfigurationService {
         if (resource == Resource.ROLES && ("ADMIN".equals(previous.get("roleKey")) || exists("SELECT 1 FROM operator_memberships_mst WHERE operator_id=? AND role=? AND isactive=1 LIMIT 1", operatorId, previous.get("roleKey"))))
             throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.CONFLICT, "The Administrator role is protected. Reassign active users before deactivating another role.");
         String sql = "UPDATE " + resource.table + " SET isactive=2,updated_at=now() WHERE operator_id=? AND " + (resource == Resource.USERS ? "external_user_id" : "id") + "=? AND isactive=1";
-        jdbc.update(sql, operatorId, resource == Resource.USERS ? entityId : UUID.fromString(entityId));
+        int changed = jdbc.update(sql, operatorId, resource == Resource.USERS ? entityId : UUID.fromString(entityId));
+        if (changed != 1) throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.CONFLICT, "The record changed while this request was being processed. Refresh and try again.");
         if (resource == Resource.TEAMS) {
             String teamName = String.valueOf(previous.get("name"));
             jdbc.update("UPDATE operator_membership_teams_mst SET isactive=2 WHERE operator_id=? AND team_name=? AND isactive=1", operatorId, teamName);
@@ -515,7 +524,7 @@ public class ConfigurationService {
         Set<String> required = switch (resource) {
             case ORGANIZATION, FLEETS, TEAMS -> Set.of("name");
             case AIRCRAFT -> Set.of("fleetId", "tailNumber", "aircraftType");
-            case AREAS -> Set.of("code", "name");
+            case AREAS -> Set.of("code", "name", "shortcode");
             case CATEGORIES, CONDITIONS -> Set.of("code", "name");
             case COMPONENTS -> Set.of("code", "name", "areaId");
             case USERS -> fields.containsKey("externalUserId") ? Set.of("externalUserId", "displayName", "role") : Set.of("displayName", "role");
@@ -571,6 +580,9 @@ public class ConfigurationService {
             if (!code.matches("[A-Z0-9_]{1," + (resource == Resource.SEVERITIES ? "24" : "48") + "}")) throw new IllegalArgumentException("Code may contain uppercase letters, digits and underscores.");
             result.put("code", code);
         }
+        if (resource == Resource.AREAS) {
+            result.put("shortcode", AreaShortcodeRules.normalize(result.get("shortcode")));
+        }
         if (resource == Resource.SEVERITIES) {
             try { int order=Integer.parseInt(result.get("sortOrder")); if(order<0||order>9999) throw new NumberFormatException(); result.put("sortOrder",String.valueOf(order)); }
             catch(NumberFormatException ex) { throw new IllegalArgumentException("Display order must be between 0 and 9999."); }
@@ -589,6 +601,7 @@ public class ConfigurationService {
         if (field.equals("aircraftType")) return 80;
         if (field.equals("tailNumber") || field.equals("msnNumber")) return 16;
         if (field.equals("code")) return resource == Resource.SEVERITIES ? 24 : 48;
+        if (resource == Resource.AREAS && field.equals("shortcode")) return 10;
         if (field.equals("area")) return 32;
         if (field.equals("role")) return 48;
         return resource == Resource.ORGANIZATION ? 160 : 120;

@@ -3,9 +3,11 @@ package com.ecabin.ledger.config;
 import java.security.SecureRandom;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.SecretKeySpec;
+import org.springframework.boot.ApplicationRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
+import org.springframework.core.env.Environment;
 import org.springframework.security.oauth2.core.OAuth2Error;
 import org.springframework.security.oauth2.core.OAuth2TokenValidator;
 import org.springframework.security.oauth2.core.OAuth2TokenValidatorResult;
@@ -25,6 +27,17 @@ import org.springframework.security.oauth2.core.DelegatingOAuth2TokenValidator;
 public class LocalAuthConfig {
     public static final String ISSUER = "ecabin-ledger-local";
     public static final String AUDIENCE = "ecabin-ledger-api";
+
+    @Bean
+    ApplicationRunner rejectLocalAuthOutsideWorkstation(Environment environment) {
+        return args -> {
+            for (String profile : environment.getActiveProfiles()) {
+                if (profile.equalsIgnoreCase("uat") || profile.equalsIgnoreCase("staging") || profile.equalsIgnoreCase("prod") || profile.equalsIgnoreCase("production")) {
+                    throw new IllegalStateException("The local-auth profile cannot be enabled with a UAT, staging, or production profile.");
+                }
+            }
+        };
+    }
 
     @Bean
     SecretKey localJwtSigningKey() {

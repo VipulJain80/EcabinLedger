@@ -30,11 +30,11 @@ test("missing or misconfigured mandatory backend properties block reporting", ()
   assert.throws(() => defectReportPayload(fields, { category_ref: "cat-id" }), /Complete Component/);
 });
 
-test("a remarks-only published form explains that a new bound version is required", () => {
+test("a remarks-only draft reports missing bindings as publication validation for administrators", () => {
   const issue = defectReportBindingIssue([{ key: "remarks", label: "Remarks", type: "TEXTAREA", required: true, binding: "REMARKS" }]);
   assert.match(issue, /Defect category, Component, Condition, Location, Title, Description, Severity, Aircraft Registration/);
-  assert.match(issue, /create a new version/);
-  assert.match(issue, /publish it/);
+  assert.match(issue, /add the approved fields to this draft before publishing/i);
+  assert.doesNotMatch(issue, /This published defect-report form/i);
 });
 
 test("designer metadata describes internal key, type and required state without repeating the label", () => {

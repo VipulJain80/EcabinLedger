@@ -25,7 +25,7 @@ export function defectReportBindingIssue(fields: readonly ReportField[], areaCod
     };
     return galley
       ? `Galley Area requires these fields: ${missing.map(binding => labels[binding]).join(", ")}.`
-      : `This published defect-report form is missing required bindings: ${missing.map(binding => labels[binding]).join(", ")}. In Form Master, create a new version, configure these required fields, and publish it.`;
+      : `Required defect-report bindings are missing: ${missing.map(binding => labels[binding]).join(", ")}. Add the approved fields to this draft before publishing.`;
   }
   const expected: Partial<Record<DefectBinding, [string, string?]>> = {
     DEFECT_CATEGORY: ["DROPDOWN", "DEFECT_CATEGORIES"], COMPONENT_ID: ["DROPDOWN", "COMPONENTS"],

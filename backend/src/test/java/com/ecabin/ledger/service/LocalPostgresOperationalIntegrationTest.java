@@ -32,13 +32,21 @@ import com.ecabin.ledger.service.ConfigurationService.SaveRequest;
 import com.ecabin.ledger.security.AppRole;
 import com.ecabin.ledger.security.CurrentUserResolver;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.Executors;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -72,6 +80,37 @@ import org.springframework.mock.web.MockMultipartFile;
 })
 @AutoConfigureMockMvc
 class LocalPostgresOperationalIntegrationTest {
+    @Autowired DefectReferenceService defectReferences;
+    @Autowired PlatformTransactionManager transactionManager;
+
+    @Test
+    void postgresAllocatesConcurrentDefectReferencesAtomicallyPerTenantDateAndArea() throws Exception {
+        UUID tenant = jdbc.queryForObject("SELECT id FROM operators_mst ORDER BY id LIMIT 1", UUID.class);
+        UUID areaId = UUID.randomUUID();
+        String suffix = UUID.randomUUID().toString().replace("-", "").substring(0, 9).toUpperCase(java.util.Locale.ROOT);
+        String shortcode = "T" + suffix;
+        String code = "REF_TEST_" + suffix;
+        jdbc.update("INSERT INTO cabin_areas_mst(id,operator_id,code,name,shortcode) VALUES(?,?,?,'Reference counter test area',?)", areaId, tenant, code, shortcode);
+
+        var pool = Executors.newFixedThreadPool(8);
+        try {
+            var tasks = new ArrayList<java.util.concurrent.Callable<String>>();
+            for (int i = 0; i < 24; i++) tasks.add(() -> new TransactionTemplate(transactionManager).execute(status -> defectReferences.next(tenant, areaId)));
+            var references = new HashSet<String>();
+            for (var future : pool.invokeAll(tasks)) references.add(future.get());
+            assertEquals(24, references.size(), "Concurrent allocations for the same tenant/date/area must never collide.");
+            var byDate = references.stream().collect(java.util.stream.Collectors.groupingBy(value -> value.substring(0, 8)));
+            byDate.forEach((date, values) -> {
+                var sequences = values.stream().map(value -> Long.parseLong(value.substring(value.lastIndexOf('-') + 1))).sorted().toList();
+                for (int i = 0; i < sequences.size(); i++) assertEquals(i + 1L, sequences.get(i), "Each business date starts its area sequence at 01 and increments without gaps within committed allocations.");
+            });
+        } finally {
+            pool.shutdownNow();
+            jdbc.update("DELETE FROM defect_reference_counters_dtl WHERE operator_id=? AND area_shortcode=?", tenant, shortcode);
+            jdbc.update("DELETE FROM cabin_areas_mst WHERE operator_id=? AND id=?", tenant, areaId);
+        }
+    }
+
     @DynamicPropertySource
     static void database(DynamicPropertyRegistry registry) {
         registry.add("spring.datasource.url", () -> requiredEnv("SPRING_DATASOURCE_URL"));
@@ -442,12 +481,13 @@ class LocalPostgresOperationalIntegrationTest {
             org, "team-tech-a", teamA, org, "team-multi", teamA, org, "team-tech-b", teamB, org, "team-multi", teamB);
 
         UUID area = UUID.randomUUID();
-        jdbc.update("INSERT INTO cabin_areas_mst(id,operator_id,code,name) VALUES(?,?,?,'Forward cabin')", area, org, "TEAM_AREA_" + area.toString().substring(0, 8));
+        jdbc.update("INSERT INTO cabin_areas_mst(id,operator_id,code,name,shortcode) VALUES(?,?,?,'Forward cabin',?)", area, org, "TEAM_AREA_" + area.toString().substring(0, 8), "T" + area.toString().substring(0, 5).toUpperCase(java.util.Locale.ROOT));
         UUID component = UUID.randomUUID();
         jdbc.update("INSERT INTO cabin_components_mst(id,operator_id,area_id,code,name) VALUES(?,?,?,?,?)", component, org, area, "TEAM_CMP_" + component.toString().substring(0, 8), "Seat assembly");
         UUID condition = createCondition(org, component);
         String tail = jdbc.queryForObject("SELECT tail_number FROM aircraft_mst WHERE operator_id=?", String.class, org);
         DefectView defect = defects.create(org, "team-reviewer", new CreateDefectRequest(tail, "CABIN", "SEAT", area, component, condition, "FWD CABIN", 14, "14A", null, "Seat finding", "Team assignment test finding.", "MEDIUM"));
+        assertTrue(defect.reference().matches("\\d{8}-T[A-F0-9]{5}-01"), "Defect creation must use the validated area's shortcode and begin its independent UTC-date sequence at 01.");
         defects.transition(org, defect.id(), "team-reviewer", new TransitionRequest("UNDER_REVIEW", "Reviewed.", null, null));
         defects.transition(org, defect.id(), "team-reviewer", new TransitionRequest("INSPECTION_REQUIRED", "Inspection requested.", null, null));
         defects.transition(org, defect.id(), "team-inspector", new TransitionRequest("INSPECTION_IN_PROGRESS", "Inspection started.", null, null));

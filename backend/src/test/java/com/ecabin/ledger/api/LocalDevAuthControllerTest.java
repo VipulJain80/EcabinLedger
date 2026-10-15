@@ -3,8 +3,11 @@ package com.ecabin.ledger.api;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 
 import com.ecabin.ledger.config.LocalAuthConfig;
+import com.ecabin.ledger.service.UserLoginMonitoringService;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -48,6 +51,20 @@ class LocalDevAuthControllerTest {
         assertThrows(ResponseStatusException.class, () -> controller.issueToken(
             new LocalDevAuthController.TokenRequest("reviewer.test@ecabin.local")));
         assertEquals(List.of("reviewer.test@ecabin.local"), jdbc.checkedSubjects);
+    }
+
+    @Test
+    void recordsLocalLoginOnlyAfterAnActiveAllowListedIdentityReceivesAToken() {
+        StubJdbcTemplate jdbc = new StubJdbcTemplate(true);
+        JwtEncoder encoder = parameters -> new Jwt("local-demo-token", Instant.now(), Instant.now().plusSeconds(900),
+            Map.of("alg", "HS256"), Map.of("sub", parameters.getClaims().getSubject()));
+        UserLoginMonitoringService monitoring = mock(UserLoginMonitoringService.class);
+        LocalDevAuthController controller = new LocalDevAuthController(jdbc, encoder, monitoring, "abc@gmail.com");
+
+        controller.issueToken(new LocalDevAuthController.TokenRequest("ABC@gmail.com"));
+
+        verify(monitoring).recordSuccessfulLogin(java.util.UUID.fromString("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+            "abc@gmail.com", UserLoginMonitoringService.LoginSource.LOCAL_DEMO);
     }
 
     private static final class StubJdbcTemplate extends JdbcTemplate {

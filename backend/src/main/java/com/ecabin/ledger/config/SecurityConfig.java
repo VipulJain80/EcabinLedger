@@ -84,6 +84,8 @@ public class SecurityConfig {
                 .requestMatchers("/api/dev/token").permitAll()
                 .requestMatchers("/actuator/**", "/api-docs", "/api-docs/**", "/swagger-ui", "/swagger-ui/**", "/swagger-ui.html", "/v3/api-docs/**", "/webjars/**").authenticated()
                 .requestMatchers(HttpMethod.GET, "/api/v1/me", "/api/v1/navigation").access(authorization.authenticatedMember())
+                .requestMatchers(HttpMethod.GET, "/api/v1/administration/login-monitoring/**").access(authorization.anyOf(Permission.ADMINISTER_ORGANIZATION))
+                .requestMatchers(HttpMethod.POST, "/api/v1/auth/logout").access(authorization.authenticatedMember())
                 .requestMatchers(HttpMethod.GET, "/api/v1/rate-limits/**").access(authorization.anyOf(Permission.ADMINISTER_ORGANIZATION))
                 .requestMatchers(HttpMethod.POST, "/api/v1/rate-limits/**").access(authorization.anyOf(Permission.ADMINISTER_ORGANIZATION))
                 .requestMatchers(HttpMethod.GET, "/api/v1/maintenance-work-queue").access(authorization.anyOf(Permission.PERFORM_ACTION))
