@@ -46,7 +46,7 @@ public class ConfigurationService {
         USERS("users", "Users and roles", "operator_memberships_mst", "external_user_id AS id,external_user_id AS \"externalUserId\",display_name AS \"displayName\",role,(SELECT COALESCE(string_agg(DISTINCT omt.team_name,'|' ORDER BY omt.team_name),'') FROM operator_membership_teams_mst omt JOIN maintenance_teams_mst mt ON mt.operator_id=omt.operator_id AND mt.name=omt.team_name AND mt.isactive=1 WHERE omt.operator_id=operator_memberships_mst.operator_id AND omt.external_user_id=operator_memberships_mst.external_user_id AND omt.isactive=1) AS \"teamNames\",(SELECT COALESCE(string_agg(DISTINCT mt.id::text,'|' ORDER BY mt.id::text),'') FROM operator_membership_teams_mst omt JOIN maintenance_teams_mst mt ON mt.operator_id=omt.operator_id AND mt.name=omt.team_name AND mt.isactive=1 WHERE omt.operator_id=operator_memberships_mst.operator_id AND omt.external_user_id=operator_memberships_mst.external_user_id AND omt.isactive=1) AS \"teamIds\",isactive,created_at,updated_at", Map.of("externalUserId", "external_user_id", "displayName", "display_name", "role", "role"), true),
         NAVIGATION("menu-items", "Menus & submenus", "navigation_menu_items_mst", "id,menu_key AS key,label,parent_id AS \"parentId\",required_permissions AS \"requiredPermissions\",icon,route_key AS \"routeKey\",display_order AS \"displayOrder\",isactive,created_at,updated_at", Map.of("key", "menu_key", "label", "label", "parentId", "parent_id", "requiredPermissions", "required_permissions", "icon", "icon", "routeKey", "route_key", "displayOrder", "display_order"), true),
         ROLES("roles", "Roles", "operator_roles_mst", "id,role_key AS \"roleKey\",name,description,permissions,isactive,system_role AS \"systemRole\",created_at,updated_at", Map.of("roleKey", "role_key", "name", "name", "description", "description", "permissions", "permissions"), true),
-        SEVERITIES("severities", "Severity Master", "defect_severities_mst", "id,severity_code AS code,severity_name AS name,description,sort_order AS \"sortOrder\",isactive,created_at,updated_at", Map.of("code", "severity_code", "name", "severity_name", "description", "description", "sortOrder", "sort_order"), true),
+        SEVERITIES("severities", "Severity Master", "defect_severities_mst", "id,severity_code AS code,severity_name AS name,description,sort_order AS \"sortOrder\",background_color AS \"backgroundColor\",text_color AS \"textColor\",border_color AS \"borderColor\",icon,display_style AS \"displayStyle\",isactive,created_at,updated_at", Map.of("code", "severity_code", "name", "severity_name", "description", "description", "sortOrder", "sort_order", "backgroundColor", "background_color", "textColor", "text_color", "borderColor", "border_color", "icon", "icon", "displayStyle", "display_style"), true),
         PERMISSIONS("permissions", "Permission Master", "permissions_mst", "permission_id AS id,permission_code AS code,permission_name AS name,description,module,is_system_permission AS \"systemPermission\",(permission_code<>'ADMINISTER_ORGANIZATION') AS \"organizationAssignable\",isactive,created_at,updated_at", Map.of(), false),
         ROLE_MAPPINGS("role-permissions", "Role-Permission Mapping", "operator_roles_mst", "id,role_key AS \"roleKey\",name,description,permissions,isactive,system_role AS \"systemRole\",created_at,updated_at", Map.of(), true);
 
@@ -63,13 +63,18 @@ public class ConfigurationService {
     }
 
     private static final Set<String> PERMISSIONS = java.util.Arrays.stream(Permission.values()).map(Enum::name).collect(java.util.stream.Collectors.toUnmodifiableSet());
-    private static final Set<String> NAVIGATION_ROUTE_KEYS = Set.of("home","operations","reports","audit","configuration","defects","fleet","quality","organizations","fleets","aircraft","areas","defect-categories","defect-conditions","components","maintenance-teams","reviewer-routing","area-team-mapping","maintenance-sla-policies","review-queue","users","menu-items","roles","severities","permissions","role-permissions","api-rate-limits","user-login-monitoring","report-defect");
+    private static final Set<String> DEFECT_VIEW_ALL_NAVIGATION_ROUTES = Set.of("home", "operations", "defects");
+    private static final Set<String> NAVIGATION_ROUTE_KEYS = Set.of("home","operations","reports","audit","configuration","defects","fleet","quality","organizations","fleets","aircraft","areas","defect-categories","defect-conditions","components","maintenance-teams","reviewer-routing","area-team-mapping","maintenance-sla-policies","review-queue","users","menu-items","roles","severities","permissions","role-permissions","api-rate-limits","user-login-monitoring","report-defect","report-master");
     private final JdbcTemplate jdbc;
     private final ObjectMapper mapper;
 
     public ConfigurationService(JdbcTemplate jdbc, ObjectMapper mapper) { this.jdbc = jdbc; this.mapper = mapper; }
 
     static boolean isSupportedNavigationRoute(String routeKey) { return NAVIGATION_ROUTE_KEYS.contains(routeKey); }
+    static boolean isDefectViewAllNavigationRoute(String routeKey) { return DEFECT_VIEW_ALL_NAVIGATION_ROUTES.contains(routeKey); }
+    static boolean canSeeReports(Set<Permission> grants) {
+        return grants.contains(Permission.REPORT_VIEW) || grants.contains(Permission.ADMINISTER_ORGANIZATION);
+    }
 
     public List<MenuItem> menu() {
         List<MenuItem> items = new ArrayList<>();
@@ -89,8 +94,10 @@ public class ConfigurationService {
         items.add(new MenuItem("roles", "Roles", "Create application roles and assign permissions"));
         items.add(new MenuItem("severities", "Severity Master", "Manage organization severity labels used by defect reports"));
         items.add(new MenuItem("permissions", "Permission Master", "Read-only catalog of supported application permissions"));
+        items.add(new MenuItem("workflow-statuses", "Workflow Status Master", "Manage the global defect status labels and aliases"));
         items.add(new MenuItem("role-permissions", "Role-Permission Mapping", "Review each role’s effective supported permissions and restrictions"));
         items.add(new MenuItem("forms", "Form Master", "Versioned area-specific operational forms"));
+        items.add(new MenuItem("report-master", "Report Master", "Configure tenant reports, filters, columns and role access"));
         return List.copyOf(items);
     }
 
@@ -99,13 +106,13 @@ public class ConfigurationService {
         List<Map<String,Object>> rows=jdbc.query("SELECT id,menu_key AS key,label,parent_id AS \"parentId\",icon,route_key AS section,required_permissions AS \"requiredPermissions\",display_order AS \"displayOrder\" FROM navigation_menu_items_mst WHERE operator_id=? AND isactive=1 ORDER BY display_order,label",new ColumnMapRowMapper(),operatorId);
         Map<String,List<NavigationItem>> children=new LinkedHashMap<>();
         for (Map<String,Object> row:rows) {
-            if (!allowed(String.valueOf(row.get("requiredPermissions")),grants) || row.get("parentId")==null) continue;
+            if (!allowed(String.valueOf(row.get("requiredPermissions")),String.valueOf(row.get("section")),grants) || row.get("parentId")==null) continue;
             String parent=String.valueOf(row.get("parentId"));
             children.computeIfAbsent(parent,ignored->new ArrayList<>()).add(new NavigationItem(String.valueOf(row.get("key")),String.valueOf(row.get("label")),String.valueOf(row.get("icon")),String.valueOf(row.get("section")),List.of()));
         }
         List<NavigationItem> result=new ArrayList<>();
         for (Map<String,Object> row:rows) {
-            if (row.get("parentId")!=null || !allowed(String.valueOf(row.get("requiredPermissions")),grants)) continue;
+            if (row.get("parentId")!=null || !allowed(String.valueOf(row.get("requiredPermissions")),String.valueOf(row.get("section")),grants)) continue;
             String id=String.valueOf(row.get("id"));
             boolean hasChildren=rows.stream().anyMatch(candidate->id.equals(String.valueOf(candidate.get("parentId"))));
             List<NavigationItem> nested=children.getOrDefault(id,List.of());
@@ -115,8 +122,14 @@ public class ConfigurationService {
         return List.copyOf(result);
     }
 
-    private boolean allowed(String required,Set<Permission> grants) {
-        for(String value:required.split("\\|")) try { if(grants.contains(Permission.valueOf(value))) return true; } catch(IllegalArgumentException ignored) { /* Invalid grants fail closed. */ }
+    private boolean allowed(String required,String routeKey,Set<Permission> grants) {
+        // Reports is a shared shell: organization administrators may open it to
+        // configure reports, but report-data APIs still require REPORT_* grants.
+        if ("reports".equals(routeKey) && canSeeReports(grants)) return true;
+        for(String value:required.split("\\|")) try {
+            Permission permission=Permission.valueOf(value);
+            if(grants.contains(permission) || (permission==Permission.VIEW && grants.contains(Permission.DEFECT_VIEW_ALL) && isDefectViewAllNavigationRoute(routeKey))) return true;
+        } catch(IllegalArgumentException ignored) { /* Invalid grants fail closed. */ }
         return false;
     }
 
@@ -292,7 +305,7 @@ public class ConfigurationService {
             case USERS -> "r.external_user_id AS id,r.external_user_id AS \"externalUserId\",r.display_name AS \"displayName\",r.role,r.last_login_at AS \"lastLoginAt\",ev.last_logout_at AS \"lastLogoutAt\",ev.last_activity_at AS \"lastActivityAt\",CASE WHEN r.last_login_at IS NULL THEN NULL ELSE floor(extract(epoch FROM (now()-r.last_login_at))/86400)::bigint END AS \"daysSinceLogin\",CASE WHEN r.last_login_at IS NULL THEN 'NEVER_LOGGED_IN' WHEN r.last_login_at > now()-interval '30 days' THEN 'ACTIVE_RECENTLY' ELSE 'INACTIVE_30_DAYS' END AS \"inactivityStatus\",COALESCE((SELECT string_agg(DISTINCT omt.team_name,'|' ORDER BY omt.team_name) FROM operator_membership_teams_mst omt JOIN maintenance_teams_mst mt ON mt.operator_id=omt.operator_id AND mt.name=omt.team_name AND mt.isactive=1 WHERE omt.operator_id=r.operator_id AND omt.external_user_id=r.external_user_id AND omt.isactive=1),'') AS \"teamNames\",COALESCE((SELECT string_agg(DISTINCT mt.id::text,'|' ORDER BY mt.id::text) FROM operator_membership_teams_mst omt JOIN maintenance_teams_mst mt ON mt.operator_id=omt.operator_id AND mt.name=omt.team_name AND mt.isactive=1 WHERE omt.operator_id=r.operator_id AND omt.external_user_id=r.external_user_id AND omt.isactive=1),'') AS \"teamIds\",r.isactive,r.created_at,r.updated_at";
             case NAVIGATION -> "r.id,r.menu_key AS key,r.label,r.parent_id AS \"parentId\",p.label AS \"parentLabel\",r.required_permissions AS \"requiredPermissions\",r.icon,r.route_key AS \"routeKey\",r.display_order AS \"displayOrder\",r.isactive,r.created_at,r.updated_at";
             case ROLES -> "r.id,r.role_key AS \"roleKey\",r.name,r.description,r.permissions,r.isactive,r.system_role AS \"systemRole\",r.created_at,r.updated_at";
-            case SEVERITIES -> "r.id,r.severity_code AS code,r.severity_name AS name,r.description,r.sort_order AS \"sortOrder\",r.isactive,r.created_at,r.updated_at";
+            case SEVERITIES -> "r.id,r.severity_code AS code,r.severity_name AS name,r.description,r.sort_order AS \"sortOrder\",r.background_color AS \"backgroundColor\",r.text_color AS \"textColor\",r.border_color AS \"borderColor\",r.icon,r.display_style AS \"displayStyle\",r.isactive,r.created_at,r.updated_at";
             case PERMISSIONS -> "r.permission_id AS id,r.permission_code AS code,r.permission_name AS name,r.description,r.module,r.is_system_permission AS \"systemPermission\",(r.permission_code<>'ADMINISTER_ORGANIZATION') AS \"organizationAssignable\",r.isactive,r.created_at,r.updated_at";
             case ROLE_MAPPINGS -> "r.id,r.role_key AS \"roleKey\",r.name,r.description,r.permissions AS \"permissionCodes\",COALESCE(mapped.permission_details,'') AS \"permissionDetails\",r.isactive,r.system_role AS \"systemRole\",r.updated_at";
         };
@@ -349,7 +362,7 @@ public class ConfigurationService {
             case USERS -> List.of(new String[]{"Name","displayName"},new String[]{"Enterprise identity","externalUserId"},new String[]{"Role","role"},new String[]{"Teams","teamNames"},new String[]{"Last login","lastLoginAt"},new String[]{"Last logout","lastLogoutAt"},new String[]{"Days since login","daysSinceLogin"},new String[]{"Inactivity status","inactivityStatus"},new String[]{"Status","isactive"},new String[]{"Created","created_at"});
             case NAVIGATION -> List.of(new String[]{"Menu / submenu","label"},new String[]{"Key","key"},new String[]{"Parent menu","parentLabel"},new String[]{"Visible permissions","requiredPermissions"},new String[]{"Application section","routeKey"},new String[]{"Order","displayOrder"},new String[]{"Status","isactive"},new String[]{"Created","created_at"});
             case ROLES -> List.of(new String[]{"Role key","roleKey"},new String[]{"Role","name"},new String[]{"Description","description"},new String[]{"Permissions","permissions"},new String[]{"System role","systemRole"},new String[]{"Status","isactive"},new String[]{"Created","created_at"});
-            case SEVERITIES -> List.of(new String[]{"Code","code"},new String[]{"Severity","name"},new String[]{"Description","description"},new String[]{"Order","sortOrder"},new String[]{"Status","isactive"},new String[]{"Created","created_at"});
+            case SEVERITIES -> List.of(new String[]{"Code","code"},new String[]{"Severity","name"},new String[]{"Description","description"},new String[]{"Order","sortOrder"},new String[]{"Background color","backgroundColor"},new String[]{"Text color","textColor"},new String[]{"Border color","borderColor"},new String[]{"Icon","icon"},new String[]{"Display style","displayStyle"},new String[]{"Status","isactive"},new String[]{"Created","created_at"});
             case PERMISSIONS -> List.of(new String[]{"Code","code"},new String[]{"Permission","name"},new String[]{"Description","description"},new String[]{"Module","module"},new String[]{"System permission","systemPermission"},new String[]{"Status","isactive"});
             case ROLE_MAPPINGS -> List.of(new String[]{"Role key","roleKey"},new String[]{"Role","name"},new String[]{"Permission codes","permissionCodes"},new String[]{"Permission descriptions","permissionDetails"},new String[]{"Built-in","systemRole"},new String[]{"Updated","updated_at"});
         };
@@ -360,9 +373,11 @@ public class ConfigurationService {
         setAuditActor(actorId);
         Resource resource = Resource.parse(key);
         if (resource == Resource.PERMISSIONS || resource == Resource.ROLE_MAPPINGS) throw new AccessDeniedException("The supported permission catalog and mapping view are read-only.");
-        Map<String, String> values = validate(resource, request.fields());
-        List<UUID> conditionComponentIds = resource == Resource.CONDITIONS ? requireConditionComponents(operatorId, request.fields().get("componentIds")) : List.of();
         boolean creating = request.id() == null || request.id().isBlank();
+        boolean editingAdministratorRole = resource == Resource.ROLES && !creating
+            && exists("SELECT 1 FROM operator_roles_mst WHERE operator_id=? AND id=? AND role_key='ADMIN' AND isactive=1", operatorId, parseUuid(request.id()));
+        Map<String, String> values = validate(resource, request.fields(), editingAdministratorRole);
+        List<UUID> conditionComponentIds = resource == Resource.CONDITIONS ? requireConditionComponents(operatorId, request.fields().get("componentIds")) : List.of();
         if (resource == Resource.ORGANIZATION && creating) throw new IllegalArgumentException("An organization cannot be created from its own configuration page.");
         if (resource == Resource.ORGANIZATION && !operatorId.toString().equals(request.id())) throw new AccessDeniedException("Only the current organization can be updated.");
         if (resource == Resource.USERS && creating && "ADMIN".equals(values.get("role")) && !isAdmin(operatorId, actorId)) {
@@ -406,8 +421,7 @@ public class ConfigurationService {
             if (creating || !oldParent.equals(newParent)) validateMenuParent(operatorId, creating ? "00000000-0000-0000-0000-000000000000" : entityId, values);
         }
         if (resource == Resource.ROLES) {
-            if (!creating && !String.valueOf(previous.get("roleKey")).equals(values.get("roleKey"))) throw new IllegalArgumentException("A role key cannot be changed after creation.");
-            if (!creating && "ADMIN".equals(previous.get("roleKey"))) throw new IllegalArgumentException("The built-in Administrator role is protected and cannot be edited.");
+            if (!creating && values.containsKey("roleKey") && !String.valueOf(previous.get("roleKey")).equals(values.get("roleKey"))) throw new IllegalArgumentException("A role key cannot be changed after creation.");
         }
         if (creating) insert(resource, operatorId, entityId, values);
         else update(resource, operatorId, entityId, values);
@@ -508,6 +522,10 @@ public class ConfigurationService {
     }
 
     private Map<String, String> validate(Resource resource, Map<String, String> fields) {
+        return validate(resource, fields, false);
+    }
+
+    private Map<String, String> validate(Resource resource, Map<String, String> fields, boolean editingAdministratorRole) {
         if (fields == null) throw new IllegalArgumentException("Configuration fields are required.");
         Set<String> allowedFields = new java.util.HashSet<>(resource.fields.keySet());
         if (resource == Resource.CONDITIONS) allowedFields.add("componentIds");
@@ -517,7 +535,7 @@ public class ConfigurationService {
         for (Map.Entry<String, String> entry : fields.entrySet()) {
             String value = entry.getValue() == null ? "" : entry.getValue().trim();
             if ((resource == Resource.CONDITIONS && entry.getKey().equals("componentIds")) || (resource == Resource.USERS && entry.getKey().equals("teamIds"))) continue;
-            if (value.isEmpty() && !(Set.of(Resource.CATEGORIES, Resource.AREAS, Resource.COMPONENTS, Resource.CONDITIONS).contains(resource) && entry.getKey().equals("description")) && !(resource == Resource.NAVIGATION && entry.getKey().equals("parentId"))) continue;
+            if (value.isEmpty() && !(resource == Resource.SEVERITIES && entry.getKey().equals("icon")) && !(Set.of(Resource.CATEGORIES, Resource.AREAS, Resource.COMPONENTS, Resource.CONDITIONS).contains(resource) && entry.getKey().equals("description")) && !(resource == Resource.NAVIGATION && entry.getKey().equals("parentId"))) continue;
             if (value.length() > maxLength(resource, entry.getKey())) throw new IllegalArgumentException(entry.getKey() + " is too long.");
             result.put(entry.getKey(), value);
         }
@@ -530,7 +548,7 @@ public class ConfigurationService {
             case USERS -> fields.containsKey("externalUserId") ? Set.of("externalUserId", "displayName", "role") : Set.of("displayName", "role");
             case NAVIGATION -> Set.of("key", "label", "requiredPermissions", "icon", "routeKey", "displayOrder");
             case ROLES -> fields.containsKey("roleKey") ? Set.of("roleKey", "name", "description", "permissions") : Set.of("name", "description", "permissions");
-            case SEVERITIES -> Set.of("code","name","description","sortOrder");
+            case SEVERITIES -> Set.of("code","name","description","sortOrder","backgroundColor","textColor","borderColor","displayStyle");
             case PERMISSIONS, ROLE_MAPPINGS -> throw new AccessDeniedException("This configuration view is read-only.");
         };
         for (String field : required) if (!result.containsKey(field)) throw new IllegalArgumentException(field + " is required.");
@@ -558,7 +576,8 @@ public class ConfigurationService {
             Set<String> granted = java.util.Arrays.stream(result.get("permissions").toUpperCase(Locale.ROOT).split("[|,]"))
                 .map(String::trim).filter(value -> !value.isEmpty()).collect(java.util.stream.Collectors.toSet());
             if (granted.isEmpty() || !PERMISSIONS.containsAll(granted)) throw new IllegalArgumentException("Select at least one valid application permission.");
-            if (granted.contains("ADMINISTER_ORGANIZATION")) throw new IllegalArgumentException("Organization administration is reserved to the protected built-in Administrator role and cannot be granted through role configuration.");
+            if (granted.contains("ADMINISTER_ORGANIZATION") && !editingAdministratorRole) throw new IllegalArgumentException("Organization administration is reserved to the built-in Administrator role.");
+            if (editingAdministratorRole && !granted.contains("ADMINISTER_ORGANIZATION")) throw new IllegalArgumentException("The built-in Administrator role must retain organization-administration permission.");
             result.put("permissions", granted.stream().sorted().collect(java.util.stream.Collectors.joining("|")));
         }
         if (resource == Resource.TEAMS) {
@@ -586,6 +605,12 @@ public class ConfigurationService {
         if (resource == Resource.SEVERITIES) {
             try { int order=Integer.parseInt(result.get("sortOrder")); if(order<0||order>9999) throw new NumberFormatException(); result.put("sortOrder",String.valueOf(order)); }
             catch(NumberFormatException ex) { throw new IllegalArgumentException("Display order must be between 0 and 9999."); }
+            for (String key : List.of("backgroundColor", "textColor", "borderColor")) if (!result.getOrDefault(key, "").matches("^#[0-9A-Fa-f]{6}$")) throw new IllegalArgumentException("Enter a valid six-digit hex color for " + key + ".");
+            String displayStyle = result.getOrDefault("displayStyle", "SOLID").toUpperCase(Locale.ROOT);
+            if (!Set.of("SOLID", "OUTLINE", "SOFT").contains(displayStyle)) throw new IllegalArgumentException("Display style must be SOLID, OUTLINE, or SOFT.");
+            result.put("displayStyle", displayStyle);
+            if (result.getOrDefault("icon", "").length() > 32 || result.getOrDefault("icon", "").codePoints().anyMatch(Character::isISOControl)) throw new IllegalArgumentException("Badge icon must be 32 characters or fewer and contain no control characters.");
+            BadgeColorRules.requireAccessible(result.get("backgroundColor"), result.get("textColor"), result.get("borderColor"), displayStyle);
         }
         return result;
     }

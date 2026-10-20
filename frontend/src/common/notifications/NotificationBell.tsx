@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { responseErrorMessage } from "@/common/alerts";
+import { formatDateTime } from "@/common/dateTime";
 
 type Request = (path: string, init?: RequestInit) => Promise<Response>;
 type NotificationItem = { id: string; type: string; message: string; defectId: string | null; defectReference: string | null; createdAt: string; readAt: string | null };
@@ -66,7 +67,7 @@ export default function NotificationBell({ request, onOpenDefect, open: controll
         : !inbox.data?.notifications.length ? <p className="notification-state">You’re all caught up.</p>
         : <ul>{inbox.data.notifications.map(item => <li key={item.id} className={item.readAt ? "is-read" : "is-unread"}>
           <button type="button" className="notification-item" disabled={markRead.isPending} onClick={() => void openNotification(item).catch(() => undefined)}>
-            <span className="notification-item-top"><strong>{human(item.type)}</strong><time dateTime={item.createdAt}>{new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(item.createdAt))}</time></span>
+            <span className="notification-item-top"><strong>{human(item.type)}</strong><time dateTime={item.createdAt}>{formatDateTime(item.createdAt)}</time></span>
             <span>{item.message}</span>
             {item.defectReference && <span className="notification-defect-reference">{item.defectReference} · View defect →</span>}
           </button>

@@ -20,6 +20,9 @@ public class ReviewerQueueService {
     private final JdbcTemplate jdbc;
     private final NotificationService notifications;
     private final OperationalFormService operationalForms;
+    private com.ecabin.ledger.email.EmailOutboxService emailOutbox;
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setEmailOutbox(com.ecabin.ledger.email.EmailOutboxService emailOutbox){this.emailOutbox=emailOutbox;}
     @org.springframework.beans.factory.annotation.Autowired
     public ReviewerQueueService(JdbcTemplate jdbc,NotificationService notifications,OperationalFormService operationalForms){this.jdbc=jdbc;this.notifications=notifications;this.operationalForms=operationalForms;}
     /** Compatibility constructor for isolated legacy unit tests. */
@@ -90,7 +93,7 @@ public class ReviewerQueueService {
         jdbc.update("INSERT INTO defect_events_dtl(operator_id,defect_id,event_type,note,actor_id,entity_type,entity_id,previous_state,new_state,request_id) VALUES(?,?,'REVIEW_ROUTING_CHANGED',? ,?,'DEFECT',?,jsonb_build_object('reviewerTeamId',CAST(? AS text)),jsonb_build_object('reviewerTeamId',CAST(? AS text)),?)",org,defectId,reason.trim(),actor,defectId,previous==null?null:previous.toString(),teamId.toString(),safeRequestId());
     }
 
-    /** Persist a Galley review decision; a maintenance action is deferred until inspection passes. */
+    /** Persist a Galley review decision and route approved work directly to Maintenance. */
     @Transactional
     public WorkflowRecord decide(UUID org,UUID defectId,String actor,ReviewerDecisionRequest request){
         String decision=request.decision()==null?"":request.decision().trim().toUpperCase(java.util.Locale.ROOT);
@@ -99,7 +102,7 @@ public class ReviewerQueueService {
         if(remark!=null&&remark.length()>2000)throw new IllegalArgumentException("Remark must be 2000 characters or fewer.");
         if(request.rejectionReason()!=null&&request.rejectionReason().length()>2000)throw new IllegalArgumentException("Rejection Reason must be 2000 characters or fewer.");
         String rejectionReason=request.rejectionReason()==null?null:request.rejectionReason().trim();
-        if(decision.equals("REJECT")&&(rejectionReason==null||rejectionReason.isBlank()))throw new IllegalArgumentException("Provide a rejection reason before returning the report for correction.");
+        if(decision.equals("REJECT")&&(rejectionReason==null||rejectionReason.isBlank()))throw new IllegalArgumentException("Provide a rejection reason before rejecting this report.");
         if(decision.equals("APPROVE")&&rejectionReason!=null&&!rejectionReason.isBlank())throw new IllegalArgumentException("A rejection reason can only be provided when the decision is REJECT.");
         jdbc.queryForObject("SELECT set_config('ecabin.actor_id', ?, true)",String.class,actor);
         ReviewTarget target=jdbc.query("SELECT d.status,d.reviewer_team_id,t.name AS reviewer_team,a.code AS area_code FROM defects_dtl d JOIN cabin_areas_mst a ON a.operator_id=d.operator_id AND a.id=d.area_id AND a.isactive=1 LEFT JOIN maintenance_teams_mst t ON t.operator_id=d.operator_id AND t.id=d.reviewer_team_id AND t.isactive=1 AND t.team_type='REVIEWER' WHERE d.operator_id=? AND d.id=? AND d.isactive=1 FOR UPDATE OF d",rs->{
@@ -113,27 +116,32 @@ public class ReviewerQueueService {
         if(Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM defect_events_dtl rejected WHERE rejected.operator_id=? AND rejected.defect_id=? AND rejected.event_type='REVIEW_REJECTED' AND rejected.occurred_at >= COALESCE((SELECT max(s.submitted_at) FROM operational_form_submissions_dtl s WHERE s.operator_id=rejected.operator_id AND s.defect_id=rejected.defect_id AND s.purpose='DEFECT_REPORT'),'-infinity'::timestamptz))",Boolean.class,org,defectId)))
             throw new ResponseStatusException(HttpStatus.CONFLICT,"The Auditor must submit the corrected Galley report before another Reviewer decision.");
         if(decision.equals("REJECT")){
-            if(request.maintenanceTeamId()!=null)throw new IllegalArgumentException("Do not assign a maintenance team when returning a report for correction.");
-            if(!target.status().equals("REPORTED"))updateReviewStatus(org,defectId,target.status(),"REPORTED");
+            if(request.maintenanceTeamId()!=null)throw new IllegalArgumentException("Do not assign a maintenance team when rejecting a report.");
+            updateReviewStatus(org,defectId,target.status(),"REJECTED");
             UUID eventId=UUID.randomUUID();
-            String note="Returned for correction: "+rejectionReason;
-            jdbc.update("INSERT INTO defect_events_dtl(id,operator_id,defect_id,event_type,from_status,to_status,note,actor_id,entity_type,entity_id,previous_state,new_state,request_id) VALUES(?,?,?,'REVIEW_REJECTED',?,'REPORTED',?,?,'REVIEW_DECISION',?,jsonb_build_object('status',?,'reviewerTeamId',CAST(? AS text)),jsonb_build_object('status','REPORTED','decision','REJECT','rejectionReason',?::varchar,'reviewerTeamId',CAST(? AS text),'remark',?::varchar,'returnForCorrection',true,'formId',CAST(? AS text),'formVersionId',CAST(? AS text)),?)",eventId,org,defectId,target.status(),note,actor,eventId,target.status(),target.reviewerTeamId().toString(),rejectionReason,target.reviewerTeamId().toString(),remark,request.formId(),request.versionId(),safeRequestId());
-            if(notifications!=null)notifications.notifyParticipants(org,defectId,eventId,actor,"REVIEW_REJECTED","The Reviewer returned the Galley report for correction.");
-            return new WorkflowRecord(eventId,"REPORTED");
+            String note="Rejected: "+rejectionReason;
+            jdbc.update("INSERT INTO defect_events_dtl(id,operator_id,defect_id,event_type,from_status,to_status,note,actor_id,entity_type,entity_id,previous_state,new_state,request_id) VALUES(?,?,?,'REVIEW_REJECTED',?,'REJECTED',?,?,'REVIEW_DECISION',?,jsonb_build_object('status',?,'reviewerTeamId',CAST(? AS text)),jsonb_build_object('status','REJECTED','decision','REJECT','rejectionReason',?::varchar,'reviewerTeamId',CAST(? AS text),'remark',?::varchar,'formId',CAST(? AS text),'formVersionId',CAST(? AS text)),?)",eventId,org,defectId,target.status(),note,actor,eventId,target.status(),target.reviewerTeamId().toString(),rejectionReason,target.reviewerTeamId().toString(),remark,request.formId(),request.versionId(),safeRequestId());
+            if(notifications!=null)notifications.notifyParticipants(org,defectId,eventId,actor,"REVIEW_REJECTED","The Reviewer rejected the Galley report.");
+            if(emailOutbox!=null)emailOutbox.enqueue(org,defectId,eventId,actor,"REVIEW_REJECTED",null,null);
+            return new WorkflowRecord(eventId,"REJECTED");
         }
         if(request.maintenanceTeamId()==null)throw new IllegalArgumentException("Choose an active maintenance team before approving.");
         String maintenanceTeam=jdbc.query("SELECT t.name FROM maintenance_teams_mst t WHERE t.operator_id=? AND t.id=? AND t.team_type='MAINTENANCE' AND t.isactive=1 AND EXISTS(SELECT 1 FROM operator_membership_teams_mst mt JOIN operator_memberships_mst m ON m.operator_id=mt.operator_id AND m.external_user_id=mt.external_user_id AND m.isactive=1 JOIN operator_roles_mst r ON r.operator_id=m.operator_id AND r.role_key=m.role AND r.isactive=1 WHERE mt.operator_id=t.operator_id AND mt.team_name=t.name AND mt.isactive=1 AND ('|'||r.permissions||'|') LIKE '%|PERFORM_ACTION|%')",rs->{if(!rs.next())throw new IllegalArgumentException("Choose an active maintenance team in this organization with an eligible maintenance member.");return rs.getString(1);},org,request.maintenanceTeamId());
         String prior=target.status();
-        if(prior.equals("REPORTED")){
-            updateReviewStatus(org,defectId,"REPORTED","UNDER_REVIEW");
-            jdbc.update("INSERT INTO defect_events_dtl(operator_id,defect_id,event_type,from_status,to_status,note,actor_id,entity_type,entity_id,previous_state,new_state,request_id) VALUES(?,?,'REVIEW_STARTED','REPORTED','UNDER_REVIEW',?,?,'DEFECT',?,jsonb_build_object('status','REPORTED'),jsonb_build_object('status','UNDER_REVIEW'),?)",org,defectId,remark==null||remark.isBlank()?"Reviewer decision started.":remark,actor,defectId,safeRequestId());
-            prior="UNDER_REVIEW";
-        }
-        updateReviewStatus(org,defectId,prior,"INSPECTION_REQUIRED");
+        UUID actionId=UUID.randomUUID();
+        String[] defectData=jdbc.query("SELECT title,severity FROM defects_dtl WHERE operator_id=? AND id=? AND isactive=1",rs->rs.next()?new String[]{rs.getString("title"),rs.getString("severity")}:null,org,defectId);
+        if(defectData==null)throw new ResponseStatusException(HttpStatus.NOT_FOUND,"Defect not found.");
+        String priority=Set.of("HIGH","CRITICAL").contains(defectData[1])?defectData[1]:"MEDIUM";
+        String actionDescription="Reviewer-approved cabin defect: "+defectData[0];
+        jdbc.update("INSERT INTO corrective_actions_dtl(id,operator_id,defect_id,created_by_user_id,assigned_team,description,priority,status) VALUES(?,?,?,?,?,?,?,'ASSIGNED')",actionId,org,defectId,actor,maintenanceTeam,actionDescription,priority);
+        updateReviewStatus(org,defectId,prior,"ACTION_ASSIGNED");
+        int assigned=jdbc.update("UPDATE defects_dtl SET assigned_to=?,assigned_user_id=NULL,assigned_team=?,due_at=NULL,updated_at=now(),version=version+1 WHERE operator_id=? AND id=? AND status='ACTION_ASSIGNED' AND isactive=1",maintenanceTeam,maintenanceTeam,org,defectId);
+        if(assigned!=1)throw new ResponseStatusException(HttpStatus.CONFLICT,"The defect changed while its Maintenance assignment was being recorded.");
         UUID eventId=UUID.randomUUID();
-        jdbc.update("INSERT INTO defect_events_dtl(id,operator_id,defect_id,event_type,from_status,to_status,note,actor_id,entity_type,entity_id,previous_state,new_state,request_id) VALUES(?,?,?,'REVIEW_APPROVED',?,'INSPECTION_REQUIRED',?,?,'REVIEW_DECISION',?,jsonb_build_object('status',?,'reviewerTeamId',CAST(? AS text)),jsonb_build_object('status','INSPECTION_REQUIRED','decision','APPROVE','reviewerTeamId',CAST(? AS text),'maintenanceTeam',?::varchar,'maintenanceTeamId',?::varchar,'remark',?::varchar,'actionDeferredUntil','INSPECTION_COMPLETE','formId',CAST(? AS text),'formVersionId',CAST(? AS text)),?)",eventId,org,defectId,prior,remark==null||remark.isBlank()?"Reviewer approved the report; inspection is required before maintenance.":remark,actor,eventId,prior,target.reviewerTeamId().toString(),target.reviewerTeamId().toString(),maintenanceTeam,request.maintenanceTeamId().toString(),remark,request.formId(),request.versionId(),safeRequestId());
-        if(notifications!=null)notifications.notifyParticipants(org,defectId,eventId,actor,"REVIEW_APPROVED","A Reviewer approved the defect report; it is awaiting inspection.");
-        return new WorkflowRecord(eventId,"INSPECTION_REQUIRED");
+        jdbc.update("INSERT INTO defect_events_dtl(id,operator_id,defect_id,event_type,from_status,to_status,note,actor_id,entity_type,entity_id,previous_state,new_state,request_id) VALUES(?,?,?,'REVIEW_APPROVED',?,'ACTION_ASSIGNED',?,?,'REVIEW_DECISION',?,jsonb_build_object('status',?,'reviewerTeamId',CAST(? AS text)),jsonb_build_object('status','ACTION_ASSIGNED','decision','APPROVE','reviewerTeamId',CAST(? AS text),'maintenanceTeam',?::varchar,'maintenanceTeamId',?::varchar,'correctiveActionId',CAST(? AS text),'remark',?::varchar,'formId',CAST(? AS text),'formVersionId',CAST(? AS text)),?)",eventId,org,defectId,prior,remark==null||remark.isBlank()?"Reviewer approved the report and assigned it to Maintenance.":remark,actor,eventId,prior,target.reviewerTeamId().toString(),target.reviewerTeamId().toString(),maintenanceTeam,request.maintenanceTeamId().toString(),actionId.toString(),remark,request.formId(),request.versionId(),safeRequestId());
+        if(notifications!=null)notifications.notifyMaintenance(org,defectId,eventId,actor,maintenanceTeam,null,"ACTION_ASSIGNED","A Reviewer approved the defect and assigned corrective work to your Maintenance team.");
+        if(emailOutbox!=null)emailOutbox.enqueue(org,defectId,eventId,actor,"REVIEW_APPROVED",maintenanceTeam,null);
+        return new WorkflowRecord(eventId,"ACTION_ASSIGNED");
     }
 
     private boolean eligibleReviewer(UUID org,UUID teamId,String actor){return Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM maintenance_teams_mst t JOIN operator_membership_teams_mst mt ON mt.operator_id=t.operator_id AND mt.team_name=t.name AND mt.isactive=1 JOIN operator_memberships_mst m ON m.operator_id=mt.operator_id AND m.external_user_id=mt.external_user_id AND m.isactive=1 JOIN operator_roles_mst r ON r.operator_id=m.operator_id AND r.role_key=m.role AND r.isactive=1 WHERE t.operator_id=? AND t.id=? AND t.team_type='REVIEWER' AND t.isactive=1 AND mt.external_user_id=? AND ('|'||r.permissions||'|') LIKE '%|REVIEW|%')",Boolean.class,org,teamId,actor));}

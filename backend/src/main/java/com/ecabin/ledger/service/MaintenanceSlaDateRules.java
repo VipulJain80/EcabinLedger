@@ -24,7 +24,7 @@ final class MaintenanceSlaDateRules {
     static LocalDate validate(MaintenanceSlaPolicy policy,LocalDate date,Clock clock){
         Range range=range(policy,clock);
         if(date==null){if(policy.dateRequired())throw new IllegalArgumentException("SLA Target Date is required.");return null;}
-        if(date.isBefore(range.minDate())||date.isAfter(range.maxDate()))throw new IllegalArgumentException("SLA Target Date must be between "+range.minDate()+" and "+range.maxDate()+" ("+policy.businessTimezone()+").");
+        if(date.isBefore(range.minDate())||date.isAfter(range.maxDate()))throw new IllegalArgumentException("SLA Target Date must be between "+range.minDate()+" and "+range.maxDate()+" (IST).");
         return date;
     }
 }

@@ -8,10 +8,15 @@ class DefectWorkflowTest {
     @Test
     void permitsOnlyDocumentedLifecycleEdges() {
         assertTrue(DefectWorkflow.permits("REPORTED", "UNDER_REVIEW"));
-        assertTrue(DefectWorkflow.permits("UNDER_REVIEW", "REPORTED"), "A rejected report returns to the reporter for correction.");
+        assertTrue(DefectWorkflow.permits("REPORTED", "ACTION_ASSIGNED"), "Reviewer approval routes directly to Maintenance.");
+        assertTrue(DefectWorkflow.permits("UNDER_REVIEW", "ACTION_ASSIGNED"), "A pending review can route directly to Maintenance.");
+        assertTrue(DefectWorkflow.permits("UNDER_REVIEW", "REJECTED"), "Reviewer rejection is terminal for this report.");
+        assertFalse(DefectWorkflow.permits("UNDER_REVIEW", "REPORTED"), "Reviewer rejection does not return the report to the Auditor.");
         assertTrue(DefectWorkflow.permits("INSPECTION_COMPLETE", "ACTION_ASSIGNED"));
         assertTrue(DefectWorkflow.permits("AWAITING_VERIFICATION", "VERIFIED"));
         assertTrue(DefectWorkflow.permits("VERIFIED", "APPROVAL_REQUIRED"));
+        assertTrue(DefectWorkflow.permits("IN_PROGRESS", "APPROVAL_REQUIRED"), "Maintenance Close submission routes directly to Closure Team review.");
+        assertTrue(DefectWorkflow.permits("IN_PROGRESS", "AWAITING_VERIFICATION"), "Legacy verification workflows remain supported.");
         assertTrue(DefectWorkflow.permits("APPROVAL_REQUIRED", "CLOSED"));
         assertTrue(DefectWorkflow.permits("APPROVAL_REQUIRED", "IN_PROGRESS"), "A declined closure returns maintenance work to the active work state.");
         assertFalse(DefectWorkflow.permits("REPORTED", "CLOSED"));

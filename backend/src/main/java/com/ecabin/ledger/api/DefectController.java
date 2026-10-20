@@ -11,6 +11,7 @@ import com.ecabin.ledger.security.Permission;
 import com.ecabin.ledger.security.PermissionService;
 import jakarta.validation.Valid;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.time.Instant;
 import org.springframework.http.HttpStatus;
@@ -49,10 +50,12 @@ public class DefectController {
         @RequestParam(defaultValue = "false") boolean mine,
         @RequestParam(required = false) String cursor,
         @RequestParam(defaultValue = "25") int limit) {
-        AuthenticatedUser user = users.require(auth); permissions.require(user, Permission.VIEW);
-        boolean teamScoped = permissions.isMaintenanceTeamScoped(user.organizationId(), user.role());
-        boolean reporterScoped = permissions.isReporterScoped(user.organizationId(), user.role());
-        boolean reviewerScoped=permissions.isReviewerTeamScoped(user.organizationId(),user.role());
+        AuthenticatedUser user = users.require(auth);
+        Set<Permission> grants = permissions.requireDefectRead(user);
+        boolean viewAll = PermissionService.hasDefectViewAll(grants);
+        boolean teamScoped = !viewAll && permissions.isMaintenanceTeamScoped(user.organizationId(), user.role());
+        boolean reporterScoped = !viewAll && permissions.isReporterScoped(user.organizationId(), user.role());
+        boolean reviewerScoped = !viewAll && permissions.isReviewerTeamScoped(user.organizationId(),user.role());
         return service.list(user.organizationId(), user.externalUserId(), status, location, q, searchBy, aircraftType, fromDate, toDate, mine || reporterScoped, teamScoped, reviewerScoped, cursor, limit);
     }
 
@@ -67,9 +70,9 @@ public class DefectController {
 
     @GetMapping("/aircraft/{aircraftId}")
     public FleetStatusRow aircraft(JwtAuthenticationToken auth, @PathVariable UUID aircraftId) {
-        AuthenticatedUser user = users.require(auth); permissions.require(user, Permission.VIEW);
+        AuthenticatedUser user = users.require(auth); Set<Permission> grants = permissions.requireDefectRead(user); boolean viewAll = PermissionService.hasDefectViewAll(grants);
         return service.aircraft(user.organizationId(), user.externalUserId(), aircraftId,
-            permissions.isMaintenanceTeamScoped(user.organizationId(), user.role()), permissions.isReporterScoped(user.organizationId(), user.role()),permissions.isReviewerTeamScoped(user.organizationId(),user.role()));
+            !viewAll && permissions.isMaintenanceTeamScoped(user.organizationId(), user.role()), !viewAll && permissions.isReporterScoped(user.organizationId(), user.role()), !viewAll && permissions.isReviewerTeamScoped(user.organizationId(),user.role()));
     }
 
     @GetMapping("/aircraft/{aircraftId}/defects")
@@ -77,13 +80,23 @@ public class DefectController {
             @RequestParam(defaultValue = "0") int page, @RequestParam(defaultValue = "25") int size,
             @RequestParam(required = false) String status, @RequestParam(required = false) String search,
             @RequestParam(defaultValue = "reportedAt") String sortBy, @RequestParam(defaultValue = "DESC") String sortDirection) {
-        AuthenticatedUser user = users.require(auth); permissions.require(user, Permission.VIEW);
+        AuthenticatedUser user = users.require(auth); Set<Permission> grants = permissions.requireDefectRead(user); boolean viewAll = PermissionService.hasDefectViewAll(grants);
         return service.aircraftDefects(user.organizationId(), user.externalUserId(), aircraftId,
-            permissions.isMaintenanceTeamScoped(user.organizationId(), user.role()), permissions.isReporterScoped(user.organizationId(), user.role()),permissions.isReviewerTeamScoped(user.organizationId(),user.role()), page, size, status, search, sortBy, sortDirection);
+            !viewAll && permissions.isMaintenanceTeamScoped(user.organizationId(), user.role()), !viewAll && permissions.isReporterScoped(user.organizationId(), user.role()), !viewAll && permissions.isReviewerTeamScoped(user.organizationId(),user.role()), page, size, status, search, sortBy, sortDirection);
     }
 
     @GetMapping("/dashboard/summary")
-    public DashboardSummary summary(JwtAuthenticationToken auth) { AuthenticatedUser user=users.require(auth); permissions.require(user, Permission.VIEW); return service.summary(user.organizationId(), user.externalUserId(), permissions.isMaintenanceTeamScoped(user.organizationId(), user.role()), permissions.isReporterScoped(user.organizationId(), user.role()),permissions.isReviewerTeamScoped(user.organizationId(),user.role())); }
+    public DashboardSummary summary(JwtAuthenticationToken auth) {
+        AuthenticatedUser user=users.require(auth);
+        Set<Permission> grants=permissions.requireDefectRead(user);
+        boolean viewAll=PermissionService.hasDefectViewAll(grants);
+        boolean maintenance=!viewAll&&permissions.isMaintenanceTeamScoped(user.organizationId(), user.role());
+        boolean reporter=!viewAll&&permissions.isReporterScoped(user.organizationId(), user.role());
+        boolean reviewer=!viewAll&&permissions.isReviewerTeamScoped(user.organizationId(), user.role());
+        if(!viewAll&&!maintenance&&!reporter&&!reviewer)
+            throw new org.springframework.security.access.AccessDeniedException("A defect visibility scope is required for report summary data.");
+        return service.summary(user.organizationId(), user.externalUserId(), maintenance, reporter, reviewer);
+    }
 
     @GetMapping("/me")
     public CurrentUserView me(JwtAuthenticationToken auth) { AuthenticatedUser user=users.require(auth); return new CurrentUserView(service.organizationName(user.organizationId()), user.displayName(), user.role(), permissions.permissionsFor(user.organizationId(), user.role()).stream().map(Enum::name).collect(java.util.stream.Collectors.toUnmodifiableSet())); }
@@ -107,7 +120,7 @@ public class DefectController {
     }
 
     @GetMapping("/defects/{id}")
-    public DefectView get(JwtAuthenticationToken auth, @PathVariable UUID id) { AuthenticatedUser user=users.require(auth); permissions.require(user, Permission.VIEW); return visibleDefect(user, id); }
+    public DefectView get(JwtAuthenticationToken auth, @PathVariable UUID id) { AuthenticatedUser user=users.require(auth); Set<Permission> grants=permissions.requireDefectRead(user); return visibleDefectForRead(user, id, PermissionService.hasDefectViewAll(grants)); }
 
     @PostMapping("/defects/{id}/transitions")
     public DefectView transition(JwtAuthenticationToken auth, @PathVariable UUID id, @Valid @RequestBody TransitionRequest request) {
@@ -131,7 +144,11 @@ public class DefectController {
     }
 
     @GetMapping("/defects/{id}/events")
-    public List<DefectEventView> events(JwtAuthenticationToken auth, @PathVariable UUID id) { AuthenticatedUser user=users.require(auth); if(!permissions.permissionsFor(user.organizationId(),user.role()).contains(Permission.AUDIT))permissions.require(user,Permission.REVIEW); visibleDefect(user, id); return service.events(user.organizationId(), id); }
+    public List<DefectEventView> events(JwtAuthenticationToken auth, @PathVariable UUID id) { AuthenticatedUser user=users.require(auth); Set<Permission> grants=permissions.permissionsFor(user.organizationId(),user.role()); if(!grants.contains(Permission.AUDIT)&&!grants.contains(Permission.PERFORM_ACTION)&&!grants.contains(Permission.REVIEW)&&!grants.contains(Permission.DEFECT_VIEW_ALL))throw new org.springframework.security.access.AccessDeniedException("Audit history, assigned Maintenance, Reviewer, or tenant defect-view permission is required."); visibleDefectForRead(user, id, PermissionService.hasDefectViewAll(grants)); return service.events(user.organizationId(), id); }
+
+    private DefectView visibleDefectForRead(AuthenticatedUser user, UUID id, boolean viewAll) {
+        return viewAll ? service.get(user.organizationId(), id) : visibleDefect(user, id);
+    }
 
     private DefectView visibleDefect(AuthenticatedUser user, UUID id) {
         if(closureAccess!=null&&permissions.permissionsFor(user.organizationId(),user.role()).contains(Permission.APPROVE)){

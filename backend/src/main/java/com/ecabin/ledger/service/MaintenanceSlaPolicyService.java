@@ -4,7 +4,6 @@ import static com.ecabin.ledger.api.ApiModels.*;
 
 import java.time.Clock;
 import java.time.LocalDate;
-import java.time.ZoneId;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -19,6 +18,7 @@ import org.springframework.web.server.ResponseStatusException;
 
 @Service
 public class MaintenanceSlaPolicyService {
+    private static final String BUSINESS_TIMEZONE = "Asia/Kolkata";
     private final JdbcTemplate jdbc;
     private final Clock clock;
     @Autowired
@@ -64,8 +64,7 @@ public class MaintenanceSlaPolicyService {
     private void validate(MaintenanceSlaPolicyUpdate p){
         normalizeStatus(p.statusKey());
         if(p.reason()==null||p.reason().isBlank()||p.reason().length()>1000)throw new IllegalArgumentException("Provide a change reason up to 1,000 characters.");
-        if(p.businessTimezone()==null||p.businessTimezone().isBlank()||p.businessTimezone().length()>80)throw new IllegalArgumentException("Choose a valid business timezone.");
-        try{ZoneId.of(p.businessTimezone().trim());}catch(Exception ex){throw new IllegalArgumentException("Choose a valid IANA business timezone, such as UTC or Europe/London.");}
+        if(!BUSINESS_TIMEZONE.equals(p.businessTimezone()==null?null:p.businessTimezone().trim()))throw new IllegalArgumentException("The business timezone must be India Standard Time (Asia/Kolkata).");
         if(p.allowFuture())bound(p.maxFutureDays(),"Maximum future days");else if(p.maxFutureDays()!=null)throw new IllegalArgumentException("Clear maximum future days when future dates are disabled.");
         if(p.allowPast())bound(p.maxPastDays(),"Maximum past days");else if(p.maxPastDays()!=null)throw new IllegalArgumentException("Clear maximum past days when past dates are disabled.");
     }

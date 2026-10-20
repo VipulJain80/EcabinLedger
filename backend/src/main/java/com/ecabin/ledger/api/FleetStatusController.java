@@ -25,6 +25,7 @@ import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBo
 @RestController
 @RequestMapping("/api/v1/fleet-status")
 public class FleetStatusController {
+    private record ReadContext(AuthenticatedUser user, boolean viewAll) {}
     private final DefectService defects;
     private final CurrentUserResolver users;
     private final PermissionService permissions;
@@ -42,16 +43,20 @@ public class FleetStatusController {
             @RequestParam(required = false) String aircraftType,
             @RequestParam(required = false) String sortBy,
             @RequestParam(defaultValue = "ASC") String sortDirection) {
-        AuthenticatedUser user = requireView(auth);
-        return defects.fleetStatus(user.organizationId(), user.externalUserId(), permissions.isMaintenanceTeamScoped(user.organizationId(), user.role()),
-            permissions.isReporterScoped(user.organizationId(), user.role()), permissions.isReviewerTeamScoped(user.organizationId(),user.role()), fleetId, aircraftType, page, size, search, sortBy, sortDirection);
+        ReadContext context = requireView(auth);
+        AuthenticatedUser user = context.user();
+        boolean viewAll = context.viewAll();
+        return defects.fleetStatus(user.organizationId(), user.externalUserId(), !viewAll && permissions.isMaintenanceTeamScoped(user.organizationId(), user.role()),
+            !viewAll && permissions.isReporterScoped(user.organizationId(), user.role()), !viewAll && permissions.isReviewerTeamScoped(user.organizationId(),user.role()), fleetId, aircraftType, page, size, search, sortBy, sortDirection);
     }
 
     @GetMapping("/summary")
     public com.ecabin.ledger.api.ApiModels.FleetDefectSummary summary(JwtAuthenticationToken auth) {
-        AuthenticatedUser user = requireView(auth);
-        return defects.fleetDefectSummary(user.organizationId(), user.externalUserId(), permissions.isMaintenanceTeamScoped(user.organizationId(), user.role()),
-            permissions.isReporterScoped(user.organizationId(), user.role()),permissions.isReviewerTeamScoped(user.organizationId(),user.role()));
+        ReadContext context = requireView(auth);
+        AuthenticatedUser user = context.user();
+        boolean viewAll = context.viewAll();
+        return defects.fleetDefectSummary(user.organizationId(), user.externalUserId(), !viewAll && permissions.isMaintenanceTeamScoped(user.organizationId(), user.role()),
+            !viewAll && permissions.isReporterScoped(user.organizationId(), user.role()), !viewAll && permissions.isReviewerTeamScoped(user.organizationId(),user.role()));
     }
 
     @GetMapping(value = "/export", produces = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -62,11 +67,13 @@ public class FleetStatusController {
             @RequestParam(required = false) String sortBy,
             @RequestParam(defaultValue = "ASC") String sortDirection,
             @RequestParam(required = false) List<String> columns) {
-        AuthenticatedUser user = requireView(auth);
+        ReadContext context = requireView(auth);
+        AuthenticatedUser user = context.user();
         UUID operatorId = user.organizationId();
-        boolean teamScoped = permissions.isMaintenanceTeamScoped(operatorId, user.role());
-        boolean reporterScoped = permissions.isReporterScoped(operatorId, user.role());
-        boolean reviewerScoped=permissions.isReviewerTeamScoped(operatorId,user.role());
+        boolean viewAll = context.viewAll();
+        boolean teamScoped = !viewAll && permissions.isMaintenanceTeamScoped(operatorId, user.role());
+        boolean reporterScoped = !viewAll && permissions.isReporterScoped(operatorId, user.role());
+        boolean reviewerScoped = !viewAll && permissions.isReviewerTeamScoped(operatorId,user.role());
         StreamingResponseBody body = output -> defects.exportFleetStatus(operatorId, user.externalUserId(), teamScoped, reporterScoped, reviewerScoped, fleetId, aircraftType, search, sortBy, sortDirection, columns, output);
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.parseMediaType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"));
@@ -75,9 +82,9 @@ public class FleetStatusController {
         return new ResponseEntity<>(body, headers, HttpStatus.OK);
     }
 
-    private AuthenticatedUser requireView(JwtAuthenticationToken auth) {
+    private ReadContext requireView(JwtAuthenticationToken auth) {
         AuthenticatedUser user = users.require(auth);
-        permissions.require(user, Permission.VIEW);
-        return user;
+        var grants = permissions.requireDefectRead(user);
+        return new ReadContext(user, PermissionService.hasDefectViewAll(grants));
     }
 }

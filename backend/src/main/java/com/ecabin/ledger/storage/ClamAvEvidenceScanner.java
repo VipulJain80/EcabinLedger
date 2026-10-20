@@ -6,10 +6,8 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.stereotype.Component;
 
-/** ClamAV INSTREAM scanner. Absence or error leaves uploads quarantined. */
-@Component
+/** Legacy scanner adapter retained for deployments that explicitly reintroduce scanning. */
 public class ClamAvEvidenceScanner implements EvidenceScanner {
     @Value("${app.attachments.clamav-host:}") private String host;
     @Value("${app.attachments.clamav-port:3310}") private int port;

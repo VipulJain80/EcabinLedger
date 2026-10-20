@@ -21,5 +21,5 @@ export default function LogoutPage() {
     })();
     return () => { active = false; };
   }, []);
-  return <main className="authorization-gate" role="status" aria-live="polite"><section><h1>Signing out…</h1><p>Clearing this browser session.</p></section></main>;
+  return <main className="grid min-h-[100svh] place-items-center bg-[#eaf1ff] p-6 font-[var(--sans)] text-[#000000]" role="status" aria-live="polite"><section className="w-[min(520px,100%)] rounded-2xl border border-[#e1e8f2] bg-white p-8 text-center shadow-[0_14px_32px_#263d5a1c]"><h1 className="my-[10px] text-2xl text-[#000000]">Signing out…</h1><p className="mb-5 mt-0 leading-[1.6] text-[#000000]">Clearing this browser session.</p></section></main>;
 }

@@ -73,7 +73,11 @@ public final class ApiModels {
     ) {}
 
     public record ActionCompletionRequest(@NotBlank @Size(max = 2000) String completionNotes) {}
-    public record MaintenanceActionUpdateRequest(@NotNull UUID formId,@NotNull UUID formVersionId,@NotBlank String status,LocalDate slaTargetDate,@Size(max=2000) String remark) {}
+    public record MaintenanceActionUpdateRequest(@NotNull UUID formId,@NotNull UUID formVersionId,@NotBlank String status,LocalDate slaTargetDate,@Size(max=2000) String remark,Map<String,List<UUID>> attachments) {
+        public MaintenanceActionUpdateRequest(UUID formId,UUID formVersionId,String status,LocalDate slaTargetDate,String remark) {
+            this(formId,formVersionId,status,slaTargetDate,remark,Map.of());
+        }
+    }
     public record MaintenanceSlaPolicy(String statusKey,boolean configured,boolean dateRequired,boolean allowFuture,Integer maxFutureDays,boolean allowPast,Integer maxPastDays,String businessTimezone) {}
     public record MaintenanceSlaPolicyUpdate(String statusKey,boolean dateRequired,boolean allowFuture,Integer maxFutureDays,boolean allowPast,Integer maxPastDays,String businessTimezone,@NotBlank @Size(max=1000) String reason) {}
     public record MaintenanceSlaEffective(MaintenanceSlaPolicy policy,LocalDate today,LocalDate minDate,LocalDate maxDate) {}
@@ -115,10 +119,17 @@ public final class ApiModels {
         String location, String category, String zone, Integer rowNumber, String seatReference,
         String component, UUID areaId, UUID componentId, UUID conditionId, String conditionName, String title, String description, String severity, String severityName, String status,
         String reportedBy, String assignedTo, UUID activeActionId, Instant dueAt, Instant reportedAt, Instant updatedAt,
-        String assignedTeam, String routingAttention) {}
+        String assignedTeam, String routingAttention, Instant closedAt) {}
 
+    public record SubmittedFormValue(String label, String value) {}
+    /** Whitelisted, user-facing values projected from the immutable form snapshot or event state. */
+    public record DefectEventDetails(String formId, String formName, String formPurpose, String workflowStage,
+        Integer formVersionNumber, List<SubmittedFormValue> submittedDetails, String maintenanceStatus,
+        String slaTargetDate, String previousSlaTargetDate, String actionStatus, String previousActionStatus,
+        String maintenanceRemark, String decision, String maintenanceTeam, UUID evidenceAttachmentId) {}
     public record DefectEventView(UUID id, String eventType, String fromStatus, String toStatus,
-        String note, String evidenceReference, String inspectionOutcome, String actorId, Instant occurredAt) {}
+        String note, String evidenceReference, String inspectionOutcome, String actorId, Instant occurredAt,
+        DefectEventDetails details) {}
 
     public record DefectPage(List<DefectView> items, String nextCursor) {}
     public record DashboardSummary(long openDefects, long criticalDefects, long reportedToday, long closedThisMonth) {}
@@ -139,4 +150,21 @@ public final class ApiModels {
     public record NavigationItem(String key, String label, String icon, String section, List<NavigationItem> children) {}
     public record ErrorBody(ErrorDetail error) {}
     public record ErrorDetail(String code, String message) {}
+    public record WorkflowStatusView(UUID id, String moduleCode, String statusCode, String displayName,
+        String aliasName, String description, boolean isActive, int sortOrder, boolean isInitial, boolean isTerminal,
+        String backgroundColor, String textColor, String borderColor, String icon, String displayStyle) {}
+    public record WorkflowStatusPage(List<WorkflowStatusView> items, int page, int size, long totalElements, int totalPages) {}
+    public record WorkflowStatusUpdateRequest(
+        @jakarta.validation.constraints.Size(max = 100) String displayName,
+        @jakarta.validation.constraints.Size(max = 100) String aliasName,
+        @jakarta.validation.constraints.Size(max = 500) String description,
+        @jakarta.validation.constraints.Min(0) Integer sortOrder,
+        Boolean isActive,
+        @jakarta.validation.constraints.Pattern(regexp = "^#[0-9A-Fa-f]{6}$") String backgroundColor,
+        @jakarta.validation.constraints.Pattern(regexp = "^#[0-9A-Fa-f]{6}$") String textColor,
+        @jakarta.validation.constraints.Pattern(regexp = "^#[0-9A-Fa-f]{6}$") String borderColor,
+        @jakarta.validation.constraints.Size(max = 32) String icon,
+        @jakarta.validation.constraints.Pattern(regexp = "^(SOLID|OUTLINE|SOFT)$") String displayStyle,
+        @NotBlank @Size(max = 1000) String reason
+    ) {}
 }

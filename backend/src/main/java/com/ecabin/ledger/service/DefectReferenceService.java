@@ -1,7 +1,7 @@
 package com.ecabin.ledger.service;
 
 import java.time.LocalDate;
-import java.time.ZoneOffset;
+import java.time.ZoneId;
 import java.util.Locale;
 import java.util.UUID;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -23,11 +23,9 @@ public class DefectReferenceService {
             rs -> rs.next() ? rs.getString("shortcode") : null, operatorId, areaId);
         if (shortcode == null) throw new IllegalArgumentException("Choose an active area belonging to this organization.");
 
-        // UTC is the documented business-date policy until the organization has an
-        // explicit, authoritative business timezone setting.
         java.sql.Timestamp createdAt = jdbc.queryForObject("SELECT transaction_timestamp()", java.sql.Timestamp.class);
         if (createdAt == null) throw new IllegalStateException("Could not resolve the server creation timestamp.");
-        LocalDate businessDate = createdAt.toInstant().atZone(ZoneOffset.UTC).toLocalDate();
+        LocalDate businessDate = createdAt.toInstant().atZone(ZoneId.of("Asia/Kolkata")).toLocalDate();
         Long sequence = jdbc.queryForObject(
             "INSERT INTO defect_reference_counters_dtl(operator_id,business_date,area_shortcode,last_sequence) VALUES(?,?,?,1) " +
                 "ON CONFLICT(operator_id,business_date,area_shortcode) DO UPDATE SET last_sequence=defect_reference_counters_dtl.last_sequence+1,updated_at=clock_timestamp() " +

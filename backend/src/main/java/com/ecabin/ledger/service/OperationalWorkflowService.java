@@ -23,6 +23,9 @@ public class OperationalWorkflowService {
     private final NotificationService notifications;
     private final ClosureReviewAccessService closureAccess;
     private final OperationalFormService forms;
+    private com.ecabin.ledger.email.EmailOutboxService emailOutbox;
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setEmailOutbox(com.ecabin.ledger.email.EmailOutboxService emailOutbox){this.emailOutbox=emailOutbox;}
 
     @org.springframework.beans.factory.annotation.Autowired
     public OperationalWorkflowService(JdbcTemplate jdbc, NotificationService notifications, ClosureReviewAccessService closureAccess, OperationalFormService forms) { this.jdbc = jdbc; this.notifications = notifications; this.closureAccess=closureAccess; this.forms=forms; }
@@ -45,6 +48,7 @@ public class OperationalWorkflowService {
         updateStatus(organizationId, defectId, from, target);
         UUID inspectionEventId = audit(organizationId, defectId, "INSPECTION_COMPLETED", from, target, request.findings().trim(), "INSPECTION", inspectionId, actorId, result, null);
         if (notifications != null) notifications.notifyReviewers(organizationId, defectId, inspectionEventId, actorId, "INSPECTION_COMPLETED", "An inspection result was recorded for a routed cabin defect.");
+        if (emailOutbox != null) emailOutbox.enqueue(organizationId,defectId,inspectionEventId,actorId,"INSPECTION_COMPLETED",null,null);
         if (target.equals("INSPECTION_COMPLETE")) {
             String approvedMaintenanceTeam = jdbc.query("SELECT new_state->>'maintenanceTeam' FROM defect_events_dtl WHERE operator_id=? AND defect_id=? AND event_type='REVIEW_APPROVED' ORDER BY occurred_at DESC,id DESC LIMIT 1",rs->rs.next()?rs.getString(1):null,organizationId,defectId);
             if (approvedMaintenanceTeam != null && activeMaintenanceTeamWithMember(organizationId, approvedMaintenanceTeam)) {
@@ -57,6 +61,7 @@ public class OperationalWorkflowService {
                 updateStatus(organizationId,defectId,"INSPECTION_COMPLETE","ACTION_ASSIGNED");
                 UUID actionEventId = insertEvent("INSERT INTO defect_events_dtl(operator_id,defect_id,event_type,from_status,to_status,note,actor_id,entity_type,entity_id,previous_state,new_state,request_id) VALUES(?,?,'ACTION_ASSIGNED','INSPECTION_COMPLETE','ACTION_ASSIGNED',?,?,'CORRECTIVE_ACTION',?,jsonb_build_object('status','INSPECTION_COMPLETE'),jsonb_build_object('status','ACTION_ASSIGNED','team',?::varchar,'correctiveActionId',?),?)",organizationId,defectId,description,actorId,actionId,approvedMaintenanceTeam,actionId,safeRequestId());
                 notifyAssignedTeam(organizationId,defectId,approvedMaintenanceTeam,null,actionEventId,actorId);
+                if(emailOutbox!=null)emailOutbox.enqueue(organizationId,defectId,actionEventId,actorId,"ACTION_ASSIGNED",approvedMaintenanceTeam,null);
                 target="ACTION_ASSIGNED";
             } else if (approvedMaintenanceTeam != null) {
                 jdbc.update("INSERT INTO defect_events_dtl(operator_id,defect_id,event_type,from_status,to_status,note,actor_id,entity_type,entity_id,new_state,request_id) VALUES(?,?,'MAINTENANCE_ROUTING_FAILED','INSPECTION_COMPLETE','INSPECTION_COMPLETE','Approved Cabin Maintenance team is no longer active or has no active maintenance members.',?,'DEFECT',?,jsonb_build_object('maintenanceTeam',?::varchar,'actionable','Organization administrator must configure a valid maintenance route and assign corrective action.'),?)",organizationId,defectId,actorId,defectId,approvedMaintenanceTeam,safeRequestId());
@@ -88,6 +93,7 @@ public class OperationalWorkflowService {
             "VALUES(?,?,'ACTION_ASSIGNED',?,'ACTION_ASSIGNED',?,?,'CORRECTIVE_ACTION',?,jsonb_build_object('status',?),jsonb_build_object('status','ACTION_ASSIGNED','team',?::varchar,'assignedUserId',?::varchar,'correctiveActionId',?),?)",
             organizationId, defectId, from, request.description().trim(), actorId, actionId, from, team, assignedUser, actionId, safeRequestId());
         notifyAssignedTeam(organizationId, defectId, team, assignedUser,eventId,actorId);
+        if(emailOutbox!=null)emailOutbox.enqueue(organizationId,defectId,eventId,actorId,"ACTION_ASSIGNED",team,assignedUser);
         return new WorkflowRecord(actionId, "ASSIGNED");
     }
 
@@ -118,6 +124,7 @@ public class OperationalWorkflowService {
             "VALUES(?,?,'ACTION_REASSIGNED',?,'ACTION_ASSIGNED',?,?,'CORRECTIVE_ACTION',?,jsonb_build_object('team',?::varchar,'assignedUserId',?::varchar,'correctiveActionId',?),jsonb_build_object('team',?::varchar,'assignedUserId',?::varchar,'correctiveActionId',?,'status','ACTION_ASSIGNED'),?)",
             organizationId, defectId, from, request.reason().trim(), actorId, replacementId, previous.team(), previous.assignedUser(), previous.id(), newTeam, newUser, replacementId, safeRequestId());
         notifyAssignedTeam(organizationId, defectId, newTeam, newUser,eventId,actorId);
+        if(emailOutbox!=null)emailOutbox.enqueue(organizationId,defectId,eventId,actorId,"ACTION_ASSIGNED",newTeam,newUser);
         return new WorkflowRecord(replacementId, "ASSIGNED");
     }
 
@@ -130,6 +137,7 @@ public class OperationalWorkflowService {
         if (from.equals("ACTION_ASSIGNED")) updateStatus(organizationId, defectId, from, "IN_PROGRESS");
         UUID eventId = audit(organizationId, defectId, "ACTION_STARTED", from, from.equals("ACTION_ASSIGNED") ? "IN_PROGRESS" : from, "Corrective action started.", "CORRECTIVE_ACTION", actionId, actorId, null, null);
         if (notifications != null) notifications.notifyReviewers(organizationId, defectId, eventId, actorId, "ACTION_STARTED", "Maintenance started the assigned corrective work.");
+        if(emailOutbox!=null)emailOutbox.enqueue(organizationId,defectId,eventId,actorId,"ACTION_STARTED",null,null);
         return new WorkflowRecord(actionId, "IN_PROGRESS");
     }
 
@@ -142,6 +150,7 @@ public class OperationalWorkflowService {
         updateStatus(organizationId, defectId, from, "AWAITING_VERIFICATION");
         UUID eventId = audit(organizationId, defectId, "ACTION_COMPLETED", from, "AWAITING_VERIFICATION", request.completionNotes().trim(), "CORRECTIVE_ACTION", actionId, actorId, null, null);
         if (notifications != null) notifications.notifyReviewers(organizationId, defectId, eventId, actorId, "ACTION_COMPLETED", "Maintenance completed corrective work; independent verification is required.");
+        if(emailOutbox!=null)emailOutbox.enqueue(organizationId,defectId,eventId,actorId,"ACTION_COMPLETED",null,null);
         return new WorkflowRecord(actionId, "COMPLETED");
     }
 
@@ -161,6 +170,7 @@ public class OperationalWorkflowService {
         updateStatus(organizationId, defectId, from, target);
         UUID eventId = audit(organizationId, defectId, "VERIFICATION_COMPLETED", from, target, request.notes().trim(), "VERIFICATION", verificationId, actorId, result, request.evidenceReference().trim());
         if (notifications != null) notifications.notifyParticipants(organizationId, defectId, eventId, actorId, result.equals("PASS") ? "WORK_VERIFIED" : "VERIFICATION_REJECTED", result.equals("PASS") ? "Corrective work passed independent verification." : "Independent verification failed; further corrective work is required.");
+        if(emailOutbox!=null)emailOutbox.enqueue(organizationId,defectId,eventId,actorId,result.equals("PASS")?"WORK_VERIFIED":"VERIFICATION_REJECTED",null,null);
         return new WorkflowRecord(verificationId, result);
     }
 
@@ -199,6 +209,7 @@ public class OperationalWorkflowService {
         updateStatus(organizationId, defectId, from, target);
         UUID eventId=insertEvent("INSERT INTO defect_events_dtl(operator_id,defect_id,event_type,from_status,to_status,note,evidence_reference,actor_id,entity_type,entity_id,previous_state,new_state,request_id) VALUES(?,?,?,?,?,?,?,?,?, ?,jsonb_build_object('status',?),jsonb_build_object('status',?,'decision',?,'formId',?::text,'versionId',?::text,'closureTeamId',?::text,'returnedActionId',?::text),?)",organizationId,defectId,"CLOSURE_"+decision,from,target,reason,evidence,actorId,"CLOSURE_APPROVAL",approvalId,from,target,submittedDecision,request.formId()==null?null:request.formId().toString(),request.versionId()==null?null:request.versionId().toString(),closureTeamId==null?null:closureTeamId.toString(),returnedActionId==null?null:returnedActionId.toString(),safeRequestId());
         if (notifications != null) notifications.notifyParticipants(organizationId, defectId, eventId, actorId, decision.equals("APPROVED") ? "CLOSURE_APPROVED" : "CLOSURE_REJECTED", decision.equals("APPROVED") ? "Defect closure was approved." : "Defect closure was rejected; corrective work must continue.");
+        if(emailOutbox!=null){emailOutbox.enqueue(organizationId,defectId,eventId,actorId,decision.equals("APPROVED")?"CLOSURE_APPROVED":"CLOSURE_REJECTED",null,null);if(decision.equals("REJECTED")&&returnedActionId!=null){ActionAssignment assignment=jdbc.query("SELECT assigned_team,assigned_user_id FROM corrective_actions_dtl WHERE operator_id=? AND id=?",(rs,n)->new ActionAssignment(null,rs.getString("assigned_team"),rs.getString("assigned_user_id"),null,null,null),organizationId,returnedActionId).get(0);emailOutbox.enqueue(organizationId,defectId,eventId,actorId,"ACTION_ASSIGNED",assignment.team(),assignment.assignedUser());}}
         if(decision.equals("REJECTED")&&returnedActionId!=null){ActionAssignment assignment=jdbc.query("SELECT id,assigned_team,assigned_user_id,description,priority,due_at FROM corrective_actions_dtl WHERE operator_id=? AND id=?",(rs,n)->new ActionAssignment(rs.getObject("id",UUID.class),rs.getString("assigned_team"),rs.getString("assigned_user_id"),rs.getString("description"),rs.getString("priority"),rs.getTimestamp("due_at")),organizationId,returnedActionId).get(0);notifyAssignedTeam(organizationId,defectId,assignment.team(),assignment.assignedUser(),eventId,actorId);}
         return new WorkflowRecord(approvalId, target);
     }

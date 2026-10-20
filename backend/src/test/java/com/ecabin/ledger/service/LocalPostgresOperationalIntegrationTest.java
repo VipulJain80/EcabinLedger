@@ -8,6 +8,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.ecabin.ledger.api.ApiModels.ActionCompletionRequest;
+import com.ecabin.ledger.api.ApiModels.MaintenanceActionUpdateRequest;
+import com.ecabin.ledger.api.ApiModels.MaintenanceSlaPolicyUpdate;
 import com.ecabin.ledger.api.ApiModels.ApprovalRequest;
 import com.ecabin.ledger.api.ApiModels.CreateDefectRequest;
 import com.ecabin.ledger.api.ApiModels.CorrectiveActionRequest;
@@ -128,9 +130,43 @@ class LocalPostgresOperationalIntegrationTest {
     @Autowired ConfigurationImportService imports;
     @Autowired ReviewerQueueService reviewerQueue;
     @Autowired MaintenanceSlaPolicyService maintenanceSlaPolicies;
+    @Autowired MaintenanceActionService maintenanceActions;
+    @Autowired AreaMaintenanceRoutingService areaMaintenanceRouting;
     @Autowired com.ecabin.ledger.security.PermissionService resolvedPermissions;
     @Autowired MockMvc mockMvc;
     @Autowired ObjectMapper objectMapper;
+
+    @Test
+    @Transactional
+    @Rollback
+    void closedCaseDateComesFromImmutableCloseEventAndIsReturnedInDefectTables() {
+        UUID org=createTenant("CASE-CLOSE-DATE");
+        UUID area=jdbc.queryForObject("SELECT id FROM cabin_areas_mst WHERE operator_id=? AND code='CABIN'",UUID.class,org);
+        UUID component=jdbc.queryForObject("SELECT id FROM cabin_components_mst WHERE operator_id=? AND code='TRAY_TABLE'",UUID.class,org);
+        UUID condition=createCondition(org,component);
+        UUID aircraft=jdbc.queryForObject("SELECT id FROM aircraft_mst WHERE operator_id=?",UUID.class,org);
+        String tail=jdbc.queryForObject("SELECT tail_number FROM aircraft_mst WHERE operator_id=?",String.class,org);
+        DefectView defect=defects.create(org,"close-date-reporter",new CreateDefectRequest(tail,"CABIN","SEAT",area,component,condition,"FWD CABIN",null,null,null,"Close date fixture","Synthetic PostgreSQL integration fixture.","MEDIUM"));
+        Instant closedAt=Instant.parse("2026-10-17T10:15:30Z");
+        jdbc.update("UPDATE defects_dtl SET status='CLOSED',updated_at=? WHERE operator_id=? AND id=?",java.sql.Timestamp.from(closedAt),org,defect.id());
+        jdbc.update("INSERT INTO defect_events_dtl(operator_id,defect_id,event_type,from_status,to_status,note,actor_id,occurred_at) VALUES(?,?,'CLOSURE_APPROVED','APPROVAL_REQUIRED','CLOSED','Integration fixture closed.',?,?)",org,defect.id(),"closure-reviewer",java.sql.Timestamp.from(closedAt));
+
+        assertEquals(closedAt,defects.get(org,defect.id()).closedAt());
+        var aircraftPage=defects.aircraftDefects(org,"",aircraft,false,false,0,10,"CLOSED","","reportedAt","DESC");
+        assertEquals(closedAt,aircraftPage.items().stream().filter(row->row.id().equals(defect.id())).findFirst().orElseThrow().closedAt());
+        var defectPage=defects.list(org,"close-date-reporter","CLOSED",null,null,"ALL",null,null,null,false,false,false,null,10);
+        assertEquals(closedAt,defectPage.items().stream().filter(row->row.id().equals(defect.id())).findFirst().orElseThrow().closedAt());
+
+        DefectView legacyClosed=defects.create(org,"close-date-reporter",new CreateDefectRequest(tail,"CABIN","SEAT",area,component,condition,"AFT CABIN",null,null,null,"Legacy close-date fixture","Synthetic PostgreSQL integration fixture without a close event.","MEDIUM"));
+        Instant legacyClosedAt=Instant.parse("2026-10-17T11:15:30Z");
+        jdbc.update("UPDATE defects_dtl SET status='CLOSED',updated_at=? WHERE operator_id=? AND id=?",java.sql.Timestamp.from(legacyClosedAt),org,legacyClosed.id());
+
+        assertEquals(legacyClosedAt,defects.get(org,legacyClosed.id()).closedAt());
+        var legacyAircraftRow=defects.aircraftDefects(org,"",aircraft,false,false,0,10,"CLOSED","Legacy close-date fixture","reportedAt","DESC").items().stream().filter(row->row.id().equals(legacyClosed.id())).findFirst().orElseThrow();
+        assertEquals(legacyClosedAt,legacyAircraftRow.closedAt());
+        var legacyDefectRow=defects.list(org,"close-date-reporter","CLOSED",null,"Legacy close-date fixture","ALL",null,null,null,false,false,false,null,10).items().stream().filter(row->row.id().equals(legacyClosed.id())).findFirst().orElseThrow();
+        assertEquals(legacyClosedAt,legacyDefectRow.closedAt());
+    }
 
     @Test
     @Transactional
@@ -142,7 +178,7 @@ class LocalPostgresOperationalIntegrationTest {
         given(jwtDecoder.decode("permission-admin-token")).willReturn(testJwt("permission-admin",org));
         given(jwtDecoder.decode("permission-viewer-token")).willReturn(testJwt("permission-viewer",org));
         mockMvc.perform(get("/api/v1/configuration/permissions").header("Authorization","Bearer permission-admin-token"))
-            .andExpect(status().isOk()).andExpect(content().string(containsString("ADMINISTER_ORGANIZATION")));
+            .andExpect(status().isOk()).andExpect(content().string(containsString("ADMINISTER_ORGANIZATION"))).andExpect(content().string(containsString("DEFECT_VIEW_ALL")));
         mockMvc.perform(get("/api/v1/configuration/role-permissions").header("Authorization","Bearer permission-admin-token"))
             .andExpect(status().isOk()).andExpect(content().string(containsString("VIEW")));
         mockMvc.perform(get("/api/v1/configuration/permissions").header("Authorization","Bearer permission-viewer-token"))
@@ -153,8 +189,19 @@ class LocalPostgresOperationalIntegrationTest {
         mockMvc.perform(post("/api/v1/configuration/role-permissions").header("Authorization","Bearer permission-admin-token")
             .contentType(MediaType.APPLICATION_JSON).content("{}"))
             .andExpect(status().isForbidden());
+        mockMvc.perform(post("/api/v1/configuration/roles").header("Authorization","Bearer permission-admin-token")
+            .contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(new SaveRequest(null,java.util.Map.of(
+                "roleKey","DEFECT_READER","name","Defect Reader","description","Tenant-wide defect visibility only.","permissions","DEFECT_VIEW_ALL")))))
+            .andExpect(status().isOk()).andExpect(content().string(containsString("DEFECT_VIEW_ALL")));
         assertThrows(IllegalArgumentException.class,()->configuration.save(org,"permission-admin","roles",new SaveRequest(null,java.util.Map.of(
             "roleKey","CUSTOM_ADMIN","name","Custom Admin","description","Attempted privilege escalation.","permissions","VIEW|ADMINISTER_ORGANIZATION"))));
+        UUID administratorRoleId = jdbc.queryForObject("SELECT id FROM operator_roles_mst WHERE operator_id=? AND role_key='ADMIN'", UUID.class, org);
+        var updatedAdministrator = configuration.save(org, "permission-admin", "roles", new SaveRequest(administratorRoleId.toString(), java.util.Map.of(
+            "name", "Administrator", "description", "Updated organization administrator role.", "permissions", "VIEW|REPORT_VIEW|ADMINISTER_ORGANIZATION")));
+        assertEquals("ADMIN", updatedAdministrator.get("roleKey"), "Editing Administrator must preserve its stable role key.");
+        assertEquals("VIEW|REPORT_VIEW|ADMINISTER_ORGANIZATION", updatedAdministrator.get("permissions"));
+        assertThrows(IllegalArgumentException.class, () -> configuration.save(org, "permission-admin", "roles", new SaveRequest(administratorRoleId.toString(), java.util.Map.of(
+            "name", "Administrator", "description", "Must retain organization administration.", "permissions", "VIEW|REPORT_VIEW"))));
     }
 
     @Test
@@ -300,6 +347,12 @@ class LocalPostgresOperationalIntegrationTest {
         var submittedForm=new SubmitFormRequest(form.id(),published.id(),com.ecabin.ledger.api.FormModels.FormPurpose.DEFECT_REPORT,submittedAnswers);
         mockMvc.perform(post("/api/v1/defects/{id}/form-submissions",apiCreated.id()).header("Authorization","Bearer auditor-token").contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(submittedForm))).andExpect(status().isCreated());
         assertEquals(1,forms.submissions(org,apiCreated.id()).size());
+        mockMvc.perform(get("/api/v1/defects/{id}/events",apiCreated.id()).header("Authorization","Bearer auditor-token"))
+            .andExpect(status().isOk()).andExpect(content().string(containsString("submittedDetails")))
+            .andExpect(content().string(containsString("API report")))
+            .andExpect(content().string(not(containsString("answers_json"))))
+            .andExpect(content().string(not(containsString("newState"))))
+            .andExpect(content().string(not(containsString("previousState"))));
         mockMvc.perform(get("/api/v1/defects/{id}/operational-forms?purpose=DEFECT_REPORT",apiCreated.id()).header("Authorization","Bearer auditor-token"))
             .andExpect(status().isOk()).andExpect(content().json("[]"));
         var wrongRegistration=new CreateDefectRequest("N999ZZ","CABIN","SEAT",area,component,condition,"FWD CABIN / ROW 17 / SEAT 17A",null,null,null,"Wrong aircraft","Registration cannot replace the selected aircraft.","MEDIUM",aircraft,form.id(),published.id(),reportAnswers(org,component,condition,"FWD CABIN / ROW 17 / SEAT 17A","Wrong aircraft","Registration cannot replace the selected aircraft."));
@@ -314,12 +367,103 @@ class LocalPostgresOperationalIntegrationTest {
         mockMvc.perform(post("/api/v1/defects").header("Authorization","Bearer auditor-token").contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(wrongFormArea))).andExpect(status().isBadRequest());
     }
 
+    @Test
+    @Transactional
+    @Rollback
+    void defectViewAllReadsTenantWideDefectsWithoutGrantingMaintenanceWrites() throws Exception {
+        UUID org=createTenant("VIEW-ALL"),otherOrg=createTenant("VIEW-ALL-OTHER");
+        jdbc.update("INSERT INTO operator_roles_mst(operator_id,role_key,name,permissions,system_role) VALUES(?, 'DEFECT_READER','Defect reader','DEFECT_VIEW_ALL|PERFORM_ACTION',false)",org);
+        addMember(org,"view-all-maintenance","DEFECT_READER");
+        addMember(org,"view-all-reporter-a","AUDITOR");
+        addMember(org,"view-all-reporter-b","AUDITOR");
+        addMember(org,"view-all-other-team-tech","MAINTENANCE_TECHNICIAN");
+        addMember(org,"view-only-maintenance","MAINTENANCE_TECHNICIAN");
+        addMember(otherOrg,"view-all-foreign-reporter","AUDITOR");
+        given(jwtDecoder.decode("view-all-token")).willReturn(testJwt("view-all-maintenance",org));
+        given(jwtDecoder.decode("view-only-token")).willReturn(testJwt("view-only-maintenance",org));
+
+        UUID area=jdbc.queryForObject("SELECT id FROM cabin_areas_mst WHERE operator_id=? AND code='CABIN'",UUID.class,org);
+        UUID component=jdbc.queryForObject("SELECT id FROM cabin_components_mst WHERE operator_id=? AND code='TRAY_TABLE'",UUID.class,org);
+        UUID condition=createCondition(org,component);
+        String tail=jdbc.queryForObject("SELECT tail_number FROM aircraft_mst WHERE operator_id=?",String.class,org);
+        DefectView first=defects.create(org,"view-all-reporter-a",new CreateDefectRequest(tail,"CABIN","SEAT",area,component,condition,"FWD CABIN",14,"14A",null,"Created by another auditor","Tenant-wide visibility remains read-only.","LOW"));
+        DefectView assigned=defects.create(org,"view-all-reporter-b",new CreateDefectRequest(tail,"CABIN","SEAT",area,component,condition,"AFT CABIN",15,"15A",null,"Assigned to another team","Reader is not a member of this maintenance team.","MEDIUM"));
+
+        String otherTeam="Assigned Maintenance Team";
+        jdbc.update("INSERT INTO maintenance_teams_mst(operator_id,name) VALUES(?,?)",org,otherTeam);
+        jdbc.update("INSERT INTO operator_membership_teams_mst(operator_id,external_user_id,team_name) VALUES(?,?,?)",org,"view-all-other-team-tech",otherTeam);
+        UUID actionId=UUID.randomUUID();
+        jdbc.update("INSERT INTO corrective_actions_dtl(id,operator_id,defect_id,created_by_user_id,assigned_team,description,priority,status) VALUES(?,?,?,?,?,?,'MEDIUM','ASSIGNED')",actionId,org,assigned.id(),"view-all-maintenance",otherTeam,"Existing work owned by another team");
+        jdbc.update("UPDATE defects_dtl SET status='ACTION_ASSIGNED',assigned_to=?,assigned_team=? WHERE operator_id=? AND id=?",otherTeam,otherTeam,org,assigned.id());
+        UUID foreignArea=jdbc.queryForObject("SELECT id FROM cabin_areas_mst WHERE operator_id=? AND code='CABIN'",UUID.class,otherOrg);
+        UUID foreignComponent=jdbc.queryForObject("SELECT id FROM cabin_components_mst WHERE operator_id=? AND code='TRAY_TABLE'",UUID.class,otherOrg);
+        UUID foreignCondition=createCondition(otherOrg,foreignComponent);
+        String foreignTail=jdbc.queryForObject("SELECT tail_number FROM aircraft_mst WHERE operator_id=?",String.class,otherOrg);
+        DefectView foreign=defects.create(otherOrg,"view-all-foreign-reporter",new CreateDefectRequest(foreignTail,"CABIN","SEAT",foreignArea,foreignComponent,foreignCondition,"FWD CABIN",16,"16A",null,"Foreign tenant case","Must remain inaccessible.","LOW"));
+        UUID aircraft=jdbc.queryForObject("SELECT id FROM aircraft_mst WHERE operator_id=? AND tail_number=?",UUID.class,org,tail);
+
+        mockMvc.perform(get("/api/v1/defects?limit=25").header("Authorization","Bearer view-all-token"))
+            .andExpect(status().isOk()).andExpect(content().string(containsString(first.reference()))).andExpect(content().string(containsString(assigned.reference())));
+        mockMvc.perform(get("/api/v1/defects/{id}",assigned.id()).header("Authorization","Bearer view-all-token"))
+            .andExpect(status().isOk()).andExpect(content().string(containsString(otherTeam)));
+        mockMvc.perform(get("/api/v1/defects/{id}/events",first.id()).header("Authorization","Bearer view-all-token"))
+            .andExpect(status().isOk()).andExpect(content().string(containsString("DEFECT_REPORTED")));
+        mockMvc.perform(get("/api/v1/defects/{id}/form-submissions",assigned.id()).header("Authorization","Bearer view-all-token"))
+            .andExpect(status().isOk());
+        mockMvc.perform(get("/api/v1/aircraft/{id}/defects",aircraft).header("Authorization","Bearer view-all-token"))
+            .andExpect(status().isOk()).andExpect(content().string(containsString(assigned.reference())));
+        mockMvc.perform(get("/api/v1/dashboard/summary").header("Authorization","Bearer view-all-token"))
+            .andExpect(status().isOk());
+        mockMvc.perform(get("/api/v1/defects/{id}/operational-forms?purpose=CORRECTIVE_ACTION",first.id()).header("Authorization","Bearer view-all-token"))
+            .andExpect(status().isNotFound());
+        mockMvc.perform(get("/api/v1/defects/{id}",foreign.id()).header("Authorization","Bearer view-all-token"))
+            .andExpect(status().isNotFound());
+        mockMvc.perform(get("/api/v1/defects/{id}",first.id()).header("Authorization","Bearer view-only-token"))
+            .andExpect(status().isNotFound());
+        mockMvc.perform(get("/api/v1/navigation").header("Authorization","Bearer view-all-token"))
+            .andExpect(status().isOk()).andExpect(content().string(containsString("\"key\":\"defects\""))).andExpect(content().string(not(containsString("\"key\":\"reports\""))));
+
+        int eventCount=jdbc.queryForObject("SELECT count(*) FROM defect_events_dtl WHERE operator_id=? AND defect_id=?",Integer.class,org,first.id());
+        mockMvc.perform(post("/api/v1/defects/{id}/transitions",first.id()).header("Authorization","Bearer view-all-token").contentType(MediaType.APPLICATION_JSON)
+            .content("{\"status\":\"ACTION_ASSIGNED\",\"note\":\"Attempted read-only workflow bypass\"}"))
+            .andExpect(status().isNotFound());
+        mockMvc.perform(post("/api/v1/defects/{id}/form-submissions",first.id()).header("Authorization","Bearer view-all-token").contentType(MediaType.APPLICATION_JSON)
+            .content(objectMapper.writeValueAsString(new SubmitFormRequest(UUID.randomUUID(),UUID.randomUUID(),FormPurpose.CORRECTIVE_ACTION,Map.of()))))
+            .andExpect(status().isNotFound());
+        mockMvc.perform(post("/api/v1/defects/{id}/actions",first.id()).header("Authorization","Bearer view-all-token").contentType(MediaType.APPLICATION_JSON)
+            .content("{\"assignedTeam\":\"Assigned Maintenance Team\",\"description\":\"Attempted assignment\",\"priority\":\"MEDIUM\"}"))
+            .andExpect(status().isForbidden());
+        assertEquals("REPORTED",jdbc.queryForObject("SELECT status FROM defects_dtl WHERE operator_id=? AND id=?",String.class,org,first.id()));
+        assertEquals(eventCount,jdbc.queryForObject("SELECT count(*) FROM defect_events_dtl WHERE operator_id=? AND defect_id=?",Integer.class,org,first.id()),"Read-only access must not append workflow events.");
+
+        jdbc.update("UPDATE operator_roles_mst SET permissions='PERFORM_ACTION' WHERE operator_id=? AND role_key='DEFECT_READER'",org);
+        mockMvc.perform(get("/api/v1/defects?limit=25").header("Authorization","Bearer view-all-token"))
+            .andExpect(status().isForbidden());
+    }
+
     private Jwt testJwt(String subject,UUID org){return Jwt.withTokenValue("mocked").header("alg","RS256").subject(subject).claim("operator_id",org.toString()).issuedAt(Instant.now()).expiresAt(Instant.now().plusSeconds(300)).build();}
 
     @Test
     @Transactional
     @Rollback
-    void auditorReportReviewerDecisionAndDeferredMaintenanceAssignmentPreserveWorkflow() {
+    void closureTeamRouteSaveWritesValidAuditEvent() {
+        UUID org=createTenant("CLOSURE-ROUTE");
+        addMember(org,"closure-route-admin","ADMIN");
+        UUID team=UUID.randomUUID();
+        jdbc.update("INSERT INTO maintenance_teams_mst(id,operator_id,name,team_type) VALUES(?,?,?,'CLOSURE')",team,org,"Closure Route Team");
+        jdbc.update("INSERT INTO operator_membership_teams_mst(operator_id,external_user_id,team_name) VALUES(?,?,?)",org,"closure-route-admin","Closure Route Team");
+
+        var saved=areaMaintenanceRouting.setClosureTeam(org,"closure-route-admin",team,"Configure the organization closure route");
+
+        assertEquals(team,saved.get("teamId"));
+        assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM defect_events_dtl WHERE operator_id=? AND entity_type='ORGANIZATION' AND event_type='CLOSURE_ROUTE_CONFIGURED' AND actor_id=? AND new_state->>'teamId'=?",Integer.class,org,"closure-route-admin",team.toString()));
+        assertTrue("CLOSURE_ROUTE_CONFIGURED".length()<=32,"Audit event type must fit defect_events_dtl.event_type.");
+    }
+
+    @Test
+    @Transactional
+    @Rollback
+    void reviewerApprovalAssignsDirectlyToMaintenanceWithoutInspection() {
         UUID org=createTenant("REVIEW-FLOW");
         jdbc.update("INSERT INTO operator_roles_mst(operator_id,role_key,name,permissions,system_role) VALUES(?, 'AUDITOR','Test Auditor','VIEW|REPORT|AUDIT',false),(?, 'REVIEWER','Test Reviewer','VIEW|REVIEW',false)",org,org);
         addMember(org,"auditor.test@ecabin.local","AUDITOR");addMember(org,"reviewer.test@ecabin.local","REVIEWER");addMember(org,"maintenance.test@ecabin.local","MAINTENANCE_TECHNICIAN");addMember(org,"inspector.test@ecabin.local","INSPECTOR");
@@ -358,27 +502,31 @@ class LocalPostgresOperationalIntegrationTest {
         var decisionOptions=reviewerQueue.decisionOptions(org,approved.id(),"reviewer.test@ecabin.local");
         assertTrue(decisionOptions.maintenanceTeams().stream().anyMatch(team->team.id().equals(maintenanceTeam)));
         assertThrows(IllegalArgumentException.class,()->reviewerQueue.decide(org,approved.id(),"reviewer.test@ecabin.local",new ReviewerDecisionRequest("APPROVE",null,null,null,decisionForm.id(),decisionPublished.id())));
+        assertThrows(IllegalStateException.class,()->defects.transition(org,approved.id(),"reviewer.test@ecabin.local",new TransitionRequest("ACTION_ASSIGNED","Attempt to bypass the decision operation.",null,null)),"Generic status changes cannot perform Reviewer approval or create Maintenance assignment.");
+        assertThrows(IllegalStateException.class,()->defects.transition(org,approved.id(),"reviewer.test@ecabin.local",new TransitionRequest("INSPECTION_REQUIRED","Attempt to bypass the Galley Reviewer decision.",null,null)),"A Galley case cannot bypass its Reviewer decision through the legacy inspection transition.");
         var approval=reviewerQueue.decide(org,approved.id(),"reviewer.test@ecabin.local",new ReviewerDecisionRequest("APPROVE",maintenanceTeam,null,null,decisionForm.id(),decisionPublished.id()));
-        assertEquals("INSPECTION_REQUIRED",approval.status());
-        assertEquals(0,jdbc.queryForObject("SELECT count(*) FROM corrective_actions_dtl WHERE operator_id=? AND defect_id=? AND isactive=1",Integer.class,org,approved.id()));
-        assertEquals(0,jdbc.queryForObject("SELECT count(*) FROM defects_dtl WHERE operator_id=? AND id=? AND assigned_team IS NOT NULL",Integer.class,org,approved.id()),"Maintenance assignment fields must remain empty until inspection passes.");
-        assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM defect_events_dtl WHERE operator_id=? AND defect_id=? AND event_type='REVIEW_APPROVED' AND actor_id='reviewer.test@ecabin.local' AND note='Reviewer approved the report; inspection is required before maintenance.'",Integer.class,org,approved.id()));
+        assertEquals("ACTION_ASSIGNED",approval.status());
+        assertEquals("ACTION_ASSIGNED",defects.get(org,approved.id()).status());
+        assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM corrective_actions_dtl WHERE operator_id=? AND defect_id=? AND isactive=1 AND status='ASSIGNED' AND assigned_team='Cabin Maintenance'",Integer.class,org,approved.id()));
+        assertEquals("Cabin Maintenance",jdbc.queryForObject("SELECT assigned_team FROM defects_dtl WHERE operator_id=? AND id=?",String.class,org,approved.id()));
+        assertEquals(0,jdbc.queryForObject("SELECT count(*) FROM inspections_dtl WHERE operator_id=? AND defect_id=?",Integer.class,org,approved.id()),"Reviewer approval must not create an inspection record.");
+        assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM defect_events_dtl WHERE operator_id=? AND defect_id=? AND event_type='REVIEW_APPROVED' AND actor_id='reviewer.test@ecabin.local' AND from_status='REPORTED' AND to_status='ACTION_ASSIGNED' AND note='Reviewer approved the report and assigned it to Maintenance.' AND new_state->>'maintenanceTeamId'=?",Integer.class,org,approved.id(),maintenanceTeam.toString()));
+        var approvalEvent=defects.events(org,approved.id()).stream().filter(event->event.eventType().equals("REVIEW_APPROVED")).findFirst().orElseThrow();
+        assertEquals("APPROVE",approvalEvent.details().decision());
+        assertEquals("Cabin Maintenance",approvalEvent.details().maintenanceTeam());
         assertThrows(org.springframework.web.server.ResponseStatusException.class,()->reviewerQueue.decide(org,approved.id(),"reviewer.test@ecabin.local",new ReviewerDecisionRequest("REJECT",null,"must be rejected before repeat", "conflicting retry",decisionForm.id(),decisionPublished.id())));
-        defects.transition(org,approved.id(),"inspector.test@ecabin.local",new TransitionRequest("INSPECTION_IN_PROGRESS","Inspection started.",null,null));
-        var inspection=workflow.completeInspection(org,approved.id(),"inspector.test@ecabin.local",new InspectionRequest("PASS","Seat inspected.",null));
-        assertEquals("ACTION_ASSIGNED",inspection.status());
         assertEquals(1,defects.maintenanceWorkQueue(org,"maintenance.test@ecabin.local",0,25,null,null,"assignmentDate","DESC").totalElements());
         assertEquals("Cabin Maintenance",jdbc.queryForObject("SELECT assigned_team FROM corrective_actions_dtl WHERE operator_id=? AND defect_id=? AND isactive=1",String.class,org,approved.id()));
         assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM notifications_dtl WHERE operator_id=? AND defect_id=? AND recipient_user_id='maintenance.test@ecabin.local' AND notification_type='ACTION_ASSIGNED'",Integer.class,org,approved.id()));
 
         DefectView rejected=defects.create(org,"auditor.test@ecabin.local",new CreateDefectRequest(tail,"GALLEY","GALLEY",area,component,condition,"Galley 1",null,null,null,"Galley — Seat assembly — Galley 1","Condition: Test condition","LOW",aircraftId,null,null));
-        var rejectedAnswers=galleyReportAnswers(org,component,condition,"Galley 1","Duplicate finding","Returned for correction.","LOW");
+        var rejectedAnswers=galleyReportAnswers(org,component,condition,"Galley 1","Duplicate finding","Reviewed report.","LOW");
         forms.submit(org,"auditor.test@ecabin.local",rejected.id(),new SubmitFormRequest(galleyForm.id(),galleyPublished.id(),rejectedAnswers));
         var rejection=reviewerQueue.decide(org,rejected.id(),"reviewer.test@ecabin.local",new ReviewerDecisionRequest("REJECT",null,"The location is unclear.",null,decisionForm.id(),decisionPublished.id()));
-        assertEquals("REPORTED",rejection.status());
-        assertFalse(reviewerQueue.queue(org,"reviewer.test@ecabin.local",false,0,25,"ALL",null,"reportedAt","DESC").items().stream().anyMatch(row->row.id().equals(rejected.id())),"Returned reports leave the review queue until a correction is submitted.");
+        assertEquals("REJECTED",rejection.status());
+        assertFalse(reviewerQueue.queue(org,"reviewer.test@ecabin.local",false,0,25,"ALL",null,"reportedAt","DESC").items().stream().anyMatch(row->row.id().equals(rejected.id())),"Rejected reports leave the review queue.");
         assertEquals(0,jdbc.queryForObject("SELECT count(*) FROM corrective_actions_dtl WHERE operator_id=? AND defect_id=? AND isactive=1",Integer.class,org,rejected.id()));
-        assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM defect_events_dtl WHERE operator_id=? AND defect_id=? AND event_type='REVIEW_REJECTED' AND note='Returned for correction: The location is unclear.' AND new_state->>'rejectionReason'='The location is unclear.' AND new_state->>'returnForCorrection'='true'",Integer.class,org,rejected.id()));
+        assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM defect_events_dtl WHERE operator_id=? AND defect_id=? AND event_type='REVIEW_REJECTED' AND note='Rejected: The location is unclear.' AND to_status='REJECTED' AND new_state->>'rejectionReason'='The location is unclear.' AND new_state->>'returnForCorrection' IS NULL",Integer.class,org,rejected.id()));
         assertThrows(org.springframework.web.server.ResponseStatusException.class,()->reviewerQueue.decide(org,rejected.id(),"reviewer.test@ecabin.local",new ReviewerDecisionRequest("APPROVE",maintenanceTeam,null,"must conflict",decisionForm.id(),decisionPublished.id())));
         assertThrows(IllegalArgumentException.class,()->reviewerQueue.decide(org,rejected.id(),"reviewer.test@ecabin.local",new ReviewerDecisionRequest("REJECT",null,"  ",null,decisionForm.id(),decisionPublished.id())),"Reject requires a nonblank reason.");
     }
@@ -430,6 +578,8 @@ class LocalPostgresOperationalIntegrationTest {
         defects.transition(orgA, defect.id(), "reporter-a", new TransitionRequest("INSPECTION_REQUIRED", "Inspection requested", null, null));
         defects.transition(orgA, defect.id(), "inspector-a", new TransitionRequest("INSPECTION_IN_PROGRESS", "Inspection started", null, null));
         workflow.completeInspection(orgA, defect.id(), "inspector-a", new InspectionRequest("PASS", "Seat cover inspection complete", "No structural damage."));
+        var inspectionEvent=defects.events(orgA,defect.id()).stream().filter(event->event.eventType().equals("INSPECTION_COMPLETED")).findFirst().orElseThrow();
+        assertTrue(inspectionEvent.details().submittedDetails().stream().anyMatch(item->item.label().equals("Inspection notes")&&item.value().equals("No structural damage.")));
         var action = workflow.assignAction(orgA, defect.id(), "reporter-a",
             new CorrectiveActionRequest("tech-a", null, "Replace seat cover", "MEDIUM", Instant.now().plusSeconds(86400)));
         workflow.startAction(orgA, defect.id(), action.id(), "tech-a");
@@ -460,6 +610,76 @@ class LocalPostgresOperationalIntegrationTest {
         jdbc.update("UPDATE defects_dtl SET reviewer_team_id=?,status='APPROVAL_REQUIRED' WHERE operator_id=? AND id=?",team,org,defect.id());
         var queue=reviewerQueue.queue(org,"closure-reviewer",false,0,25,"APPROVAL_REQUIRED",null,"reportedAt","DESC");
         assertTrue(queue.items().stream().anyMatch(item->item.id().equals(defect.id())),"An explicitly configured closure-team member with APPROVE should see closure-stage cases in the shared queue.");
+    }
+
+    @Test
+    @Transactional
+    @Rollback
+    void maintenanceCloseSubmissionRoutesDirectlyToClosureQueueWithoutVerification() {
+        UUID org=createTenant("MAINT-CLOSE-ROUTE");
+        addMember(org,"close-route-tech","MAINTENANCE_TECHNICIAN");
+        addMember(org,"close-route-reviewer","SUPERVISOR");
+        String maintenanceTeam="Close Route Maintenance";
+        UUID maintenanceTeamId=UUID.randomUUID();
+        jdbc.update("INSERT INTO maintenance_teams_mst(id,operator_id,name,team_type) VALUES(?,?,?,'MAINTENANCE')",maintenanceTeamId,org,maintenanceTeam);
+        jdbc.update("INSERT INTO operator_membership_teams_mst(operator_id,external_user_id,team_name) VALUES(?,?,?),(?,?,?)",org,"close-route-tech",maintenanceTeam,org,"close-route-reviewer","Closure Route Team");
+        UUID closureTeamId=UUID.randomUUID();
+        jdbc.update("INSERT INTO maintenance_teams_mst(id,operator_id,name,team_type) VALUES(?,?,?,'CLOSURE')",closureTeamId,org,"Closure Route Team");
+        jdbc.update("UPDATE operators_mst SET default_closure_team_id=? WHERE id=?",closureTeamId,org);
+
+        UUID area=jdbc.queryForObject("SELECT id FROM cabin_areas_mst WHERE operator_id=? AND code='GALLEY' AND isactive=1",UUID.class,org);
+        UUID component=UUID.randomUUID();
+        jdbc.update("INSERT INTO cabin_components_mst(id,operator_id,area_id,code,name) VALUES(?,?,?,?,?)",component,org,area,"CLOSE_CMP_"+component.toString().substring(0,8),"Close route component");
+        UUID condition=createCondition(org,component);
+        String tail=jdbc.queryForObject("SELECT tail_number FROM aircraft_mst WHERE operator_id=?",String.class,org);
+        DefectView defect=defects.create(org,"close-route-tech",new CreateDefectRequest(tail,"GALLEY","GALLEY",area,component,condition,"G1",null,null,null,"Close routing test","Completion routing fixture","MEDIUM"));
+        UUID actionId=UUID.randomUUID();
+        jdbc.update("INSERT INTO corrective_actions_dtl(id,operator_id,defect_id,created_by_user_id,assigned_team,description,priority,status,created_at) VALUES(?,?,?,?,?,?,?,'IN_PROGRESS',clock_timestamp())",actionId,org,defect.id(),"close-route-tech",maintenanceTeam,"Complete maintenance work","MEDIUM");
+        jdbc.update("UPDATE defects_dtl SET status='IN_PROGRESS',assigned_to=?,assigned_team=?,reviewer_team_id=? WHERE operator_id=? AND id=?",maintenanceTeam,maintenanceTeam,closureTeamId,org,defect.id());
+
+        var form=forms.create(org,"form-admin",new CreateFormRequest("MAINT_CLOSE_"+UUID.randomUUID().toString().substring(0,8).toUpperCase(),"Maintenance close routing form",area,FormPurpose.CORRECTIVE_ACTION,WorkflowStage.IN_PROGRESS));
+        var draft=forms.saveDraft(org,"form-admin",form.id(),form.draftVersionId(),new FormConfiguration(List.of(
+            new FieldDefinition("status","Maintenance status",FieldType.DROPDOWN,null,true,0,null,null,null,OptionSource.MAINTENANCE_ACTION_STATUSES,null,null,DefectFieldBinding.MAINTENANCE_STATUS),
+            new FieldDefinition("slaTargetDate","SLA Target Date",FieldType.DATE,null,true,1,null,null,null,null,null,null,DefectFieldBinding.SLA_TARGET_DATE),
+            new FieldDefinition("remarks","Remarks",FieldType.TEXTAREA,null,false,2,new TextRules(null,2000,null,null,null),null,null,null,null,null,DefectFieldBinding.MAINTENANCE_REMARK))));
+        var published=forms.publish(org,"form-admin",form.id(),draft.id());
+        maintenanceSlaPolicies.update(org,"form-admin",new MaintenanceSlaPolicyUpdate("CLOSE_SUBMITTED",false,false,null,false,null,"UTC","Verify direct Close routing"));
+
+        LocalDate targetDate=LocalDate.now(ZoneOffset.UTC);
+        var result=maintenanceActions.update(org,defect.id(),actionId,"close-route-tech",new MaintenanceActionUpdateRequest(form.id(),published.id(),"CLOSE_SUBMITTED",targetDate,"Corrective work complete."));
+        assertEquals("APPROVAL_REQUIRED",result.status());
+        assertEquals("APPROVAL_REQUIRED",defects.get(org,defect.id()).status());
+        assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM corrective_actions_dtl WHERE operator_id=? AND defect_id=? AND id=? AND status='COMPLETED' AND completed_by_user_id=? AND completion_notes=?",Integer.class,org,defect.id(),actionId,"close-route-tech","Corrective work complete."));
+        assertEquals(0,jdbc.queryForObject("SELECT count(*) FROM verifications_dtl WHERE operator_id=? AND defect_id=?",Integer.class,org,defect.id()),"Maintenance Close must not create a verification task.");
+        assertEquals(0,jdbc.queryForObject("SELECT count(*) FROM inspections_dtl WHERE operator_id=? AND defect_id=?",Integer.class,org,defect.id()),"Maintenance Close must not create an inspection task.");
+        assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM defect_events_dtl WHERE operator_id=? AND defect_id=? AND event_type='ACTION_CLOSE_SUBMITTED' AND from_status='IN_PROGRESS' AND to_status='APPROVAL_REQUIRED' AND actor_id=?",Integer.class,org,defect.id(),"close-route-tech"));
+        var closeEvent=defects.events(org,defect.id()).stream().filter(event->event.eventType().equals("ACTION_CLOSE_SUBMITTED")).findFirst().orElseThrow();
+        assertEquals("CLOSE_SUBMITTED",closeEvent.details().maintenanceStatus());
+        assertEquals(targetDate.toString(),closeEvent.details().slaTargetDate());
+        assertEquals("Corrective work complete.",closeEvent.details().maintenanceRemark());
+        assertEquals("IN_PROGRESS",closeEvent.details().previousActionStatus());
+        assertEquals("COMPLETED",closeEvent.details().actionStatus());
+        assertTrue(reviewerQueue.queue(org,"close-route-reviewer",false,0,25,"APPROVAL_REQUIRED",null,"reportedAt","DESC").items().stream().anyMatch(item->item.id().equals(defect.id())),"Closure Team members with APPROVE access must see the submitted case.");
+        assertThrows(Exception.class,()->maintenanceActions.update(org,defect.id(),actionId,"another-user",new MaintenanceActionUpdateRequest(form.id(),published.id(),"CLOSE_SUBMITTED",null,"duplicate")),"Only the assigned Maintenance member may submit completion.");
+        assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM corrective_actions_dtl WHERE operator_id=? AND defect_id=? AND status='COMPLETED'",Integer.class,org,defect.id()),"A repeated or unauthorized request must not create a second completion record.");
+
+        var closureForm=forms.create(org,"form-admin",new CreateFormRequest("CLOSURE_ROUTE_"+UUID.randomUUID().toString().substring(0,8).toUpperCase(),"Closure routing form",area,FormPurpose.CLOSURE_APPROVAL,WorkflowStage.APPROVAL_REQUIRED));
+        var closureDraft=forms.saveDraft(org,"form-admin",closureForm.id(),closureForm.draftVersionId(),new FormConfiguration(List.of(
+            new FieldDefinition("decision","Closure decision",FieldType.DROPDOWN,null,true,0,null,null,null,OptionSource.CLOSURE_DECISIONS,null,null,DefectFieldBinding.CLOSURE_DECISION),
+            new FieldDefinition("remarks","Remarks",FieldType.TEXTAREA,null,false,1,new TextRules(null,2000,null,null,null),null,null,null,null,null,DefectFieldBinding.CLOSURE_REMARK,true,false,null,new com.ecabin.ledger.api.FormModels.RequiredRule("decision","DECLINE")))));
+        var closurePublished=forms.publish(org,"form-admin",closureForm.id(),closureDraft.id());
+        var closed=workflow.approve(org,defect.id(),"close-route-reviewer",new ApprovalRequest("ACCEPT","Closure review passed",null,closureForm.id(),closurePublished.id()));
+        assertEquals("CLOSED",closed.status());
+        var closureEvent=defects.events(org,defect.id()).stream().filter(event->event.eventType().startsWith("CLOSURE_")).findFirst().orElseThrow();
+        assertEquals("ACCEPT",closureEvent.details().decision());
+
+        DefectView declined=defects.create(org,"close-route-tech",new CreateDefectRequest(tail,"GALLEY","GALLEY",area,component,condition,"G2",null,null,null,"Closure decline routing test","Decline routing fixture","MEDIUM"));
+        UUID completedId=UUID.randomUUID();
+        jdbc.update("INSERT INTO corrective_actions_dtl(id,operator_id,defect_id,created_by_user_id,assigned_team,description,priority,status,completed_by_user_id,completed_at,created_at) VALUES(?,?,?,?,?,?,'MEDIUM','COMPLETED',?,clock_timestamp(),clock_timestamp())",completedId,org,declined.id(),"close-route-tech",maintenanceTeam,"Completed work to return","close-route-tech");
+        jdbc.update("UPDATE defects_dtl SET status='APPROVAL_REQUIRED',reviewer_team_id=? WHERE operator_id=? AND id=?",closureTeamId,org,declined.id());
+        var returned=workflow.approve(org,declined.id(),"close-route-reviewer",new ApprovalRequest("DECLINE","Additional work is required",null,closureForm.id(),closurePublished.id()));
+        assertEquals("IN_PROGRESS",returned.status());
+        assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM corrective_actions_dtl WHERE operator_id=? AND defect_id=? AND isactive=1 AND status='IN_PROGRESS' AND assigned_team=?",Integer.class,org,declined.id(),maintenanceTeam),"Closure rejection must follow the existing return-to-Maintenance path.");
     }
 
     @Test

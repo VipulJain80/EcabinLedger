@@ -4,6 +4,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.ecabin.ledger.api.FormModels.FormPurpose;
+import com.ecabin.ledger.api.FormModels.FormForArea;
+import com.ecabin.ledger.api.FormModels.FormOption;
 import com.ecabin.ledger.api.FormModels.WorkflowStage;
 import com.ecabin.ledger.api.FormModels.DuplicateFormRequest;
 import com.ecabin.ledger.api.FormModels.FormSummary;
@@ -12,8 +14,11 @@ import com.ecabin.ledger.api.FormModels.DeleteFormRequest;
 import com.ecabin.ledger.security.AuthenticatedUser;
 import com.ecabin.ledger.security.CurrentUserResolver;
 import com.ecabin.ledger.security.PermissionService;
+import com.ecabin.ledger.security.Permission;
 import com.ecabin.ledger.service.OperationalFormService;
 import java.util.UUID;
+import java.util.List;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.access.AccessDeniedException;
@@ -22,6 +27,27 @@ import org.springframework.web.server.ResponseStatusException;
 import static org.mockito.Mockito.*;
 
 class OperationalFormsControllerTest {
+    @Test
+    void maintenancePermissionCanReadPublishedWorkflowDefinitionAndOptions() {
+        var forms=mock(OperationalFormService.class);
+        var users=mock(CurrentUserResolver.class);
+        var permissions=mock(PermissionService.class);
+        var auth=mock(JwtAuthenticationToken.class);
+        UUID tenant=UUID.randomUUID(),formId=UUID.randomUUID(),versionId=UUID.randomUUID(),areaId=UUID.randomUUID();
+        var user=new AuthenticatedUser(tenant,"assigned-maintainer","Maintenance","MAINTENANCE_TECHNICIAN");
+        var definition=new FormForArea(formId,"MAINT_ACTION","Maintenance Action",areaId,FormPurpose.CORRECTIVE_ACTION,
+            WorkflowStage.ACTION_ASSIGNED,versionId,1,null);
+        var option=new FormOption(UUID.randomUUID(),"LATCH","Latch");
+        when(users.require(auth)).thenReturn(user);
+        when(permissions.permissionsFor(tenant,"MAINTENANCE_TECHNICIAN")).thenReturn(Set.of(Permission.PERFORM_ACTION));
+        when(forms.published(tenant,formId,versionId,areaId)).thenReturn(definition);
+        when(forms.options(tenant,formId,versionId,"component",areaId,null)).thenReturn(List.of(option));
+        var controller=new OperationalFormsController(forms,users,permissions,null,null,null);
+
+        assertEquals(definition,controller.published(auth,formId,versionId,areaId));
+        assertEquals(List.of(option),controller.options(auth,formId,versionId,"component",areaId,null));
+    }
+
     @Test
     void closureReviewFormsCannotBeResolvedByAreaAlone() {
         OperationalFormsController controller = new OperationalFormsController(null, null, null, null, null, null);

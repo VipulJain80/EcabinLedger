@@ -3,6 +3,7 @@ package com.ecabin.ledger.security;
 import static org.junit.jupiter.api.Assertions.*;
 
 import java.util.UUID;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
@@ -26,6 +27,25 @@ class PermissionServiceTest {
     }
 
     @Test
+    void defectViewAllAllowsOnlyTheSeparateDefectReadCheck() {
+        UUID tenant = UUID.randomUUID();
+        AuthenticatedUser readAll = new AuthenticatedUser(tenant, "read-all", "Read All", "CUSTOM_READER");
+        PermissionService custom = new PermissionService() {
+            @Override public java.util.Set<Permission> permissionsFor(UUID operatorId, String role) {
+                assertEquals(tenant, operatorId);
+                assertEquals("CUSTOM_READER", role);
+                return java.util.Set.of(Permission.DEFECT_VIEW_ALL);
+            }
+        };
+
+        assertTrue(PermissionService.hasDefectViewAll(custom.requireDefectRead(readAll)));
+        assertThrows(AccessDeniedException.class, () -> custom.require(readAll, Permission.VIEW));
+        assertThrows(AccessDeniedException.class, () -> custom.require(readAll, Permission.REPORT));
+        assertThrows(AccessDeniedException.class, () -> custom.require(readAll, Permission.PERFORM_ACTION));
+        assertThrows(AccessDeniedException.class, () -> custom.require(readAll, Permission.REVIEW));
+    }
+
+    @Test
     void qualityRoleCanVerifyButCannotAssignCorrectiveAction() {
         assertDoesNotThrow(() -> permissions.require(user(AppRole.QUALITY_COMPLIANCE), Permission.VERIFY));
         assertThrows(AccessDeniedException.class, () -> permissions.require(user(AppRole.QUALITY_COMPLIANCE), Permission.ASSIGN_ACTION));
@@ -35,6 +55,15 @@ class PermissionServiceTest {
     void onlyOrganizationAdminCanAdministerMemberships() {
         assertDoesNotThrow(() -> permissions.require(user(AppRole.ADMIN), Permission.ADMINISTER_ORGANIZATION));
         assertThrows(AccessDeniedException.class, () -> permissions.require(user(AppRole.SUPERVISOR), Permission.ADMINISTER_ORGANIZATION));
+    }
+
+    @Test
+    void reportPermissionsAreNotImpliedByTheLegacyAdminFallback() {
+        assertTrue(Set.of(Permission.values()).containsAll(Set.of(Permission.REPORT_VIEW, Permission.REPORT_EXECUTE, Permission.REPORT_EXPORT)));
+        Set<Permission> adminPermissions = permissions.permissionsFor(AppRole.ADMIN);
+        assertFalse(adminPermissions.contains(Permission.REPORT_VIEW));
+        assertFalse(adminPermissions.contains(Permission.REPORT_EXECUTE));
+        assertFalse(adminPermissions.contains(Permission.REPORT_EXPORT));
     }
 
     @Test

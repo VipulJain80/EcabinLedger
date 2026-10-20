@@ -8,6 +8,7 @@ import com.ecabin.ledger.service.ConfigurationService;
 import com.ecabin.ledger.api.ApiModels.ConditionOption;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -37,6 +38,18 @@ public class ReferenceDataController {
             "fleets", configuration.list(user.organizationId(), "fleets", false),
             "aircraftTypes", configuration.aircraftTypes(user.organizationId())
         );
+    }
+
+    @GetMapping("/severity-badges")
+    public List<Map<String, Object>> severityBadges(JwtAuthenticationToken auth) {
+        AuthenticatedUser user = users.require(auth);
+        var grants = permissions.permissionsFor(user.organizationId(), user.role());
+        if (grants.stream().noneMatch(Set.of(Permission.VIEW, Permission.DEFECT_VIEW_ALL, Permission.REPORT,
+                Permission.REVIEW, Permission.INSPECT, Permission.ASSIGN_ACTION, Permission.PERFORM_ACTION,
+                Permission.VERIFY, Permission.APPROVE, Permission.CLOSE, Permission.REOPEN)::contains)) {
+            throw new org.springframework.security.access.AccessDeniedException("Severity display permission is required.");
+        }
+        return configuration.list(user.organizationId(), "severities", true);
     }
 
     @GetMapping("/components/{componentId}/conditions")

@@ -5,8 +5,8 @@ import { createPortal } from "react-dom";
 import { handleDialogBackdropMouseDown } from "./dialogBackdrop";
 
 /** Shared modal host: escapes app-shell clipping/stacking, traps focus, and restores page state. */
-export default function DialogPortal({ children, onClose, labelledBy, className = "modal", closeOnEscape = true }: {
-  children: ReactNode; onClose: () => void; labelledBy: string; className?: string; closeOnEscape?: boolean;
+export default function DialogPortal({ children, onClose, labelledBy, className = "modal", closeOnEscape = true, layout = "flex" }: {
+  children: ReactNode; onClose: () => void; labelledBy: string; className?: string; closeOnEscape?: boolean; layout?: "flex" | "grid";
 }) {
   const host = typeof document === "undefined" ? null : document.body;
   const dialogRef = useRef<HTMLElement>(null);
@@ -42,7 +42,7 @@ export default function DialogPortal({ children, onClose, labelledBy, className 
   }, [host, closeOnEscape]);
 
   if (!host) return null;
-  return createPortal(<div className="modal-backdrop" role="presentation" onMouseDown={handleDialogBackdropMouseDown} onClick={handleDialogBackdropMouseDown}>
-    <section ref={dialogRef} className={className} role="dialog" aria-modal="true" aria-labelledby={labelledBy} tabIndex={-1} onMouseDown={event=>event.stopPropagation()} onClick={event=>event.stopPropagation()}>{children}</section>
+  return createPortal(<div className="modal-backdrop fixed inset-0 grid place-items-center overflow-y-auto overscroll-contain p-[18px]" role="presentation" onMouseDown={handleDialogBackdropMouseDown} onClick={handleDialogBackdropMouseDown}>
+    <section ref={dialogRef} className={`${className} ${layout === "grid" ? "grid" : "flex flex-col"}`} role="dialog" aria-modal="true" aria-labelledby={labelledBy} tabIndex={-1} onMouseDown={event=>event.stopPropagation()} onClick={event=>event.stopPropagation()}>{children}</section>
   </div>, host);
 }

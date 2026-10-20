@@ -1,0 +1,17 @@
+<service>
+  <id>EcabinLedgerEmailWorker</id>
+  <name>eCabin Ledger Email Worker</name>
+  <description>Standalone transactional email outbox delivery worker</description>
+  <executable>C:\APPROVED\PYTHON\venv\Scripts\python.exe</executable>
+  <arguments>-m email_worker.worker</arguments>
+  <workingdirectory>C:\APPROVED\DEPLOYMENT\email-worker</workingdirectory>
+  <env name="PYTHONPATH" value="C:\APPROVED\DEPLOYMENT\email-worker\src" />
+  <logpath>C:\APPROVED\LOG_PATH\email-worker</logpath>
+  <log mode="roll-by-size"><sizeThreshold>10485760</sizeThreshold><keepFiles>10</keepFiles></log>
+  <onfailure action="restart" delay="10 sec" />
+  <onfailure action="restart" delay="60 sec" />
+  <onfailure action="none" />
+  <stoptimeout>30 sec</stoptimeout>
+  <!-- Configure the WinSW service account outside this file using the approved installer procedure. -->
+</service>
+

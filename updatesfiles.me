@@ -94,6 +94,87 @@ Verification executed:
 - `cd frontend && node --experimental-strip-types --test src/common/forms/*.test.mjs src/common/fleet/*.test.mjs src/common/dialogs/*.test.mjs` — passed: 22 tests, 0 failures.
 - `git diff --check` — passed.
 
+2026-10-17 — Add tenant-wide, read-only defect visibility permission
+
+Added the assignable `DEFECT_VIEW_ALL` permission. It lets a role read defect records across their active tenant regardless of reporter or assigned Maintenance team; it does not imply `VIEW` for unrelated routes or any write permission. The existing paginated SQL queries remain tenant-scoped and receive unrestricted-in-tenant read scope only when the new permission is present. Direct reads of details, timelines, submissions, published form data where its existing purpose rules permit it, aircraft-specific defect views, dashboard/fleet summaries, and authorized evidence metadata/download now pass both the route-level Spring Security gate and controller checks. Tenant IDs still come from the validated principal, and cross-tenant IDs remain not-found. Reviewer/Maintenance queues and purpose-specific actions retain their existing permissions and eligibility checks.
+
+Files created:
+- `backend/src/main/resources/db/migration/V43__defect_view_all_permission.sql` — add the permission catalog entry idempotently; it does not assign the permission to any role.
+
+Files modified:
+- `backend/src/main/java/com/ecabin/ledger/security/Permission.java` — register `DEFECT_VIEW_ALL` in the canonical permission enum.
+- `backend/src/main/java/com/ecabin/ledger/security/PermissionService.java` — add the separate defect-read permission check; leave exact permission checks unchanged for mutations.
+- `backend/src/main/java/com/ecabin/ledger/config/SecurityConfig.java` — add the permission only to relevant GET route gates; POST gates remain unchanged.
+- `backend/src/main/java/com/ecabin/ledger/api/DefectController.java` — apply tenant-wide scope to defect list/search, detail, aircraft defect reads, dashboard summary, and events.
+- `backend/src/main/java/com/ecabin/ledger/api/FleetStatusController.java` — apply defect-view scope to fleet summaries/table/export without repeating permission queries.
+- `backend/src/main/java/com/ecabin/ledger/api/OperationalFormsController.java` — allow read-only submissions/form metadata access with existing purpose-specific restrictions; write and resolution checks remain unchanged.
+- `backend/src/main/java/com/ecabin/ledger/api/AttachmentController.java` — allow tenant-scoped evidence metadata and clean-file downloads; upload/removal permissions remain unchanged.
+- `backend/src/main/java/com/ecabin/ledger/service/ConfigurationService.java` — expose only Home/Operations/Defect Register navigation to this grant rather than treating it as general `VIEW`; the existing role editor can assign it from the permission catalog.
+- `frontend/src/common/rbac/permissions.ts` — include the new code in the frontend permission type.
+- `frontend/src/common/fleet/DefectDetailsPage.tsx` — expose read-only timeline/evidence affordances and show a read-only message for cases awaiting Reviewer approval without granting workflow controls.
+- `backend/src/test/java/com/ecabin/ledger/security/PermissionServiceTest.java` — verify the new read check does not imply report, review, action, or general VIEW permission.
+- `backend/src/test/java/com/ecabin/ledger/service/ConfigurationServiceRouteTest.java` — verify the restricted navigation route set.
+- `backend/src/test/java/com/ecabin/ledger/service/LocalPostgresOperationalIntegrationTest.java` — add PostgreSQL coverage for tenant-wide reads, another team's assignment, cross-tenant denial, revocation, and blocked writes; verify the role editor can assign the permission.
+- `backend/src/test/java/com/ecabin/ledger/service/PostgresMigrationSmokeTest.java` — expect V43 and the new 13-entry catalog. The pre-existing table inventory already includes the V40 reference counter table.
+- `README.md` — document endpoint scope, purpose restrictions, role assignment, and the migration.
+- `updatesfiles.me` — append this record.
+
+Verification:
+- `cd backend && ./mvnw clean test -Dtest='*,!TenantIsolationPostgresTest'` — passed: 123 tests, 0 failures, 0 errors, 21 skipped. PostgreSQL smoke/integration tests were skipped because `ECABIN_DB_VERIFY`, datasource URL, username, and password were not configured. `TenantIsolationPostgresTest` was explicitly excluded to avoid invoking Docker/Testcontainers.
+- `cd backend && ./mvnw clean package -Dtest='*,!TenantIsolationPostgresTest'` — passed; 123 tests, 0 failures, 0 errors, 21 skipped, and the Spring Boot JAR was packaged.
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && pnpm build` — the Turbopack build remained without further output at the optimized production build step and was stopped; no successful result is claimed for this command.
+- `cd frontend && pnpm exec next build --webpack` — passed; production compilation, TypeScript, static generation, and trace collection completed.
+- `git diff --check` — passed.
+
+Remaining verification: the new PostgreSQL HTTP integration test and V43 migration still need execution against an explicitly configured authorized local test schema. No Docker or database changes were made.
+
+2026-10-17 — Show a close date for legacy closed cases
+
+Investigated why a closed case could have a blank Case Closed Date. The API projection required a `defect_events_dtl` row targeting `CLOSED`; legacy or manually closed records without that event returned null despite having status `CLOSED`. The projection now prefers the immutable closure event timestamp and falls back to `defects_dtl.updated_at` only when the event is absent. Main defect register headings now explicitly read Case Created Date and Case Closed Date.
+
+Files modified:
+- `backend/src/main/java/com/ecabin/ledger/service/DefectService.java` — add legacy closed-date fallback while keeping event timestamps authoritative when present.
+- `backend/src/test/java/com/ecabin/ledger/service/LocalPostgresOperationalIntegrationTest.java` — verify event-backed and legacy fallback dates in defect details and both list APIs.
+- `frontend/src/app/loginhome/page.tsx` — clarify the two main register date column headings.
+- `README.md` — document close-date fallback semantics.
+- `updatesfiles.me` — append this record.
+
+Verification:
+- `cd backend && ./mvnw test` — passed: 121 tests, 0 failures, 0 errors, 21 skipped. The PostgreSQL smoke/integration and tenant-isolation tests were skipped because `ECABIN_DB_VERIFY` was not enabled; Testcontainers could not run because Docker is unavailable.
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && pnpm exec next build --webpack` — passed, including TypeScript and static generation.
+- `git diff --check` — passed.
+- PostgreSQL verification of the added legacy-fallback integration assertions — not run; the local PostgreSQL integration suite was disabled.
+
+2026-10-17 — Remove the tab-group background fill
+
+Removed the filled background color from the Overview, Update Case, Attachments, and History tab container. The selected tab's white surface, text color, border highlight, and hover behavior remain unchanged.
+
+Files modified:
+- `frontend/src/common/fleet/DefectDetailsPage.tsx` — remove the tab-group background utility.
+- `README.md` — document the transparent tab-group surface.
+- `updatesfiles.me` — append this entry.
+
+Verification:
+- `cd frontend && pnpm lint` — passed (ESLint completed with exit code 0).
+- `git diff --check` — passed.
+
+2026-10-17 — Consolidate the Defect Register under Live Fleet Log
+
+Moved the existing server-backed search controls into the Live Fleet Log card, redesigned From/To date inputs as a responsive grouped range, and removed the My cases checkbox and its client-supplied mine filter. Reused the existing application table styling and live API data while showing the requested columns: Defect ID, Area, Cabin zone, Component, Condition, Severity, Status, Case Created Date, and Case Closed Date. Retained row navigation and authorized workflow actions. Removed the separate Log a defect button from this register; reporting remains available through the dedicated Report Defect navigation and the authorized aircraft area chooser. No API contract or backend behavior changed.
+
+Files modified:
+- `frontend/src/app/loginhome/page.tsx` — consolidate filters and table in Live Fleet Log, remove My cases and the separate register Log a defect control, and map requested live data fields to the table.
+- `frontend/src/app/globals.css` — style grouped date range, responsive filter grid, and horizontal scrolling for the nine-column table.
+- `README.md` — document the register layout, data columns, and permission-scoped results.
+- `updatesfiles.me` — append this implementation record.
+
+Verification:
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && pnpm exec next build --webpack` — first attempt caught a missing `component` property in the frontend defect type; after adding the field, the production build passed including TypeScript and static generation.
+- `git diff --check` — passed.
+
 Limitations: PostgreSQL-backed tests were skipped because database verification was not enabled; Testcontainers tenant isolation was skipped because Docker is unavailable. Browser-based navigation/modal interaction was not run; the shared backdrop event policy is unit-tested. No migration was added.
 
 2026-10-14 — Resolve Galley Reviewer forms from the published workflow design
@@ -431,6 +512,52 @@ Verification actually executed:
 - `cd backend && ./mvnw clean package` — passed, 98 tests, 0 failures, 0 errors, 17 skipped; executable JAR packaged.
 - `git diff --check` — passed.
 
+2026-10-17 — Keep defect selection inside the persistent application shell
+
+Root cause: normal defect selection was wired to `router.push('/defects/{id}')`, creating a new address-bar route even though the product flow was intended to keep the authenticated shell at `/ecabin/loginhome`. The existing in-shell detail dialog was still present but was no longer used by defect links.
+
+Changes:
+- `frontend/src/app/loginhome/page.tsx` — defect references, aircraft-list rows, queues, notifications, and post-report open actions now fetch the authorized defect and open the existing detail dialog without changing the URL. Removed router-based navigation from this shell path.
+- `README.md` — clarifies that normal selection stays in the shell and the direct detail route is retained only for direct links.
+- `updatesfiles.me` — appended this entry; earlier entries are preserved.
+
+Verification:
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && pnpm exec node --test src/common/fleet/defectDetailsModel.test.mjs` — passed, 3 tests.
+- `cd frontend && NEXT_TELEMETRY_DISABLED=1 pnpm exec next build --webpack` — passed; production compilation, TypeScript, and route generation succeeded.
+- `git diff --check` — passed.
+
+2026-10-17 — Show the dedicated defect details view without changing the shell URL
+
+The prior stable-URL correction sent defect selection into the legacy compact detail modal, which did not satisfy the separate Defect Details & Activity Timeline experience. Defect selection now renders the existing full `DefectDetailsPage` within the persistent authenticated shell. It does not push a new route, so the address bar remains at `/ecabin/loginhome`; its Back action restores the prior screen's scroll position. Detail tabs use local state in this embedded mode and therefore do not alter the URL. The direct `/defects/{id}` route continues to work independently.
+
+Files changed:
+- `frontend/src/app/loginhome/page.tsx` — opens the full details view in shell state and returns to the prior in-shell screen without changing browser history.
+- `frontend/src/common/fleet/DefectDetailsPage.tsx` — supports embedded Back and tab behavior while retaining direct-route behavior.
+- `README.md` — documents the full details view and stable address bar behavior.
+- `updatesfiles.me` — appended this entry without changing prior records.
+
+Verification:
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && pnpm exec node --test src/common/fleet/defectDetailsModel.test.mjs` — passed, 3 tests.
+- `cd frontend && NEXT_TELEMETRY_DISABLED=1 pnpm exec next build --webpack` — passed; production compilation and TypeScript checks succeeded.
+- `git diff --check` — passed.
+
+2026-10-17 — Refine defect details summary hierarchy and alignment
+
+Implemented the approved visual concept: removed the repeated area/title/location subtitle below the defect reference; the top context row now contains only aircraft registration, aircraft type, cabin area, and report time; configured location and component values remain in the original report section. Summary items use a compact two/four-column responsive card layout. Read-only definition-list values explicitly reset the browser's default `<dd>` indentation so each value aligns with its label.
+
+Files changed:
+- `frontend/src/common/fleet/DefectDetailsPage.tsx` — remove the duplicate subtitle and duplicate summary fields, compact the context row, and align metadata values.
+- `README.md` — document the separation between case context and configured report answers.
+- `updatesfiles.me` — appended this implementation record.
+
+Verification:
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && pnpm exec node --test src/common/fleet/defectDetailsModel.test.mjs` — passed, 3 tests.
+- `cd frontend && NEXT_TELEMETRY_DISABLED=1 pnpm exec next build --webpack` — passed; production compilation and TypeScript checks succeeded.
+- `git diff --check` — passed.
+
 Skipped checks and limitations: the PostgreSQL smoke test (1) and local PostgreSQL integration tests (15) were skipped because database verification was not enabled. The Testcontainers tenant-isolation test (1) was skipped because Docker is unavailable. HTTP/browser interaction testing could not be run: starting the Next server in this execution environment failed with `EPERM` when binding to localhost. No upstream gateway logout/revocation endpoint is implemented or documented, and stateless bearer tokens are not server-revocable through the current application contract; the app clears its own local browser-held token and relies on token expiry and backend authorization.
 2026-10-15 — Added versioned multi-area mappings for operational forms
 
@@ -673,7 +800,7 @@ Files changed:
 Verification:
 - `cd frontend && pnpm lint` — passed.
 - `cd frontend && NEXT_TELEMETRY_DISABLED=1 pnpm exec next build --webpack` — passed compilation, TypeScript, static generation, and build tracing.
-- `git diff --check` — pending final check.
+- `git diff --check` — passed.
 
 No browser viewport resizing or interaction test was performed for this small styling-only change.
 
@@ -763,4 +890,1076 @@ Files modified:
 Verification actually run:
 - `cd frontend && pnpm lint` — passed.
 - `cd frontend && NEXT_TELEMETRY_DISABLED=1 pnpm exec next build --webpack` — passed, including TypeScript and production build.
+- `git diff --check` — passed.
+
+2026-10-17 — Begin full frontend Tailwind migration
+
+Started the planned Tailwind migration with the authentication entry points. The Login screen's main layout, branding, card, icon, fields, button, error, helper text, and footer now use Tailwind v4 utility classes with exact existing style values and responsive breakpoints. The Login component stylesheet rules were removed; its remaining short-desktop-viewport and reduced-motion rules are retained as a narrow compatibility exception. Access-unavailable and sign-out status screens now use Tailwind utility classes, and their shared page CSS rules were removed. No API, auth, workflow, or permission behavior changed.
+
+Plan and audit:
+- docs/tailwind-migration.md — record current Tailwind setup, migration sequence, completed slice, remaining screens, and verification approach.
+- README.md — note that the whole-project migration is in progress and link to the detailed plan.
+
+Files modified:
+- frontend/src/app/login/page.tsx — migrate login presentation to utilities while retaining background-image configuration and all login behavior.
+- frontend/src/app/login.css — remove migrated login/auth-state styling; retain only short viewport and reduced-motion exceptions.
+- frontend/src/app/loginhome/page.tsx — migrate access-unavailable state presentation.
+- frontend/src/app/logout/page.tsx — migrate sign-out state presentation.
+- README.md — document progress and remaining styling migration scope.
+- updatesfiles.me — append this implementation record.
+
+Verification actually run:
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && NEXT_TELEMETRY_DISABLED=1 pnpm exec next build --webpack` — passed, including TypeScript and production build.
+- `git diff --check` — passed.
+
+No browser screenshot comparison was available in this run. The rest of the project has not yet been migrated; this entry documents the first slice, not completion of the whole-project objective.
+
+2026-10-17 — Migrate authenticated shell and shared Administration table layout
+
+Continued the Tailwind migration in the shared shell, DataTable, and DialogPortal backdrop. The persistent application shell's base sizing, header layout, main navigation layout, navigation item row, workspace sizing, and shared page-container spacing now use Tailwind utilities. The shared Administration table toolbar, page-size/search layout, action group, overflow container, footer, and pagination base layout now use utilities. DialogPortal's base backdrop positioning, fill, centering, scroll handling, and padding now use utilities. Existing brand styling, control appearance, table styling, overlay color/blur/stacking, safe-area padding, mobile bottom-sheet placement, and feature-specific overrides remain in CSS. Removed only the migrated base layout declarations, including the obsolete generic `.shell` and `.workspace` declarations that applied to the authenticated shell. No application behavior, API, permission, or workflow changes were made.
+
+Files modified:
+- `frontend/src/app/loginhome/page.tsx` — add layout utilities to shell, header, navigation, workspace, and fallback content container.
+- `frontend/src/app/globals.css` — remove migrated base shell layout declarations while retaining colors, typography, component appearance, and responsive exceptions.
+- `frontend/src/common/tables/DataTable.tsx` — add layout utilities to shared Administration DataTable controls and pagination.
+- `frontend/src/common/dialogs/DialogPortal.tsx` — use Tailwind utilities for the shared dialog backdrop's base geometry and scrolling.
+- `frontend/src/app/configuration.css` — remove only migrated DataTable base layout declarations; retain mobile overrides and visual styles.
+- `frontend/src/app/globals.css` — also remove the migrated base dialog-backdrop layout declarations.
+- `docs/tailwind-migration.md` — update slice status and record checks.
+- `README.md` — update the high-level migration status.
+- `updatesfiles.me` — append this dated entry.
+
+Verification actually run:
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && NEXT_TELEMETRY_DISABLED=1 pnpm exec next build --webpack` — passed, including TypeScript and production build.
+- `git diff --check` — passed.
+
+Browser screenshots and viewport interaction checks were not run. Operational screens, dialog content, forms/uploads, and Administration page-specific layouts remain to be migrated; this entry does not claim the overall project migration is complete.
+
+2026-10-17 — Continue operational and Administration Tailwind layout migration
+
+Migrated additional reusable and page-specific layout behavior to Tailwind CSS utilities while keeping the existing visual system and business behavior intact. Utility classes now handle the shared modal heading/action-row layout, dynamic operational field grid and label layout, evidence dropzone and file-list layout, Report Defect area/form-choice structure, fleet summary metrics and aircraft-list actions, and selected Administration summaries, filters, routing forms/cards, SLA card grid, and common table headings. Removed the corresponding base layout declarations where utilities now own them; preserved colors, typography, borders, control styling, status states, and required feature-specific CSS exceptions. No APIs, backend code, workflow state, permissions, or form data behavior changed.
+
+Files modified in this continuation:
+- `frontend/src/common/forms/OperationalFormRenderer.tsx` — apply responsive layout utilities to shared operational fields and form heading.
+- `frontend/src/common/forms/EvidenceUploadField.tsx` — apply utility layout to upload dropzone, file list, previews, metadata, and progress.
+- `frontend/src/common/fleet/ReportDefectPage.tsx` — use utility layout for area choices, form choices, step panel, and responsive submission actions.
+- `frontend/src/common/fleet/FleetStatusPage.tsx` — migrate summary metric grid and filter-row layout.
+- `frontend/src/common/fleet/AircraftDefectListPage.tsx` — migrate page action row layout.
+- `frontend/src/common/fleet/ReviewerWorkQueuePage.tsx` and `frontend/src/common/fleet/MaintenanceWorkQueuePage.tsx` — use the migrated shared configuration-table heading layout.
+- `frontend/src/common/configuration/AreaTeamRoutingPage.tsx` — migrate summary grid, routing choice cards, workflow form, and mapping forms.
+- `frontend/src/common/configuration/MaintenanceSlaPoliciesPage.tsx` — migrate the responsive SLA card grid.
+- `frontend/src/common/configuration/ApiRateLimitsPage.tsx` — migrate summary, filter, monitoring, pager, and policy form grids.
+- `frontend/src/common/configuration/UserLoginMonitoringPage.tsx` — migrate summary cards and filter layout.
+- `frontend/src/common/configuration/FormMasterPage.tsx`, `frontend/src/common/configuration/BulkUploadDialog.tsx`, `frontend/src/app/configuration.tsx`, and `frontend/src/app/loginhome/page.tsx` — use shared utility layouts for modal heading/action rows and common configuration headings/actions.
+- `frontend/src/common/tables/DataTable.tsx` — retain the shared migrated table toolbar, scroll, and pagination layout from the previous slice.
+- `frontend/src/common/dialogs/DialogPortal.tsx` — retain the shared migrated backdrop geometry and scroll layout from the previous slice.
+- `frontend/src/app/configuration.css` and `frontend/src/app/globals.css` — remove base layout declarations that are now utility-driven; retain visual rules, control styles, and responsive exceptions still in use.
+- `README.md` and `docs/tailwind-migration.md` — update the current migration status, completed areas, and outstanding work.
+- `updatesfiles.me` — append this dated implementation record; prior entries remain intact.
+
+Verification actually run:
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && NEXT_TELEMETRY_DISABLED=1 pnpm exec next build --webpack` — passed, including TypeScript and production compilation.
+- `git diff --check` — passed.
+
+No browser screenshots or viewport interaction checks were run. Detailed Reviewer/Maintenance screens, most configuration master pages, CSV dialog internals, and the complete Form Master editor remain outstanding; this is continued migration progress, not a claim that all frontend CSS has been converted.
+
+2026-10-17 — Verification note for the Tailwind layout continuation
+
+Additional final verification after the last responsive layout edits:
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && NEXT_TELEMETRY_DISABLED=1 pnpm exec next build --webpack` — passed, including TypeScript and production compilation.
+- `cd frontend && pnpm build` — invoked the configured Turbopack build but produced no further output for about one minute; the process was interrupted (exit 130). The explicit Webpack production build passed.
+- `git diff --check` — passed.
+
+Updated `README.md` and `docs/tailwind-migration.md` to record the plain-build interruption accurately. No browser viewport screenshots were captured.
+
+2026-10-17 — Continue Form Master, CSV, and Reviewer layout migration
+
+Moved additional layout behavior from feature CSS into Tailwind utilities. Organization master-data modal contents now use responsive two-column/single-column form grids. Form Master's field-editor toolbar, field list, field-card header, and 3/2/1-column field configuration grid use utilities at the existing breakpoints. CSV import instructions, dropzone, preview, and summary use utility layout. The Galley Reviewer decision panel, submitted-report sections, version row, decision grid, and action row use utilities. Styling for controls, colors, typography, borders, responsive modal sizing, overflow, evidence access, validation, and workflow behavior remains intact.
+
+Files changed in this continuation:
+- `frontend/src/app/configuration.tsx` — migrate master-data modal form container and responsive field grid.
+- `frontend/src/common/configuration/FormMasterPage.tsx` — migrate Form Master editor toolbar, field list, field headers, and responsive field grid.
+- `frontend/src/common/configuration/BulkUploadDialog.tsx` — migrate CSV instruction, dropzone, preview, and summary layout.
+- `frontend/src/common/fleet/GalleyReviewerDecisionForm.tsx` — migrate Reviewer decision panel and form grid layout.
+- `frontend/src/app/configuration.css` — remove only layout declarations now handled by utilities; retain visual styling and behavior-specific responsive rules.
+- `README.md` and `docs/tailwind-migration.md` — update migration progress and verification status.
+- `updatesfiles.me` — append this entry without changing prior entries.
+
+Verification actually run:
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && NEXT_TELEMETRY_DISABLED=1 pnpm exec next build --webpack` — passed, including TypeScript and production compilation.
+- `git diff --check` — passed.
+
+The configured `cd frontend && pnpm build` command again stalled without further output for about one minute and was interrupted (exit 130); the explicit Webpack production build succeeded. Browser screenshots and viewport interaction checks were not run. Other workflow detail screens and remaining configuration-specific layouts still need migration and visual review.
+
+2026-10-17 — Migrate defect detail metadata and audit timeline layout
+
+The defect-detail dialog's two-column case metadata and audit timeline spacing now use Tailwind utilities, including a single-column metadata layout on narrow screens. Existing colors, text styles, event content, case actions, and workflow behavior are unchanged.
+
+Files changed:
+- `frontend/src/app/loginhome/page.tsx` — add responsive metadata-grid and timeline layout utilities.
+- `frontend/src/app/globals.css` — remove the migrated detail-grid layout declaration.
+- `frontend/src/app/details.css` — retain timeline color/border treatment while removing migrated geometry.
+- `README.md` and `docs/tailwind-migration.md` — update migration progress and remaining scope.
+- `updatesfiles.me` — append this record.
+
+Verification actually run:
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && NEXT_TELEMETRY_DISABLED=1 pnpm exec next build --webpack` — passed, including TypeScript and production compilation.
+- `git diff --check` — passed.
+
+Maintenance Action, verification, and closure-specific detail layouts and comprehensive browser viewport comparisons remain outstanding.
+
+2026-10-17 — Continue Administration responsive layout migration
+
+Migrated the shared Administration configuration toolbar, form grids for multi-select permissions, and the Reviewer routing editor's summary and form layout to responsive Tailwind utilities. Existing configuration labels, component styling, permission semantics, field validation, and API behavior remain unchanged.
+
+Files changed:
+- `frontend/src/app/configuration.tsx` — add responsive utilities to the shared configuration toolbar, role permission grid, and Reviewer routing editor.
+- `frontend/src/app/configuration.css` — remove layout declarations now handled by utilities while retaining field, panel, and responsive modal styling.
+- `README.md` and `docs/tailwind-migration.md` — update completed and outstanding migration areas.
+- `updatesfiles.me` — append this dated record.
+
+Verification actually run:
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && NEXT_TELEMETRY_DISABLED=1 pnpm exec next build --webpack` — passed, including TypeScript and production compilation.
+- `git diff --check` — passed.
+
+No browser viewport comparisons were captured. Maintenance Action, verification, closure-specific layouts, and the broader visual review remain to be completed.
+
+2026-10-17 — Migrate shared closure form control layouts
+
+Moved the operational renderer's closure evidence panel/list geometry and closure decision control/button-group geometry to Tailwind utilities. Existing colors, border treatment, typography, authorized evidence behavior, scan gating, and closure workflow remain unchanged. Updated the project migration summary and progress document.
+
+Files changed:
+- `frontend/src/common/forms/OperationalFormRenderer.tsx` — apply responsive utility layout to closure evidence and decision controls.
+- `frontend/src/app/configuration.css` — remove migrated closure layout rules while retaining visual and focus styles.
+- `README.md` and `docs/tailwind-migration.md` — record this slice and current outstanding migration work.
+- `updatesfiles.me` — append this dated record.
+
+Verification actually run:
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && NEXT_TELEMETRY_DISABLED=1 pnpm exec next build --webpack` — passed, including TypeScript and production compilation.
+- `git diff --check` — passed.
+
+Browser screenshots and viewport interaction checks were not run. Verification and additional Closure Review detail layouts, remaining configuration-specific layout exceptions, and full visual regression review remain outstanding; the project-wide Tailwind migration is still in progress.
+
+2026-10-17 — Complete remaining planned responsive layout slices and fix Administration timestamp display
+
+Finished the remaining Form Master Manage Form/editor layout utilities, Reviewer decision source-report/evidence layout, SLA and area/team routing layout details, and login-monitoring filters/alerts/notes. Kept existing CSS for colors, typography, field styling, borders, shadows, focus states, and other visual treatments. Fixed the invalid `Intl.DateTimeFormat` option combination that caused ConfigurationPage to throw at render time. Users and roles / User Login Monitoring now display `NA` for never logged in and `Active` for recent activity; backend classification and filter values are unchanged.
+
+Files modified:
+- `frontend/src/common/configuration/FormMasterPage.tsx` — move editor and Manage Form content grids, responsive field layout, tabs, preview, version history, and scroll behavior to utilities; fix a malformed JSX attribute found during browser inspection.
+- `frontend/src/common/dialogs/DialogPortal.tsx` — give shared dialog content its Tailwind flex/grid layout mode while retaining existing backdrop, focus, escape, and dismissal behavior.
+- `frontend/src/common/configuration/AreaTeamRoutingPage.tsx` — utility layout for workflow forms, area mappings, closure route summary, exceptions, and history.
+- `frontend/src/common/configuration/MaintenanceSlaPoliciesPage.tsx` — utility layout for SLA policy cards and their responsive form sections.
+- `frontend/src/common/fleet/GalleyReviewerDecisionForm.tsx` — utility layout for the read-only report snapshot, evidence, and dynamic decision fields.
+- `frontend/src/common/configuration/UserLoginMonitoringPage.tsx` — supported timestamp formatting, requested classification labels, and utility layout for monitoring filters/alerts/notes.
+- `frontend/src/app/configuration.tsx` — add the browser-safe shared login timestamp formatter and update the Users and roles classification labels.
+- `frontend/src/app/configuration.css` — remove layout declarations now owned by utilities while keeping established visual styling.
+- `frontend/src/app/globals.css` — remove migrated shared modal layout declarations.
+- `frontend/src/common/configuration/BulkUploadDialog.tsx` — utility spacing for the shared upload dialog.
+- `README.md` and `docs/tailwind-migration.md` — record migration coverage, known visual-check limits, runtime fix, and classification labels.
+- `updatesfiles.me` — append this record.
+
+Verification actually run:
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && pnpm build` — Turbopack started but made no progress after the compile-start message for roughly 30 seconds; interrupted with exit code 130.
+- `cd frontend && NEXT_TELEMETRY_DISABLED=1 pnpm exec next build --webpack` — passed, including TypeScript and production compilation.
+- `git diff --check` — passed.
+- Browser check — Login had no document-width overflow at 320, 375, 480, 768, 1024, and 1440px; inspected a 375px screenshot. Protected Administration and operational screens were not visually checked because the browser was at Login and no authorized account was used. No before/after comparison screenshots were captured.
+
+Remaining verification limitation: visual regression review of authenticated screens and their interactions still needs an authorized browser session. The implementation migrates the planned layout slices while retaining legacy CSS as the visual design system; it does not remove that design system.
+
+2026-10-17 — Standardize visible application dates and timestamps
+
+Added one shared formatter for visible date/time values. Across the application, date displays now use the exact `17 Oct 2026 15:23` shape with a 24-hour clock, English abbreviated month, and the viewer's local time zone. This includes defect reporting dates, maintenance and Reviewer queues, audit history, notification times, Form Master history, configuration timestamps, API rate-limit history, and CSV import preview expiry. Date-only Form Master validation bounds are shown at local midnight; native date inputs, API values, sorting, and business behavior are unchanged.
+
+Files changed:
+- `frontend/src/common/dateTime.ts` — shared, validated local date/time formatter; interprets ISO date-only bounds as local calendar dates.
+- `frontend/src/common/notifications/NotificationBell.tsx` — format notification timestamps consistently.
+- `frontend/src/common/fleet/MaintenanceWorkQueuePage.tsx` — format assignment and reported times.
+- `frontend/src/common/fleet/ReviewerWorkQueuePage.tsx` — format reported times.
+- `frontend/src/common/fleet/AircraftDefectListPage.tsx` — display full date/time for reported defects.
+- `frontend/src/common/fleet/GalleyReviewerDecisionForm.tsx` — format original submission timestamps.
+- `frontend/src/common/forms/OperationalFormRenderer.tsx` — format operational submission history timestamps.
+- `frontend/src/common/configuration/ApiRateLimitsPage.tsx` — format policy history and detail timestamps.
+- `frontend/src/common/configuration/AreaTeamRoutingPage.tsx` — format mapping and audit history timestamps.
+- `frontend/src/common/configuration/BulkUploadDialog.tsx` — show review expiry with date and time.
+- `frontend/src/common/configuration/FormMasterPage.tsx` — format last-updated, version creation/publication, and date-bound preview values.
+- `frontend/src/common/configuration/UserLoginMonitoringPage.tsx` — format login/logout event timestamps.
+- `frontend/src/app/configuration.tsx` — use the shared format for login and generic created/updated timestamp columns.
+- `frontend/src/app/loginhome/page.tsx` — format Defect Summary reported time and defect audit events.
+- `README.md` — document the application display format and local-time behavior.
+- `updatesfiles.me` — append this implementation entry.
+
+Verification:
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && pnpm build` — started with Turbopack but produced no further output for approximately 30 seconds; interrupted (exit 130).
+- `cd frontend && NEXT_TELEMETRY_DISABLED=1 pnpm exec next build --webpack` — passed, including TypeScript and production compilation.
+
+No browser viewport or visual comparison was run for this display-format change.
+
+2026-10-17 — Complete Tailwind layout migration and review authenticated screens
+
+Closed the planned Tailwind layout/responsive utility implementation across the frontend. Existing CSS stylesheets remain intentionally active for the established visual design, controls, and workflow-specific states, consistent with the migration requirement to retain the current UI. Updated the migration record to distinguish implementation completion from viewport checks that the connected browser cannot perform.
+
+Authenticated browser review performed without submitting or changing business data:
+- Aircraft Defect List at the connected browser's 1200×630 viewport.
+- Form Master table and Manage Form dialog; dialog fit within the viewport.
+- Report Defect area chooser, dynamic Galley form, aircraft selector, and evidence upload; upload remained after the configured business fields.
+- Existing internal table overflow behavior remains available for wide Form Master columns.
+
+Files changed:
+- `README.md` — mark the agreed Tailwind layout/responsive implementation complete and explain why the existing visual CSS remains.
+- `docs/tailwind-migration.md` — record implementation completion, current browser spot checks, and the remaining exact-viewport/before-after screenshot limitation.
+- `updatesfiles.me` — append this dated implementation and verification record.
+
+Verification actually run:
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && pnpm build` — Turbopack started but made no progress for 30 seconds; interrupted (exit code 130).
+- `cd frontend && NEXT_TELEMETRY_DISABLED=1 pnpm exec next build --webpack` — passed, including TypeScript and production compilation.
+- `git diff --check` — passed.
+
+The current browser-control surface provides screenshots but no viewport-size override. Exact authenticated checks at 320, 375, 480, 768, 1024, and 1440 CSS pixels and before/after comparisons were not run and are not claimed. The migration is complete for the requested layout/responsive Tailwind scope; legacy CSS remains by design for the established appearance and feature states.
+
+2026-10-17 — Dedicated Defect Details and Activity Timeline route
+
+Implemented a dedicated `/defects/[defectId]` route. Defect references in the main defect register now navigate to the details route; operational queue and notification open actions route there as well. The prior report-creation continuation modal remains for its existing upload/submission recovery flow and is not used as the primary defect-details experience.
+
+The details route uses existing authenticated, tenant-scoped backend APIs for defect details, operational form submissions, exact published form definitions, workflow forms, audit events, and attachments. It adds Overview, Workflow Form, Attachments, and History tabs; a responsive Tailwind two-column page; newest-first activity timeline; severity/status presentation; safe return-path handling; and authorized attachment preview/download that remains disabled until scan status is CLEAN. It reuses `OperationalFormRenderer` and the Galley Reviewer decision component. Existing status-based advance actions, Reviewer reassignment, and active corrective-action reassignment remain available behind their existing permission checks and APIs. The exact submitted defect-report version is rendered from its immutable definition and the existing typed relational submission snapshot. No backend endpoint, database migration, permission, or business workflow change was made.
+
+Files created:
+- `frontend/src/app/defects/[defectId]/page.tsx` — App Router route wrapper.
+- `frontend/src/common/fleet/DefectDetailsPage.tsx` — authenticated detail page, tabs, API queries, attachment actions, and existing workflow form integration.
+- `frontend/src/common/fleet/ActivityTimeline.tsx` — reusable chronological audit timeline.
+- `frontend/src/common/fleet/defectDetailsModel.ts` — deterministic event ordering, typed-snapshot mapping, and safe return-path helper.
+- `frontend/src/common/fleet/defectDetailsModel.test.mjs` — unit coverage for ordering, snapshot mapping, and return-path safety.
+
+Files modified:
+- `frontend/src/app/loginhome/page.tsx` — defect register row/reference, queue, and notification open actions navigate to the dedicated detail route while preserving report-creation continuation behavior.
+- `README.md` — documents the route, tabs, existing API/security behavior, and immutable typed snapshot display.
+- `updatesfiles.me` — this cumulative implementation record.
+
+Verification actually run:
+- `cd frontend && pnpm lint` — passed after fixing the tab state lint issue.
+- `cd frontend && pnpm exec node --test src/common/fleet/defectDetailsModel.test.mjs` — passed, 3 tests.
+- `cd frontend && NEXT_TELEMETRY_DISABLED=1 pnpm exec next build --webpack` — passed; TypeScript and production compilation succeeded and `/defects/[defectId]` appeared as a dynamic route.
+- `cd frontend && pnpm build` — Turbopack remained at “Creating an optimized production build …” for 60 seconds without further output, then was interrupted (exit code 130). After clearing the build lock by stopping that task-owned process, the independent Webpack production build passed. Turbopack is not reported as passed.
+- `git diff --check` — passed.
+- No backend tests were run because no backend or schema code changed.
+- Authenticated API/UI end-to-end and mobile viewport checks have not been executed in this change; server authorization continues to be enforced by the existing APIs.
+- Existing API limitations: the defect response omits aircraft MSN; attachment metadata omits uploader; and non-report workflow submissions do not expose field-answer snapshots. Those values are not fabricated or stored in a new answer model.
+
+2026-10-17 — Fix duplicated APP_BASE_PATH in defect detail navigation
+
+Root cause: the defect link retained the browser's prefixed return URL (for example `/ecabin/loginhome`), and the detail page passed that full path to Next.js `router.push`, which automatically prepended the configured base path again. Detail-tab changes had the same issue because they passed the browser pathname directly to `router.replace`.
+
+Changes:
+- `frontend/src/common/fleet/defectDetailsModel.ts` — validate same-application return paths and remove the configured base path before handing the route to Next.js; use `/loginhome` as the internal fallback.
+- `frontend/src/common/fleet/DefectDetailsPage.tsx` — remove the browser base path before tab navigation while preserving query parameters, route, and scroll behavior.
+- `frontend/src/common/fleet/defectDetailsModel.test.mjs` — cover prefixed and unprefixed paths, fallback behavior, and query preservation.
+- `README.md` — document the distinction between browser URLs and Next.js router paths.
+- `updatesfiles.me` — append this cumulative implementation and verification entry.
+
+Verification:
+- `cd frontend && pnpm exec node --test src/common/fleet/defectDetailsModel.test.mjs` — passed, 3 tests.
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && NEXT_TELEMETRY_DISABLED=1 pnpm exec next build --webpack` — passed; production compilation, TypeScript, and route generation succeeded.
+- `git diff --check` — passed.
+
+2026-10-17 — Route Galley Reviewer approval directly to Maintenance
+
+Reviewer APPROVE now creates the corrective-action assignment, stores the selected tenant-owned Maintenance team on the defect, changes the status directly to `ACTION_ASSIGNED`, and appends the approval event in the existing transaction. It no longer enters `INSPECTION_REQUIRED` or waits for inspection before the Maintenance queue can see the assignment. The generic transition API still cannot set `ACTION_ASSIGNED`; it requires the dedicated Reviewer decision operation. Legacy inspection routes remain available for existing records and workflows. Reviewer REJECT follows the user's clarification by setting terminal `REJECTED`, without returning the case to the Auditor or creating a Maintenance assignment.
+
+Files modified:
+- `backend/src/main/java/com/ecabin/ledger/service/ReviewerQueueService.java` — direct approval assignment and status event; terminal rejection event/status.
+- `backend/src/main/java/com/ecabin/ledger/service/DefectWorkflow.java` — allow the dedicated decision transaction's direct transitions from review states to Maintenance and rejection.
+- `backend/src/main/java/com/ecabin/ledger/service/DefectService.java` — block generic Galley transitions that bypass the Reviewer decision or enter the legacy inspection path.
+- `backend/src/main/java/com/ecabin/ledger/service/OperationalFormService.java` — show the configured rejection option as “Reject”.
+- `frontend/src/common/fleet/GalleyReviewerDecisionForm.tsx` — align rejection validation/help copy with terminal rejection.
+- `backend/src/test/java/com/ecabin/ledger/service/DefectWorkflowTest.java` — cover direct assignment and terminal rejection edges.
+- `backend/src/test/java/com/ecabin/ledger/service/LocalPostgresOperationalIntegrationTest.java` — verify direct assignment, no inspection record, Maintenance queue visibility, generic-transition protection, and terminal rejection.
+- `README.md` — document the active Galley route and preserved legacy inspection workflow.
+- `updatesfiles.me` — this cumulative implementation record.
+
+No Flyway migration was needed; the existing defect status, corrective-action, assignment, and append-only event tables support this transaction. Reviewer draft persistence was not part of this narrowed request and is unchanged.
+
+Verification actually run:
+- `cd backend && ./mvnw -Dtest=DefectWorkflowTest,ReviewerDecisionFormRulesTest test` — passed, 7 tests.
+- `cd backend && ./mvnw clean test` — passed, 117 tests, 0 failures, 0 errors; 18 skipped. The 16 PostgreSQL integration tests and PostgreSQL migration smoke test were skipped because `ECABIN_DB_VERIFY` and datasource environment variables are unset. The Testcontainers tenant-isolation test was skipped because Docker is unavailable; no Docker daemon was started.
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && NEXT_TELEMETRY_DISABLED=1 pnpm exec next build --webpack` — passed, including TypeScript and production compilation.
+- `git diff --check` — passed.
+
+The changed PostgreSQL workflow integration case was updated but could not execute without the configured local PostgreSQL connection. No PostgreSQL or end-to-end runtime claim is made.
+
+2026-10-17 — Backfill legacy Galley approvals to Maintenance
+
+Added V41 to repair Galley defects already approved under the former inspection-gated route. It finds tenant-scoped Galley defects still in `INSPECTION_REQUIRED` with an immutable Reviewer approval and no inspection history, resolves the previously selected Maintenance team from that approval event, verifies that the team is active and has an eligible active member, creates or validates the matching corrective action, sets the defect to `ACTION_ASSIGNED`, and appends a migration audit event. Cases with inspection history are preserved. Migration fails with a defect-specific error if it cannot safely resolve the approved team or encounters a conflicting assignment. No generated tenant, defect, or team IDs are embedded.
+
+Files modified or created:
+- `backend/src/main/resources/db/migration/V41__route_approved_galley_cases_to_maintenance.sql` — idempotent, transactional legacy-case routing backfill.
+- `backend/src/test/java/com/ecabin/ledger/service/PostgresMigrationSmokeTest.java` — expect the new Flyway migration count.
+- `README.md` — document V41 scope and normal startup execution.
+- `updatesfiles.me` — this cumulative record.
+
+Verification actually run:
+- `cd backend && ./mvnw clean test` — passed, 117 tests, 0 failures, 0 errors; 18 skipped. PostgreSQL smoke/integration tests were skipped because the database verification flag and datasource variables were unset. The Testcontainers test was skipped because Docker is unavailable.
+- `cd backend && DB_SCHEMA=ecabin_ledger ECABIN_DB_VERIFY=true SPRING_DATASOURCE_URL=... SPRING_DATASOURCE_USERNAME=postgres SPRING_DATASOURCE_PASSWORD=... ./mvnw -Dtest=PostgresMigrationSmokeTest test` — passed against local PostgreSQL 18.6; Flyway applied V41 and the smoke test passed. Password value is omitted from this log.
+- Read-only post-migration query — confirmed `20261017-GLY-01` is `ACTION_ASSIGNED`, assigned to `Cabin Maintenance`, with one active matching assigned corrective action.
+- `git diff --check` — passed.
+
+The migration first could not connect under the restricted shell sandbox. It then ran successfully with the approved local database access. The target defect is now updated in the local database; refresh the defect page to load the new status.
+
+2026-10-17 — Route Maintenance Close submissions directly to Closure Team
+
+Changed `MaintenanceActionService` so the existing `CLOSE_SUBMITTED` action completes the assigned corrective action and transitions its defect from `IN_PROGRESS` to `APPROVAL_REQUIRED` in the existing transaction. The immutable `ACTION_CLOSE_SUBMITTED` event now records that direct status transition. Added the corresponding lifecycle edge while preserving legacy `AWAITING_VERIFICATION` transitions. Added a PostgreSQL integration scenario covering completed action persistence, no inspection or verification records, audit state, Closure Team queue visibility, rejection of a repeat/unauthorized completion, Closure Team approval to `CLOSED`, and the existing rejection return to `IN_PROGRESS` with a new Maintenance action. No migration was needed; existing status and assignment tables support the transition. Updated README workflow/API documentation.
+
+Files modified for this change:
+- `backend/src/main/java/com/ecabin/ledger/service/MaintenanceActionService.java` — direct target status for the existing Close operation.
+- `backend/src/main/java/com/ecabin/ledger/service/DefectWorkflow.java` — permit the Maintenance-to-Closure transition.
+- `backend/src/test/java/com/ecabin/ledger/service/DefectWorkflowTest.java` — assert the new edge and preserved legacy verification edge.
+- `backend/src/test/java/com/ecabin/ledger/service/LocalPostgresOperationalIntegrationTest.java` — cover status, action completion, queue routing, absence of inspection/verification records, audit, denied duplicate/unauthorized submission, and both closure decisions.
+- `README.md` — describe the direct Maintenance Close route and API behavior.
+- `updatesfiles.me` — append this change record.
+
+Verification actually run:
+- `cd backend && ./mvnw -Dtest=DefectWorkflowTest,MaintenanceActionFormRulesTest test` — passed, 6 tests.
+- `cd backend && ./mvnw clean test` — passed, 118 tests, 0 failures, 0 errors; 19 skipped. The local PostgreSQL integration tests and migration smoke test were skipped in this invocation because `ECABIN_DB_VERIFY` was not set; the Testcontainers test was skipped because Docker is unavailable.
+- `cd backend && ECABIN_DB_VERIFY=true SPRING_DATASOURCE_URL='jdbc:postgresql://localhost:5432/postgres?connectTimeout=10&sslmode=prefer&currentSchema=ecabin_ledger' SPRING_DATASOURCE_USERNAME=postgres SPRING_DATASOURCE_PASSWORD=… ./mvnw -Dtest=LocalPostgresOperationalIntegrationTest#maintenanceCloseSubmissionRoutesDirectlyToClosureQueueWithoutVerification test` — passed against the configured local PostgreSQL 18.6 schema at Flyway version 41. The password is omitted here. The test uses a transaction rolled back after execution.
+- `cd backend && ./mvnw clean package` — passed; full non-database suite had 118 tests, 0 failures, 0 errors, and 19 skips.
+- `cd frontend && pnpm lint` — passed as the first command in `pnpm lint && pnpm build`.
+- `cd frontend && NEXT_TELEMETRY_DISABLED=1 pnpm exec next build --webpack` — passed, including TypeScript checks and static page generation. The default Turbopack build showed no progress and was stopped; the supported webpack production build completed successfully.
+- `git diff --check` — passed.
+
+No schema migration was required. Docker-dependent and unrelated PostgreSQL tests remain skipped in the general Maven run; the added Maintenance Close integration case was executed separately against local PostgreSQL.
+
+2026-10-17 — Correct legacy Close submission for 20261017-GLY-01
+
+Read-only inspection confirmed that `20261017-GLY-01` remained `AWAITING_VERIFICATION` because its `ACTION_CLOSE_SUBMITTED` event had been recorded before the backend fix, with target `AWAITING_VERIFICATION` and a completed corrective action. New code does not retroactively change completed records. Added V42 to safely backfill only still-pending defects with that explicit old Close event, a matching active completed action, and no verification or closure decision. V42 changes the defect to `APPROVAL_REQUIRED` and appends a separate correction event; it preserves the original event and fails if the linked action cannot be resolved uniquely. Updated the smoke test's expected migration count and documented the backfill.
+
+Files created or modified for this follow-up:
+- `backend/src/main/resources/db/migration/V42__route_legacy_close_submissions_to_closure.sql` — forward-only, audited legacy-state correction.
+- `backend/src/test/java/com/ecabin/ledger/service/PostgresMigrationSmokeTest.java` — expect 42 applied migrations.
+- `README.md` — document V42 scope and safety conditions.
+- `updatesfiles.me` — append this follow-up record.
+
+Verification pending execution of V42 against local PostgreSQL and the migration smoke test.
+
+Verification update: `cd backend && ./mvnw clean test` passed (118 tests, 0 failures, 0 errors; 19 skipped). PostgreSQL-gated integration/migration tests were skipped in this run, and the Testcontainers test was skipped because Docker is unavailable. The requested local V42 application was rejected by automatic approval review because it changes existing defect status and writes an audit event. V42 has not been applied; `20261017-GLY-01` therefore remains `AWAITING_VERIFICATION` in the database. Do not claim its corrected status until the reviewed migration is authorized and successfully applied.
+
+2026-10-17 — Make migration smoke test safe for configured SLA policies
+
+The reported PostgreSQL run successfully applied V42, then failed because `PostgresMigrationSmokeTest` required the mutable `CLOSE_SUBMITTED.is_configured` value to remain at its original false seed value. Administrators are allowed to configure that policy, so the assertion was invalid for an existing development database. Updated the smoke test to verify the stable contract instead: the tenant has the unique `CLOSE_SUBMITTED` policy row. Updated the Maintenance workflow documentation to reflect the implemented direct Closure Team route (`APPROVAL_REQUIRED`) and the guarded V42 handling of legacy records.
+
+Files modified:
+- `backend/src/test/java/com/ecabin/ledger/service/PostgresMigrationSmokeTest.java` — removed the brittle assertion about administrator-editable policy state.
+- `README.md` — document the direct Maintenance-to-Closure transition and clarify legacy status correction.
+- `updatesfiles.me` — append this implementation and verification record.
+
+Verification:
+- The user-provided output confirms Flyway validated migrations and successfully applied V42 to PostgreSQL 18.6; the smoke test then failed at the mutable SLA seed-value assertion.
+- `cd backend && DB_SCHEMA=ecabin_ledger ECABIN_DB_VERIFY=true SPRING_DATASOURCE_URL='jdbc:postgresql://localhost:5432/postgres?connectTimeout=10&sslmode=prefer&currentSchema=ecabin_ledger' SPRING_DATASOURCE_USERNAME=postgres SPRING_DATASOURCE_PASSWORD=[omitted] ./mvnw -Dtest=PostgresMigrationSmokeTest test` — passed against local PostgreSQL 18.6, with Flyway confirming schema version 42 is up to date; 1 test passed, 0 failures/errors/skips. The initial sandboxed retry could not connect to localhost; the authorized local-database retry succeeded. No additional migration was applied.
+
+2026-10-17 — Restore role-authorized access to workflow form definitions
+
+Tracing the Workflow Form tab showed that the form list endpoint allowed an authenticated member with the matching workflow permission, but the selected form's definition/options endpoints and submission-history endpoint were gated in Spring Security by only VIEW, REPORT, or REVIEW. The controller's shared read check also omitted INSPECT, PERFORM_ACTION, VERIFY, and REOPEN. As a result, operational users could open the tab and resolve a form, then receive the standard 403 when the renderer loaded its field options/definition. Expanded only these read routes to the applicable operational permissions and aligned the controller read guard. Existing purpose-specific Reviewer/Closure checks, tenant-scoped form lookup, and workflow mutation authorization remain enforced.
+
+Files modified:
+- `backend/src/main/java/com/ecabin/ledger/config/SecurityConfig.java` — allow workflow capabilities to read published form definitions/options and case submission metadata.
+- `backend/src/main/java/com/ecabin/ledger/api/OperationalFormsController.java` — include workflow permissions in the authenticated operational-read guard.
+- `backend/src/test/java/com/ecabin/ledger/api/OperationalFormsControllerTest.java` — verify a PERFORM_ACTION-only maintenance principal can read a published workflow definition and its options.
+- `README.md` — document the read-access permission model.
+- `updatesfiles.me` — append this entry.
+
+Verification:
+- `cd backend && ./mvnw -Dtest=OperationalFormsControllerTest test` — passed, 4 tests, 0 failures/errors/skips.
+- `cd backend && ./mvnw test` — passed: 119 tests, 0 failures/errors, 19 skipped. PostgreSQL-gated integration tests were skipped because `ECABIN_DB_VERIFY` was not set; the Testcontainers test was skipped because Docker is unavailable.
+
+2026-10-17 — Fix closure-route save conflict
+
+The generic conflict while saving a Closure Review team was caused by the audit event value `CLOSURE_REVIEW_ROUTING_CONFIGURED` exceeding the existing `defect_events_dtl.event_type varchar(32)` limit by one character. Shortened the emitted event key to `CLOSURE_ROUTE_CONFIGURED`, preserving the existing append-only event and routing transaction without a schema migration. Added a PostgreSQL integration regression test that saves an eligible tenant closure team and verifies the route and audit event.
+
+Files modified:
+- `backend/src/main/java/com/ecabin/ledger/service/AreaMaintenanceRoutingService.java` — emit the schema-compatible event key.
+- `backend/src/test/java/com/ecabin/ledger/service/LocalPostgresOperationalIntegrationTest.java` — verify closure route save and audit persistence.
+- `README.md` — document the actual event key.
+- `updatesfiles.me` — append this entry.
+
+Verification:
+- `cd backend && DB_SCHEMA=ecabin_ledger ECABIN_DB_VERIFY=true SPRING_DATASOURCE_URL='jdbc:postgresql://localhost:5432/postgres?connectTimeout=10&sslmode=prefer&currentSchema=ecabin_ledger' SPRING_DATASOURCE_USERNAME=postgres SPRING_DATASOURCE_PASSWORD=[omitted] ./mvnw -Dtest=LocalPostgresOperationalIntegrationTest#closureTeamRouteSaveWritesValidAuditEvent test` — passed against local PostgreSQL 18.6 at schema version 42; 1 test passed, 0 failures/errors/skips. The test transaction rolled back its synthetic tenant and team.
+- `git diff --check` — passed.
+
+2026-10-17 — Clarify workflow form feedback and tab label
+
+Renamed the defect detail workflow tab to **Update Case**. Operational form submissions now retain a visible inline success status as well as the success toast, surface failures both inline and through an error toast, and refresh defect details after Maintenance/workflow submissions. Reviewer decision submissions now show success and error toasts while retaining inline validation and server errors. No API or backend behavior changed.
+
+Files modified:
+- `frontend/src/common/forms/OperationalFormRenderer.tsx` — add persistent success feedback, visible error toasts, and refresh the parent case after successful submissions.
+- `frontend/src/common/fleet/GalleyReviewerDecisionForm.tsx` — add Reviewer decision success/error toasts and toast feedback for client validation.
+- `frontend/src/common/fleet/DefectDetailsPage.tsx` — rename the tab to Update Case, style the Overview/Update Case/Attachments/History tabs as a responsive segmented control, and connect successful workflow updates to case refresh.
+- `README.md` — document the tab label and feedback behavior.
+- `updatesfiles.me` — append this implementation record.
+
+Verification:
+- `cd frontend && pnpm lint` — passed (ESLint completed without errors).
+- `cd frontend && pnpm build` — started with the repository's Turbopack build but produced no further output after entering optimized production build; stopped and reran using the Webpack production builder.
+- `cd frontend && pnpm exec next build --webpack` — passed; compilation, TypeScript, static generation, and build tracing completed.
+- `cd frontend && pnpm lint` — passed after the tab styling update.
+- `git diff --check` — passed.
+
+2026-10-17 — Show case close date in defect tables
+
+The defect list API returned the case-created and last-updated timestamps but no close timestamp, and the main and aircraft defect tables had no Case Closed column. Added a tenant-correlated projection derived from the latest immutable `defect_events_dtl` event targeting `CLOSED`; it is returned only for cases currently in `CLOSED`. Added the value to the main defect register and aircraft-specific defect table, using the shared date/time formatter and an em dash for cases without a current close date. No schema change or migration was needed.
+
+Files modified:
+- `backend/src/main/java/com/ecabin/ledger/api/ApiModels.java` — expose nullable `closedAt` on `DefectView`.
+- `backend/src/main/java/com/ecabin/ledger/service/DefectService.java` — derive close date from status event history for shared defect reads and list queries.
+- `backend/src/test/java/com/ecabin/ledger/service/LocalPostgresOperationalIntegrationTest.java` — verify the close timestamp in detail, aircraft-list, and defect-list responses.
+- `frontend/src/app/loginhome/page.tsx` — add Case Closed date to the main defect register.
+- `frontend/src/common/fleet/AircraftDefectListPage.tsx` — add Case Closed Date to the aircraft defect table.
+- `README.md` — document the source and semantics of close dates.
+- `updatesfiles.me` — append this implementation record.
+
+Verification:
+- `cd backend && ./mvnw test` — passed: 121 tests, 0 failures, 0 errors, 21 skipped. The 19 local PostgreSQL integration cases, PostgreSQL smoke test, and PostgreSQL tenant-isolation test were skipped because `ECABIN_DB_VERIFY` was not enabled; the Testcontainers test was also skipped because Docker is unavailable.
+- Focused PostgreSQL test was attempted with the configured local connection, but the sandbox rejected the localhost socket with `Operation not permitted`; the close-date integration assertion therefore remains unverified against PostgreSQL here.
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && pnpm exec next build --webpack` — passed, including TypeScript and static generation.
+- `git diff --check` — pending final check.
+
+2026-10-17 — Add a moving light accent to defect detail tabs
+
+Added a restrained animated highlight that travels around the border of the selected Overview, Update Case, Attachments, or History tab. The existing segmented-control colors, dimensions, behavior, focus treatment, and responsive layout remain intact. The animation is disabled for users who request reduced motion.
+
+Files modified:
+- `frontend/src/common/fleet/DefectDetailsPage.tsx` — add scoped classes and a text wrapper to the four existing tabs; tab navigation and selection behavior are unchanged.
+- `frontend/src/app/details.css` — add the selected-tab border sweep and reduced-motion handling.
+- `README.md` — document the active-tab visual treatment.
+- `updatesfiles.me` — append this implementation record.
+
+Verification:
+- `cd frontend && pnpm lint` — passed (ESLint completed with exit code 0).
+- `cd frontend && pnpm exec next build --webpack` — passed (production compilation, TypeScript, static generation, and trace collection completed).
+- `git diff --check` — passed.
+
+2026-10-17 — Remove the Log Defect button from the aircraft Defect List
+
+Removed the separate Log Defect header button from the aircraft-specific Defect List. The Back to Defect Summary control, inline cabin-area chooser, reporting permission checks, and Report Defect navigation remain available.
+
+Files modified:
+- `frontend/src/common/fleet/AircraftDefectListPage.tsx` — remove the header Log Defect action.
+- `README.md` — document that reporting remains accessible through the authorized inline area chooser.
+- `updatesfiles.me` — append this record.
+
+Verification:
+- `cd frontend && pnpm lint` — passed (ESLint completed with exit code 0).
+- `git diff --check` — passed.
+
+2026-10-17 — Separate Defect Register filters from the Live Fleet Log
+
+Moved search, aircraft-type, date-range, status, and area controls into a dedicated filter card above the Live Fleet Log. The Live Fleet Log now has its own card for the heading, result count, existing table, and pagination, matching the visual separation in the provided reference while retaining the application table styling and existing filter behavior.
+
+Files modified:
+- `frontend/src/app/loginhome/page.tsx` — create separate filter and Live Fleet Log sections and label the filter group.
+- `frontend/src/app/globals.css` — style the separate filter card and keep both sections responsive.
+- `README.md` — document the separated register layout.
+- `updatesfiles.me` — append this implementation record.
+
+Verification:
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && pnpm exec next build --webpack` — passed, including TypeScript and static generation.
+- `git diff --check` — passed.
+
+2026-10-18 — Improve Live Fleet Log table readability
+
+Increased the Live Fleet Log table body, heading, date, status/severity badge, and footer text sizes to align with the readable table scale already used on the aircraft-specific Defect List. The styling is scoped to the Live Fleet Log; table structure, colors, filtering, pagination, and row actions are unchanged.
+
+Files modified:
+- `frontend/src/app/globals.css` — add scoped readable type sizes for Live Fleet Log table content.
+- `README.md` — note the consistent table text sizing.
+- `updatesfiles.me` — append this implementation record.
+
+Verification:
+- `cd frontend && pnpm lint` — passed (ESLint completed with exit code 0).
+- `cd frontend && pnpm exec next build --webpack` — passed (production compilation, TypeScript, and static generation completed).
+- `git diff --check` — passed.
+
+2026-10-18 — Refine the Live Fleet Log to match the supplied table reference
+
+Adjusted the register toolbar to remove the extra Search button, retain keyboard submission and add a short debounce for mouse-driven keyword search. The date selector now shows a calendar icon and “All dates” when unset. Table headings use title case, and fixed column proportions keep the date and rightmost columns within the desktop table width while preserving horizontal scrolling on smaller screens.
+
+Files modified:
+- `frontend/src/app/loginhome/page.tsx` — remove the extra Search button, debounce keyword search, and use reference-style table headings and date selector.
+- `frontend/src/app/globals.css` — tighten the search control and date picker styling and set fixed table proportions for desktop.
+- `README.md` — document the final toolbar and table behavior.
+- `updatesfiles.me` — append this implementation record.
+
+Verification:
+- `cd frontend && pnpm lint` — passed (ESLint completed with exit code 0).
+- `cd frontend && pnpm exec next build --webpack` — passed (production compilation, TypeScript, and static generation completed).
+- `git diff --check` — passed.
+
+2026-10-18 — Align the Defect Register toolbar with the Live Fleet Log table
+
+Moved keyword, area, status, and date-range controls into a compact toolbar at the top of the Live Fleet Log card, matching the provided reference. Keyword search uses the existing backend all-fields search; area choices come from tenant reference data; date filters continue using the existing From/To query parameters. The sortable table, server query scope, cursor pagination, row navigation, and authorized row actions remain unchanged.
+
+Files modified:
+- `frontend/src/app/loginhome/page.tsx` — consolidate filters into the Live Fleet Log toolbar and use the existing all-fields search mode.
+- `frontend/src/app/globals.css` — style the compact toolbar and responsive date-range picker within the existing table card.
+- `README.md` — document the new filter and table layout and query behavior.
+- `updatesfiles.me` — append this implementation record.
+
+Verification:
+- `cd frontend && pnpm lint` — passed (ESLint completed with exit code 0).
+- `cd frontend && pnpm exec next build --webpack` — passed (production compilation, TypeScript, and static generation completed).
+- `git diff --check` — passed.
+
+2026-10-18 — Final visual alignment for the Live Fleet Log
+
+Follow-up after reviewing the supplied side-by-side screenshots: removed the visible Search button, added a calendar icon and “All dates” label, changed the column headings from uppercase to title case, and constrained the table to the card width at desktop sizes. Keyword search runs on Enter and after a short debounce. Area filter choices were kept to the set currently accepted by the backend endpoint. The table remains cursor-paginated; numbered pages and sortable headers in the visual reference are not represented as functional controls because the current API does not provide those capabilities.
+
+Files modified:
+- `frontend/src/app/loginhome/page.tsx` — refine toolbar controls, debounce search, and use title-case headings.
+- `frontend/src/app/globals.css` — scope table sizing and column proportions; refine responsive toolbar and date selector.
+- `README.md` — document filter/search and table behavior.
+- `updatesfiles.me` — append this clarification.
+
+Verification:
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && pnpm exec next build --webpack` — passed, including TypeScript and static generation.
+- `git diff --check` — passed.
+
+2026-10-18 — Use black text for Live Fleet Log headings
+
+Changed the Live Fleet Log table heading text from the muted global gray to black for stronger contrast. The change is scoped to this table and leaves other table styles unchanged.
+
+Files modified:
+- `frontend/src/app/globals.css` — set Live Fleet Log table heading text to black.
+- `README.md` — document the heading contrast.
+- `updatesfiles.me` — append this change record.
+
+Verification:
+- `cd frontend && pnpm lint` — passed.
+- `git diff --check` — passed.
+
+
+2026-10-18 — Use black and white text consistently across the application
+
+Updated neutral text across shared and page-specific frontend styles. Labels, table text, descriptions, helper text, metadata, and status messages on light surfaces now use black. White text is retained on dark and colored surfaces. Brand, link, status, severity, success, warning, error, and focus colors remain semantic accents. The cause of the remaining gray text was explicit component-level CSS and Tailwind color values overriding the page-level text color.
+
+Files modified for this change:
+- `frontend/src/app/globals.css` — set the shared ink and muted text tokens to black and update neutral shared-shell, fleet, report, and register text.
+- `frontend/src/app/configuration.css` — update neutral text across tables, filters, forms, dialogs, routing, SLA, and monitoring layouts.
+- `frontend/src/app/details.css` — update timeline and defect detail neutral text.
+- `frontend/src/app/login/page.tsx` — use black for neutral foreground text on light input surfaces; preserve white on the dark login surface.
+- `frontend/src/app/loginhome/page.tsx` — update neutral text in authenticated-shell fallback states.
+- `frontend/src/app/logout/page.tsx` — update neutral text in sign-out states.
+- `frontend/src/common/fleet/GalleyReviewerDecisionForm.tsx` — update neutral Reviewer form labels and messages.
+- `frontend/src/common/fleet/ActivityTimeline.tsx` — update neutral timeline text.
+- `frontend/src/common/fleet/DefectDetailsPage.tsx` — update neutral case-detail labels and values.
+- `frontend/src/common/forms/OperationalFormRenderer.tsx` — update neutral dynamic-form labels and messages.
+- `README.md` — document the application text-color rule.
+- `updatesfiles.me` — append this implementation record.
+
+Verification:
+- `cd frontend && pnpm lint` — passed (exit code 0).
+- `cd frontend && pnpm build` — did not complete; it remained without build output and was stopped.
+- `cd frontend && pnpm exec next build --webpack` — passed; compilation, TypeScript, static page generation, and build tracing completed.
+- `git diff --check` — passed before the documentation update; rerun after it.
+
+No browser screenshot comparison was run in this turn.
+
+2026-10-18 — Configure severity and workflow status badges from master data
+
+Added catalog-owned badge background, text, border, icon, and display-style settings for Workflow Status Master and tenant Severity Master. Solid badges are the initial style; the status palette follows the actual stable defect codes already in the workflow and does not add fictional OPEN, RESOLVED, or BLOCKED statuses. A shared accessible badge system now renders status and severity consistently in defect tables, queues, case details, reviewer summaries, and activity histories. Inactive catalog entries remain readable for historical badges but are excluded from active status choices. Status styling is global; severity styling remains tenant-scoped. Server validation enforces WCAG AA text contrast, and icon values are rendered as text.
+
+Files created:
+- `backend/src/main/resources/db/migration/V45__configure_master_badge_styles.sql` — add appearance fields and constraints to both masters, seed initial palettes, and keep future tenant severity defaults aligned.
+- `backend/src/main/java/com/ecabin/ledger/service/BadgeColorRules.java` — enforce readable contrast for solid, soft, and outline styles.
+- `backend/src/test/java/com/ecabin/ledger/service/BadgeColorRulesTest.java` — verify accepted and rejected contrast combinations.
+- `frontend/src/common/workflow/workflowStatuses.tsx` — shared status/severity models, API hooks, dynamic badges, and IssueMetadata component; it uses TSX because the shared badge components render JSX.
+
+Files modified:
+- `backend/src/main/java/com/ecabin/ledger/api/ApiModels.java` — include appearance values in status responses and allow validated metadata patches.
+- `backend/src/main/java/com/ecabin/ledger/api/ReferenceDataController.java` — expose tenant-scoped active and inactive severity badge definitions to authorized operational readers.
+- `backend/src/main/java/com/ecabin/ledger/config/SecurityConfig.java` — grant the read-only badge endpoint to operational roles without widening the existing general reference-data endpoint.
+- `backend/src/main/java/com/ecabin/ledger/service/WorkflowStatusService.java` — read, update, validate, and audit workflow badge appearance.
+- `backend/src/main/java/com/ecabin/ledger/service/ConfigurationService.java` — expose severity appearance in lists, tables, editing, validation, and export.
+- `backend/src/main/java/com/ecabin/ledger/service/ConfigurationImportService.java` — include badge appearance fields in the Severity Master CSV template and import mapping.
+- `backend/src/test/java/com/ecabin/ledger/service/PostgresMigrationSmokeTest.java` — expect V45 and verify the catalog appearance columns and seed styles when PostgreSQL verification is enabled.
+- `frontend/src/app/configuration.tsx` — add severity color, icon, and display-style editing with a table preview.
+- `frontend/src/common/configuration/WorkflowStatusMasterPage.tsx` — add workflow badge color, icon, display-style controls, and live preview.
+- `frontend/src/app/globals.css` — define shared badge dimensions and typography.
+- `frontend/src/app/loginhome/page.tsx` — render severity and workflow status badges in the register, case summary, and activity history.
+- `frontend/src/common/fleet/AircraftDefectListPage.tsx` — use master-driven badges in aircraft defect rows and keep inactive statuses out of filters.
+- `frontend/src/common/fleet/DefectDetailsPage.tsx` — use shared badges in the case header.
+- `frontend/src/common/fleet/ActivityTimeline.tsx` — show current and previous workflow states as badges.
+- `frontend/src/common/fleet/GalleyReviewerDecisionForm.tsx` — show the case's master-driven workflow badge.
+- `frontend/src/common/fleet/MaintenanceWorkQueuePage.tsx` — show the master-driven status badge in the queue.
+- `frontend/src/common/fleet/ReviewerWorkQueuePage.tsx` — show master-driven severity/status badges and exclude inactive definitions from filter choices.
+- `README.md` — document V45, the new read endpoint, master configuration, and badge behavior.
+- `docs/gap-analysis.md` — document badge styling ownership, endpoint scope, and contrast validation.
+- `updatesfiles.me` — append this implementation record.
+
+Verification:
+- `cd backend && ./mvnw '-Dtest=*,!PostgresMigrationSmokeTest,!LocalPostgresOperationalIntegrationTest,!TenantIsolationPostgresTest' test` — passed; 104 tests, 0 failures, 0 skipped. Database-only migration and integration tests were excluded.
+- `cd backend && ./mvnw -DskipTests package` — passed.
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && pnpm exec next build --webpack` — passed, including compilation, TypeScript, static generation, and build tracing.
+- `git diff --check` — passed after this entry.
+
+PostgreSQL migration execution was not performed because this session did not have explicit database verification settings or connection details. Therefore V45 is implemented and statically reviewed, but has not been executed against PostgreSQL. No database records were changed. No browser screenshot comparison was run.
+
+2026-10-18 — Add Workflow Status Master
+
+Added the system-wide `workflow_status_master` catalog for the 14 existing DEFECT status codes, with stable codes, editable display metadata, aliases, active state, ordering, and initial/terminal flags. The seed is idempotent and preserves existing IDs and administrator-maintained values. A database trigger prevents new defect records or status changes from using an inactive or missing catalog status, while leaving existing records readable. The Java transition graph remains authoritative; no transitions are inferred from catalog metadata. `CLOSED` is nonterminal because the existing workflow allows reopening; `REJECTED` and `CANCELLED` currently have no outgoing transition.
+
+Files created:
+- `backend/src/main/resources/db/migration/V44__workflow_status_master.sql` — create and seed the catalog, index it, and enforce active status on new assignments.
+- `backend/src/main/java/com/ecabin/ledger/api/WorkflowStatusController.java` — expose authenticated, permission-checked status read and metadata update APIs.
+- `backend/src/main/java/com/ecabin/ledger/service/WorkflowStatusService.java` — implement tenant-authorized reads, pagination, validation, metadata-only edits, and append-only audit events.
+- `frontend/src/common/configuration/WorkflowStatusMasterPage.tsx` — provide the searchable, paginated status management screen.
+- `frontend/src/common/workflow/workflowStatuses.ts` — provide the shared typed API hook and stable-code-to-display-label mapping.
+
+Files modified:
+- `backend/src/main/java/com/ecabin/ledger/api/ApiModels.java` — add status response, page, and metadata update DTOs.
+- `backend/src/main/java/com/ecabin/ledger/config/SecurityConfig.java` — authorize status reads for permitted authenticated roles and metadata updates for organization administrators; allow PATCH.
+- `backend/src/main/java/com/ecabin/ledger/service/ConfigurationService.java` — include Workflow Status Master in Administration navigation.
+- `backend/src/main/java/com/ecabin/ledger/service/DefectService.java` — remove obsolete `RESOLVED` dashboard filtering and count open defects according to current terminal statuses.
+- `backend/src/test/java/com/ecabin/ledger/service/PostgresMigrationSmokeTest.java` — expect V44 and validate the catalog, seed, constraints, index, and trigger when the opt-in database test runs.
+- `frontend/src/app/configuration.tsx` — integrate the new Administration screen.
+- `frontend/src/common/fleet/AircraftDefectListPage.tsx` — use catalog labels and active statuses in defect filtering and display.
+- `frontend/src/common/fleet/DefectDetailsPage.tsx` — use catalog labels for current and historical case status display.
+- `frontend/src/common/fleet/ActivityTimeline.tsx` — use catalog labels for status events.
+- `frontend/src/common/fleet/MaintenanceWorkQueuePage.tsx` — use catalog labels in the maintenance queue.
+- `frontend/src/common/fleet/ReviewerWorkQueuePage.tsx` — use catalog labels while retaining the queue's backend-supported status scope.
+- `frontend/src/common/fleet/GalleyReviewerDecisionForm.tsx` — use catalog labels for the displayed case status.
+- `frontend/src/app/loginhome/page.tsx` — use catalog labels and active definitions for the main defect list and filters.
+- `README.md` — document the catalog, seed values, API, workflow ownership, and the legacy `RESOLVED` mapping.
+- `docs/gap-analysis.md` — align status/workflow documentation with the verified implementation.
+- `updatesfiles.me` — append this implementation record.
+
+Verification:
+- `cd backend && ./mvnw test` — passed; 124 tests, 0 failures, 0 errors, 22 skipped. PostgreSQL/Testcontainers integration cases were skipped by their opt-in guards; no Docker command was run.
+- `cd backend && ./mvnw -DskipTests package` — passed.
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && pnpm exec next build --webpack` — passed, including TypeScript and static generation.
+- `cd frontend && pnpm build` — did not complete; the default build remained without output and was interrupted. The explicit webpack production build passed.
+- `git diff --check` — passed before this final changelog append; rerun after the append.
+
+Database execution was not attempted because no explicit database verification flag or datasource connection details were configured in this session. No production or local database records were inspected or modified. The migration has not been executed against PostgreSQL, and deployment remains unverified. Workflow status metadata is global across tenants; only users with `ADMINISTER_ORGANIZATION` can modify it. New status codes require a reviewed code and migration change and cannot be created through the metadata API.
+2026-10-18 — Fix Workflow Status Master trigger smoke assertion
+
+The PostgreSQL smoke test counted trigger event rows rather than trigger objects. Because the V44 status guard handles both INSERT and UPDATE, PostgreSQL reports two `information_schema.triggers` rows for the single trigger. Updated the assertion to count distinct trigger names; the database guard and migration are unchanged.
+
+Files modified:
+- `backend/src/test/java/com/ecabin/ledger/service/PostgresMigrationSmokeTest.java` — count the single named status-guard trigger once across its INSERT and UPDATE events.
+- `README.md` — clarify the trigger/event-row distinction in the Workflow Status Master documentation.
+- `updatesfiles.me` — append this implementation record.
+
+Verification:
+- `cd backend && ./mvnw '-Dtest=*,!PostgresMigrationSmokeTest,!LocalPostgresOperationalIntegrationTest,!TenantIsolationPostgresTest' test` — passed; 104 tests, 0 failures, 0 errors, 0 skipped.
+- `git diff --check` — passed.
+
+The PostgreSQL smoke test was not rerun because it applies Flyway migrations to the configured local schema. The reported run had already applied V44; this change only corrects test counting and does not change the schema or workflow behavior.
+
+2026-10-18 — Keep smoke-test permission checks aligned with the permission enum
+
+After the trigger-count assertion was fixed, the PostgreSQL smoke test reached a stale assertion that expected 12 permission descriptions. V43 added `DEFECT_VIEW_ALL`, making the supported catalog 13 entries. The permission table, V43 migration, and permission behavior are correct; updated the smoke test to compare its catalog counts with `Permission.values().length` so future additions do not require another unrelated numeric update.
+
+Files modified:
+- `backend/src/test/java/com/ecabin/ledger/service/PostgresMigrationSmokeTest.java` — derive expected described and unique permission counts from the authoritative server enum.
+- `README.md` — document that the migration smoke check follows the permission enum cardinality.
+- `updatesfiles.me` — append this implementation record.
+
+Verification:
+- `cd backend && ./mvnw '-Dtest=*,!PostgresMigrationSmokeTest,!LocalPostgresOperationalIntegrationTest,!TenantIsolationPostgresTest' test` — passed; 104 tests, 0 failures, 0 errors, 0 skipped.
+- `git diff --check` — passed.
+
+The PostgreSQL smoke test was not rerun in this change. The supplied output confirms V45 was applied successfully before the assertion failed. No database changes were made by this fix.
+
+2026-10-18 — Fix table text collisions and responsive overflow
+
+Audit found that the legacy global table rules applied `white-space: nowrap`, generic cell sizing, and a fixed last-column width to every table. The Live Fleet Log also forced `table-layout: fixed`, and Maintenance findings required a 220px minimum width. Those rules could constrain long values or force excess table width. Scoped the legacy base rules to the Live Fleet Log, switched it to content-driven layout with wrapping cells, assigned its narrow action width by explicit class, and made administration and import-preview table cells wrap within horizontally scrollable containers. Maintenance finding cells can now shrink and wrap. The generic administration action-column rule also overrode wrapping for the last cell of login monitoring, so that table now explicitly wraps long request IDs. Existing dates stay compact; table data and actions remain visible.
+
+Files created:
+- `frontend/src/common/tables/tableLayout.test.mjs` — add Node regression checks for scoped base rules, wrapping data cells, inner table scrolling, and explicit action-column handling.
+
+Files modified:
+- `frontend/src/app/globals.css` — scope legacy table rules to the Live Fleet Log, use auto layout, wrap cells, and keep its action-cell width explicit.
+- `frontend/src/app/configuration.css` — allow administration/import preview values and headers to wrap, constrain cell children, wrap action groups, and remove the Maintenance finding's forced minimum width.
+- `frontend/src/app/loginhome/page.tsx` — label the Live Fleet Log action header for screen readers and mark action cells explicitly.
+- `README.md` — document table layout and wrapping behavior.
+- `updatesfiles.me` — append this implementation record.
+
+Verification:
+- `cd frontend && pnpm lint` — passed after the new regression file was added.
+- `cd frontend && pnpm build` — stalled without further output and was interrupted after about 40 seconds.
+- `cd frontend && pnpm exec next build --webpack` — passed, including TypeScript, static page generation, and build tracing.
+- `cd frontend && node --test src/common/tables/tableLayout.test.mjs` — passed; 3 tests.
+- `git diff --check` — passed.
+
+No authenticated browser session was used, so viewport screenshots and live long-value rendering at 1440, 1024, 768, and 375px were not checked. The frontend has no configured browser/UI test runner; the new regression tests validate the CSS/layout invariants instead. Tables remain horizontally scrollable on narrow screens.
+
+2026-10-18 — Display Workflow Status Master aliases in defect screens
+
+Updated the shared workflow status label resolver and status badge to prefer the nonblank `alias_name` returned by the `DEFECT` workflow status catalog, with fallbacks to `display_name` and a readable stable status code. Defect list, aircraft list, and Reviewer queue filters now show aliases while retaining status codes as their selected values and API query values. The defect dashboard, fleet summary and Report Defect confirmation also resolve status wording from the same catalog. The existing backend endpoint already returns `aliasName`; no backend, schema, or workflow changes were needed.
+
+Files created:
+- `frontend/src/common/workflow/workflowStatusLabels.mjs` — implement the shared alias-first label resolver with safe fallbacks.
+- `frontend/src/common/workflow/workflowStatusLabels.d.mts` — provide the typed declaration for the shared JavaScript label resolver.
+- `frontend/src/common/workflow/workflowStatusLabels.test.mjs` — cover all 14 catalog aliases, display-name/code fallbacks, and screen-level label/code wiring.
+
+Files modified:
+- `frontend/src/common/workflow/workflowStatuses.tsx` — use and export the shared label resolver for every status badge.
+- `frontend/src/common/fleet/AircraftDefectListPage.tsx` — show aliases in status filter options while submitting codes.
+- `frontend/src/common/fleet/ReviewerWorkQueuePage.tsx` — show aliases in review status filters while submitting codes.
+- `frontend/src/common/fleet/ReportDefectPage.tsx` — show the catalog-resolved initial status in the successful report message.
+- `frontend/src/common/fleet/FleetStatusPage.tsx` — use the catalog alias for the Closed summary label.
+- `frontend/src/app/loginhome/page.tsx` — show aliases in the register filter and defect summary labels; filter values remain status codes.
+- `frontend/src/common/configuration/WorkflowStatusMasterPage.tsx` — invalidate the shared status catalog cache after metadata updates so alias edits propagate to defect screens.
+- `README.md` — document alias resolution and fallback behavior.
+- `updatesfiles.me` — append this implementation record.
+
+Verification:
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && node --test src/common/workflow/workflowStatusLabels.test.mjs` — passed; 4 tests.
+- `cd frontend && pnpm exec next build --webpack` — passed, including compilation, TypeScript, static generation, and build tracing.
+- `cd backend && ./mvnw test` — passed; 126 tests, 0 failures, 0 errors, 22 skipped. PostgreSQL/Testcontainers integration tests were skipped because Docker was unavailable; `PostgresMigrationSmokeTest` also remained skipped by its opt-in guard.
+- `git diff --check` — passed.
+
+The backend status API was inspected and already selects/maps `alias_name` into `WorkflowStatusView.aliasName`; no backend changes were required. No browser session was used, so rendered UI verification was not performed.
+
+2026-10-18 — Standardize defect tables against Defect Register
+
+Applied the existing Live Fleet Log table styling to the aircraft-level Defect Summary and the aircraft-specific “Defects visible to you” table through an opt-in shared `DataTable` wrapper and scoped CSS. The aircraft defect table keeps defect-level columns, status aliases, and its existing filtering, sorting, paging, permissions, and navigation. Defect Summary remains an aircraft summary (MSN, registration, type, open defect count) because that is the data returned by its existing API. Both remain horizontally scrollable on narrow screens, and long cell values wrap instead of colliding. No backend/API or workflow logic changed.
+
+Files modified:
+- `frontend/src/common/tables/DataTable.tsx` — support opt-in root/table styling classes while preserving the existing table behavior.
+- `frontend/src/app/globals.css` — add scoped shared table rules matching the Defect Register for toolbar, headers, rows, badges, footer, and responsive overflow/wrapping.
+- `frontend/src/app/loginhome/page.tsx` — mark the existing Live Fleet Log as the table style reference.
+- `frontend/src/common/fleet/AircraftDefectListPage.tsx` — opt “Defects visible to you” into the shared table style and apply column proportions appropriate to its nine defect columns.
+- `frontend/src/common/fleet/FleetStatusPage.tsx` — opt the aircraft summary table into the same style while retaining its four aircraft summary columns.
+- `frontend/src/common/tables/tableLayout.test.mjs` — assert that the three relevant tables share the style opt-in and the defect list’s wrapping/column layout constraints.
+- `README.md` — document the shared table presentation and page-specific columns.
+- `updatesfiles.me` — append this implementation record.
+
+Verification:
+- `cd frontend && pnpm lint` — passed.
+- `cd frontend && node --test src/common/tables/tableLayout.test.mjs` — passed; 4 tests.
+- `cd frontend && pnpm exec next build --webpack` — passed, including compilation, TypeScript, static generation, and build tracing.
+- `git diff --check` — passed.
+
+Viewport screenshots and live long-value rendering were not performed in a browser during this change.
+
+2026-10-18 — Remove `register-action-cell` from Defect Register markup
+
+Removed the dedicated class from the Defect Register header and action cells. Preserved the compact 35px action column, right padding, and no-wrap behavior with last-cell selectors scoped to the Defect Register table. The screen-reader-only Actions header, permission-gated Advance workflow button, and event handling remain unchanged. Updated the table-layout regression test to check the new selector and retained action markup.
+
+Files modified:
+- `frontend/src/app/loginhome/page.tsx` — remove `register-action-cell` from the action header and body cell.
+- `frontend/src/app/globals.css` — replace the class selector with scoped final-header/final-cell selectors.
+- `frontend/src/common/tables/tableLayout.test.mjs` — assert the class is absent and the compact final column and actions remain.
+- `README.md` — document how the action column is styled and retained.
+- `updatesfiles.me` — append this implementation record.
+
+Verification:
+- `cd frontend && pnpm lint` — passed.
+- `node --test frontend/src/common/tables/tableLayout.test.mjs` — passed; 4 tests.
+- `git diff --check` — passed.
+
+2026-10-18 — Align Report Defect layout with the compact area-first mockup
+
+Replaced the separate, repetitive start-instruction panel with a compact three-step progress indicator above the cabin-area card. Changed the Report Defect page's area choices from shared pills to responsive selectable tiles with an accessible selected state, tightened the page spacing, and added a concise selected-area/next-step hint after the published form loads. The step indicator follows the existing area, form, aircraft, and submission state. The aircraft defect-list area chooser is unaffected; report APIs, dynamic fields, validation, uploads, idempotency, permissions, and submission recovery remain unchanged.
+
+Files modified:
+- `frontend/src/common/fleet/ReportDefectPage.tsx` — render the stepper, tile-based area selection, selected state and contextual next-step hint; remove the duplicate instructional panel.
+- `frontend/src/app/configuration.css` — style the compact guided flow and responsive area tiles.
+- `README.md` — document the Report Defect presentation and unchanged workflow behavior.
+- `updatesfiles.me` — append this implementation record.
+
+Verification:
+- No lint, build, or automated tests were run in this turn.
+- No browser viewport comparison was performed.
+
+2026-10-18 — Match the Report Defect page to the supplied design
+
+Adjusted the prior Report Defect layout to match the latest reference: placed the numbered three-step progress indicator inside its own white rounded card; changed the area helper text; added clean line icons and larger selectable cabin-area tiles; and replaced the text-only next-step hint with a right-aligned green arrow action. The action stays disabled until an area and a published form are available, then scrolls to the existing aircraft/form workflow. Progress reflects the existing area/form/aircraft/submission state. Existing forms, API calls, permissions, validation, upload recovery, and report submission behavior remain intact.
+
+Files modified:
+- `frontend/src/common/fleet/ReportDefectPage.tsx` — render the separate stepper card, area icons/tiles, dynamic step state, and functional next-step action.
+- `frontend/src/app/configuration.css` — refine stepper-card and area-tile styling, selected state, arrow action, and responsive behavior.
+- `README.md` — describe the current Report Defect layout and next-step action.
+- `updatesfiles.me` — append this implementation record.
+
+Verification:
+- No lint, build, or automated tests were run in this turn.
+- No browser viewport comparison was performed.
+
+2026-10-18 — Simplify main page headings
+
+Removed the contextual eyebrow line and descriptive subtitle from main page headings, leaving each screen's title. Preserved navigation labels, page titles, content-section labels and dialog headings, page actions, routes, and behavior.
+
+Files modified:
+- `frontend/src/common/fleet/FleetStatusPage.tsx` — retain only the Defect Summary page title.
+- `frontend/src/common/fleet/AircraftDefectListPage.tsx` — retain only the Defect List title; aircraft identity remains available in the page content.
+- `frontend/src/common/fleet/ReportDefectPage.tsx` — retain only the Report Defect title.
+- `frontend/src/common/fleet/MaintenanceWorkQueuePage.tsx` — retain only the Maintenance work queue title.
+- `frontend/src/common/fleet/ReviewerWorkQueuePage.tsx` — retain only the Reviewer queue title.
+- `frontend/src/common/configuration/ApiRateLimitsPage.tsx` — retain only the API Rate Limits title and Add policy action.
+- `frontend/src/common/configuration/AreaTeamRoutingPage.tsx` — retain only the Cabin Area–Team Mapping title.
+- `frontend/src/common/configuration/MaintenanceSlaPoliciesPage.tsx` — retain only the Maintenance SLA Policies title.
+- `frontend/src/common/configuration/UserLoginMonitoringPage.tsx` — retain only the User Login Monitoring title.
+- `frontend/src/common/configuration/WorkflowStatusMasterPage.tsx` — retain only the Workflow Status Master title.
+- `frontend/src/common/configuration/FormMasterPage.tsx` — retain only the Form Master title.
+- `frontend/src/app/configuration.tsx` — retain the selected configuration page title.
+- `frontend/src/app/loginhome/page.tsx` — retain the title in the generic shell fallback heading.
+- `README.md` — document the simplified heading behavior.
+- `updatesfiles.me` — append this implementation record.
+
+Verification:
+- Automated tests, lint, and build were not run in this turn.
+- No browser visual comparison was performed.
+
+2026-10-18 — Preserve the originating screen when dismissing the report modal
+
+The New Operational Record modal is opened from an aircraft-specific Defect List. Its launch path had cleared the selected aircraft page state, causing the shell to show Defect Summary under the modal. The launch now keeps that page mounted and saves its selected-aircraft context. The shared dismiss handler restores that context for Close, Cancel, and Escape. The report form still starts without a selected aircraft; successful submission retains its existing behavior of opening the created defect.
+
+Files modified:
+- `frontend/src/app/loginhome/page.tsx` — retain the launching aircraft page state while the report dialog is open and restore it when the dialog is dismissed; clear the saved context on successful submission or navigation.
+- `README.md` — document report-modal dismissal behavior.
+- `updatesfiles.me` — append this implementation record.
+
+Verification:
+- Automated tests, lint, and build were not run in this turn.
+- No browser interaction or viewport check was performed.
+
+2026-10-18 — Remove redundant report-modal helper copy
+
+Removed the two explanatory messages from the New Operational Record modal. Dynamic published fields, system-controlled aircraft/organization values, evidence handling, validation, and submission behavior are unchanged.
+
+Files modified:
+- `frontend/src/app/loginhome/page.tsx` — remove the published-form instruction and system-controlled identifier note from the report modal.
+- `README.md` — document the removed helper copy and unchanged form behavior.
+- `updatesfiles.me` — append this implementation record.
+
+Verification:
+- Automated tests, lint, and build were not run in this turn.
+- No browser visual comparison was performed.
+
+2026-10-18 — Keep defect details closed after report creation
+
+Removed the automatic detail-modal opening after a successful defect creation. The report modal now closes back to its originating aircraft-specific list, refreshes that list, and shows the success confirmation. Users open case details and the Reviewer decision by selecting the defect ID. Existing explicit detail-opening and workflow actions remain unchanged.
+
+Files modified:
+- `frontend/src/app/loginhome/page.tsx` — stop calling `openDetail` after creation, return to the saved screen context, refresh the aircraft defect list, and use a creation-only success message.
+- `frontend/src/common/fleet/AircraftDefectListPage.tsx` — listen for the refresh signal and invalidate the current aircraft's defect-list query.
+- `README.md` — document that case details open on defect-ID selection.
+- `updatesfiles.me` — append this implementation record.
+
+Verification:
+- Automated tests, lint, and build were not run in this turn.
+- No browser interaction or viewport comparison was performed.
+
+2026-10-18 — Remove generic workflow and reviewer-routing actions from defect details
+
+Removed **Advance workflow** and **Reassign Reviewer team** from the standalone defect detail page and legacy detail modal. Reviewer decisions continue through the dedicated Reviewer decision form; the Defect Register's authorized row action and permitted maintenance reassignment remain unchanged. Removed now-unused detail-page handlers.
+
+Files modified:
+- frontend/src/common/fleet/DefectDetailsPage.tsx — remove the two detail-page actions and their unused handlers.
+- frontend/src/app/loginhome/page.tsx — remove the same actions from the legacy detail modal and remove its unused reviewer-routing handler; keep the Register row workflow action.
+- README.md — document which detail actions remain available.
+- updatesfiles.me — append this implementation record.
+
+Verification:
+- Automated tests, lint, and build were not run.
+- Source diff and repository whitespace checks were reviewed.
+
+2026-10-18 — Hide the missing report-submission notice
+
+The defect detail Overview no longer displays “No defect-report form submission has been recorded” when the API returns no DEFECT_REPORT submission. The section remains; loading and error states and the exact-version read-only report view are unchanged.
+
+Files modified:
+- frontend/src/common/fleet/DefectDetailsPage.tsx — render no empty-state message when the report submission is absent.
+- README.md — document the detail-page empty-state behavior.
+- updatesfiles.me — append this implementation record.
+
+Verification:
+- `git diff --check` — passed.
+- Automated tests, lint, and build were not run.
+
+2026-10-18 — Show persisted submission details in defect History
+
+The History event API now returns an additive, whitelisted details object. It joins `FORM_SUBMITTED` events to their immutable submission and published version, then projects the saved defect-report snapshot fields; maintenance events project the persisted status, SLA date, remark, and prior/current action metadata. Evidence upload events provide an attachment ID that the UI matches against its existing authorized attachment list before opening through the authenticated download endpoint. The History timeline displays submitted values and changes in separate sections and automatically expands relevant records. No historical values are inferred from the current defect and no raw event JSON or storage keys are returned.
+
+Files modified:
+- backend/src/main/java/com/ecabin/ledger/api/ApiModels.java — add safe event detail DTOs and an optional details property.
+- backend/src/main/java/com/ecabin/ledger/service/DefectService.java — tenant-scoped joins and allowlisted projection of saved form and maintenance metadata.
+- backend/src/test/java/com/ecabin/ledger/service/LocalPostgresOperationalIntegrationTest.java — cover report detail response and maintenance values in event history.
+- frontend/src/common/fleet/defectDetailsModel.ts — type event details and format SLA date-only values.
+- frontend/src/common/fleet/ActivityTimeline.tsx — render submitted details and changes without exposing raw JSON.
+- frontend/src/common/fleet/DefectDetailsPage.tsx — wire clean evidence entries to the existing secure attachment opener.
+- frontend/src/common/fleet/defectDetailsModel.test.mjs — verify date-only and cleared SLA value formatting.
+- README.md — record the feature and historical-data limitation.
+- updatesfiles.me — append this implementation record.
+
+Migration: none. The existing relational defect-report snapshot and append-only maintenance event metadata already store these values. Legacy events without stored details remain incomplete.
+
+Verification:
+- `backend/./mvnw -Dtest=DefectWorkflowTest test` — passed (3 tests).
+- `backend/./mvnw -Dtest=LocalPostgresOperationalIntegrationTest test` — build passed; 20 PostgreSQL integration tests skipped because `ECABIN_DB_VERIFY=true` was not enabled.
+- `frontend/node --experimental-strip-types --test src/common/fleet/defectDetailsModel.test.mjs` — passed (4 tests).
+- `frontend/pnpm lint` — passed with one pre-existing unused-variable warning in `src/app/loginhome/page.tsx`.
+- `frontend/pnpm exec tsc --noEmit` — passed.
+- `frontend/pnpm build` (Turbopack) — stalled without further output and was stopped.
+- `frontend/pnpm exec next build --webpack` — passed; production compile, TypeScript, static generation, and trace collection completed.
+
+2026-10-18 — Remove Defect Details footer copy
+
+Removed the footer text “eCabin Ledger · Defect record” and “Workflow events are generated by authorized backend operations” from the standalone Defect Details page. No workflow, event, or audit behavior changed.
+
+Files modified:
+- frontend/src/common/fleet/DefectDetailsPage.tsx — remove the redundant explanatory footer.
+- README.md — document the presentation-only removal.
+- updatesfiles.me — append this implementation record.
+
+Verification:
+- `git diff --check` — passed.
+- Automated tests, lint, and build were not run.
+
+2026-10-18 — Remove submitted-form explanatory sentence
+
+Removed “Displayed using its exact published form version and recorded relational snapshot” from the Auditor’s submitted form section. The version badge and exact-version read-only rendering remain unchanged.
+
+Files modified:
+- frontend/src/common/fleet/DefectDetailsPage.tsx — remove the explanatory sentence.
+- README.md — document the copy removal and unchanged form rendering.
+- updatesfiles.me — append this implementation record.
+
+Verification:
+- `git diff --check` — passed.
+- Automated tests, lint, and build were not run.
+
+2026-10-18 — Hide missing versioned report message in Reviewer panel
+
+Removed the fallback sentence “No versioned report submission is recorded for this case. Review the case details above; the decision remains available from the published Reviewer form” when no report submission exists. Loading, submitted report rendering, and Reviewer decision behavior remain unchanged.
+
+Files modified:
+- frontend/src/common/fleet/GalleyReviewerDecisionForm.tsx — omit the no-submission fallback message.
+- README.md — document the presentation-only change.
+- updatesfiles.me — append this implementation record.
+
+Verification:
+- `git diff --check` — passed.
+- Automated tests, lint, and build were not run.
+
+2026-10-18 — Hide the no-report-due workflow notice
+
+The workflow form renderer no longer displays “No defect report is due at this case’s current workflow stage” for an existing defect. Backend form eligibility and other missing-form notices are unchanged.
+
+Files modified:
+- frontend/src/common/forms/OperationalFormRenderer.tsx — suppress only the existing-case DEFECT_REPORT empty-state notice.
+- README.md — document the presentation-only behavior.
+- updatesfiles.me — append this implementation record.
+
+Verification:
+- `git diff --check` — passed.
+- Automated tests, lint, and build were not run.
+
+2026-10-18 — Hide the empty initial-report renderer on existing defects
+
+Follow-up: suppressing the no-report-due message alone left the empty OperationalFormRenderer panel mounted on existing REPORTED cases. Defect Details now skips that initial DEFECT_REPORT renderer entirely for existing cases, while preserving the Reviewer decision form and all other status-appropriate workflow forms.
+
+Files modified:
+- frontend/src/common/fleet/DefectDetailsPage.tsx — do not mount the initial report renderer in the existing-defect Workflow tab.
+- README.md — clarify that initial reporting remains in Report Defect and existing cases show eligible stage forms.
+- updatesfiles.me — append this follow-up implementation record.
+
+Verification:
+- `git diff --check` — passed.
+- Automated tests, lint, and build were not run.
+
+2026-10-18 — Hide published-version eyebrow in Update Case
+
+The generic `PUBLISHED · VERSION n` label is no longer shown while an operational form is rendered for an existing case workflow. Exact version selection and backend submission remain unchanged; the report preparation, preview, Form Master, and submission history contexts retain their existing version details.
+
+Files modified:
+- frontend/src/common/forms/OperationalFormRenderer.tsx — hide the published-version eyebrow for existing-case, non-preview workflow rendering.
+- README.md — document the UI-only change and retained version behavior.
+- updatesfiles.me — append this implementation record.
+
+Verification:
+- `git diff --check` — passed.
+- Automated tests, lint, and build were not run.
+
+2026-10-18 — Remove Maintenance SLA date-range helper text
+
+Removed the visible “Allowed date: …” helper line from the SLA Target Date field. Policy-derived date input bounds, required-date behavior, client-side disabled state during policy loading/errors, and backend SLA validation remain unchanged.
+
+Files modified:
+- frontend/src/common/forms/OperationalFormRenderer.tsx — remove only the inline date-range helper.
+- README.md — record that the policy bounds and backend validation remain active.
+- updatesfiles.me — append this implementation record.
+
+Verification:
+- `git diff --check` — passed.
+- Automated tests, lint, and build were not run.
+
+2026-10-18 — Hide empty Reopen form panel
+
+For an existing closed defect with no published REOPEN form, the empty operational-form panel and its “No published reopen form is configured…” message are hidden. Reopen eligibility and backend validation are unchanged; form-loading errors remain visible.
+
+Files modified:
+- frontend/src/common/forms/OperationalFormRenderer.tsx — return no empty panel for existing-case REOPEN when the form catalog is successfully empty.
+- README.md — document that a configured published Reopen form is still required.
+- updatesfiles.me — append this implementation record.
+
+Verification:
+- `git diff --check` — passed.
+- Automated tests, lint, and build were not run.
+
+2026-10-18 — Show saved values in defect History
+
+The History events response now provides an additive, whitelisted details object. Defect-report submissions join to their immutable relational snapshot and published version; maintenance entries expose their saved status, SLA date, remark, and prior/current action state; Reviewer/Closure events expose the recorded decision and Maintenance team; inspection events include related saved notes. Attachment upload events include the attachment ID only, and the UI matches it to the existing authorized attachment list and opens it through the authenticated download endpoint. History displays submitted details and changes separately; it does not expose raw event JSON, storage keys, or unsaved form state. Historical values not stored by the existing schema remain unavailable. No database migration was needed.
+
+Files modified for this update:
+- backend/src/main/java/com/ecabin/ledger/api/ApiModels.java
+- backend/src/main/java/com/ecabin/ledger/service/DefectService.java
+- backend/src/test/java/com/ecabin/ledger/service/LocalPostgresOperationalIntegrationTest.java — cover report, maintenance, Reviewer, and Closure event values.
+- frontend/src/common/fleet/defectDetailsModel.ts
+- frontend/src/common/fleet/defectDetailsModel.test.mjs
+- frontend/src/common/fleet/ActivityTimeline.tsx
+- frontend/src/common/fleet/DefectDetailsPage.tsx
+- README.md
+- updatesfiles.me
+
+Verification:
+- `backend/./mvnw -Dtest=DefectWorkflowTest test` — passed, 3 tests.
+- `backend/./mvnw -Dtest=LocalPostgresOperationalIntegrationTest test` — test class ran, 20 tests skipped because database verification settings were unavailable.
+- `frontend/node --experimental-strip-types --test src/common/fleet/defectDetailsModel.test.mjs` — passed, 4 tests.
+- `frontend/pnpm lint` — passed with one existing unused-variable warning in `src/app/loginhome/page.tsx`.
+- `frontend/pnpm exec tsc --noEmit` — passed.
+- `frontend/pnpm build` — Turbopack did not progress beyond build startup; stopped after waiting. `frontend/pnpm exec next build --webpack` passed.
+- `git diff --check` — passed.
+
+2026-10-18 — Make maintenance remarks and target dates visible in History
+
+Expanded History event detection to include any saved maintenance date, remark, or action-state metadata, and broadened the backend's whitelisted projection to read those known fields from persisted event JSON even when the event type differs. Maintenance event notes now appear under a clear Remark label when older records lack a dedicated remark field. SLA target dates remain sourced from immutable event metadata; no values are reconstructed from the mutable corrective-action row.
+
+Files modified:
+- backend/src/main/java/com/ecabin/ledger/service/DefectService.java
+- frontend/src/common/fleet/ActivityTimeline.tsx
+- README.md
+- updatesfiles.me
+
+Verification:
+- `backend/./mvnw -Dtest=DefectWorkflowTest,LocalPostgresOperationalIntegrationTest test` — passed; 3 workflow unit tests passed, 20 PostgreSQL integration tests were skipped because local database verification was not enabled/available.
+- `frontend/pnpm lint` — passed with the existing `loginhome/page.tsx:83` unused-variable warning.
+- `frontend/pnpm exec tsc --noEmit` — passed.
 - `git diff --check` — passed.

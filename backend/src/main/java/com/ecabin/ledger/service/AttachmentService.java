@@ -6,9 +6,7 @@ import com.ecabin.ledger.api.FormModels.FormPurpose;
 import com.ecabin.ledger.security.AuthenticatedUser;
 import com.ecabin.ledger.security.Permission;
 import com.ecabin.ledger.storage.BlobStorage;
-import com.ecabin.ledger.storage.EvidenceScanner;
 import com.ecabin.ledger.storage.EvidenceFileValidator;
-import com.ecabin.ledger.storage.EvidenceScanStatus;
 import java.security.MessageDigest;
 import java.time.Instant;
 import java.util.HexFormat;
@@ -23,8 +21,8 @@ import org.springframework.web.server.ResponseStatusException;
 
 @Service
 public class AttachmentService {
-    private final JdbcTemplate jdbc; private final BlobStorage storage; private final EvidenceScanner scanner; private final OperationalFormService forms;
-    public AttachmentService(JdbcTemplate jdbc,BlobStorage storage,EvidenceScanner scanner,OperationalFormService forms){this.jdbc=jdbc;this.storage=storage;this.scanner=scanner;this.forms=forms;}
+    private final JdbcTemplate jdbc; private final BlobStorage storage; private final OperationalFormService forms;
+    public AttachmentService(JdbcTemplate jdbc,BlobStorage storage,OperationalFormService forms){this.jdbc=jdbc;this.storage=storage;this.forms=forms;}
 
     public Permission permissionForUpload(UUID operatorId,UUID defectId,UUID formId,UUID versionId){return permissionFor(forms.requireOperationalForm(operatorId,defectId,formId,versionId).purpose());}
 
@@ -61,14 +59,12 @@ public class AttachmentService {
         String detected=EvidenceFileValidator.validateContent(field,extension,bytes);
         Integer count=jdbc.queryForObject("SELECT count(*) FROM attachments_dtl WHERE operator_id=? AND defect_id=? AND form_id=? AND form_version_id=? AND field_key=? AND isactive=1 AND scan_status<>'REJECTED'",Integer.class,user.organizationId(),defectId,formId,versionId,fieldKey);
         if(count!=null&&count>=rules.maxCount())throw new IllegalArgumentException("The maximum number of files for this field has been reached.");
-        UUID id=UUID.randomUUID();String key="evidence/"+user.organizationId()+"/"+defectId+"/"+id;String status="QUARANTINED";boolean stored=false;
+        UUID id=UUID.randomUUID();String key="evidence/"+user.organizationId()+"/"+defectId+"/"+id;String status="NOT_SCANNED";boolean stored=false;
         try {
             storage.put(key,bytes,detected);stored=true;
-            status=EvidenceScanStatus.from(scanner.scan(bytes));
             String digest=HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
             jdbc.update("INSERT INTO attachments_dtl(id,operator_id,defect_id,object_key,original_filename,detected_mime_type,size_bytes,sha256,uploaded_by,form_id,form_version_id,field_key,scan_status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",id,user.organizationId(),defectId,key,safeName,detected,bytes.length,digest,user.externalUserId(),formId,versionId,fieldKey,status);
             audit(user,id,defectId,"ATTACHMENT_UPLOADED",safeName,status);
-            if("REJECTED".equals(status)){storage.delete(key);}
             return new AttachmentView(id,defectId,null,fieldKey,safeName,detected,bytes.length,status,Instant.now());
         } catch(RuntimeException ex){if(stored)try{storage.delete(key);}catch(RuntimeException ignored){}throw ex;}
         catch(Exception ex){if(stored)try{storage.delete(key);}catch(RuntimeException ignored){}throw new IllegalStateException("Evidence upload could not be completed.");}
@@ -77,7 +73,7 @@ public class AttachmentService {
     public Download download(AuthenticatedUser user,boolean teamScoped,boolean reporterScoped,UUID attachmentId){
         var rows=jdbc.query("SELECT a.defect_id,a.object_key,a.original_filename,a.detected_mime_type,a.scan_status,a.size_bytes FROM attachments_dtl a JOIN defects_dtl d ON d.operator_id=a.operator_id AND d.id=a.defect_id WHERE a.operator_id=? AND a.id=? AND a.isactive=1 AND d.isactive=1 AND (?=false OR (d.status IN ('ACTION_ASSIGNED','IN_PROGRESS') AND ((d.assigned_team IS NULL AND d.assigned_user_id=?) OR "+teamMembershipPredicate("d.assigned_team")+"))) AND (?=false OR d.reported_by=?)",(rs,n)->new DownloadMeta(rs.getObject("defect_id",UUID.class),rs.getString("object_key"),rs.getString("original_filename"),rs.getString("detected_mime_type"),rs.getString("scan_status"),rs.getLong("size_bytes")),user.organizationId(),attachmentId,teamScoped,user.externalUserId(),user.organizationId(),user.externalUserId(),reporterScoped,user.externalUserId());
         if(rows.isEmpty())throw new ResponseStatusException(HttpStatus.NOT_FOUND,"Evidence was not found for this organization.");var meta=rows.get(0);
-        if(!"CLEAN".equals(meta.scanStatus()))throw new ResponseStatusException(HttpStatus.CONFLICT,"Evidence is quarantined or rejected and cannot be downloaded.");
+        if("REJECTED".equals(meta.scanStatus()))throw new ResponseStatusException(HttpStatus.CONFLICT,"This evidence is unavailable.");
         return new Download(attachmentId,meta.filename(),meta.mimeType(),storage.get(meta.objectKey()));
     }
     @Transactional public void deactivate(AuthenticatedUser user,boolean teamScoped,boolean reporterScoped,UUID attachmentId,String reason){

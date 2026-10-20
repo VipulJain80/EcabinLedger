@@ -22,6 +22,9 @@ public class MaintenanceActionService {
     private final JdbcTemplate jdbc;
     private final OperationalFormService forms;
     private final MaintenanceSlaPolicyService policies;
+    private com.ecabin.ledger.email.EmailOutboxService emailOutbox;
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setEmailOutbox(com.ecabin.ledger.email.EmailOutboxService emailOutbox){this.emailOutbox=emailOutbox;}
     public MaintenanceActionService(JdbcTemplate jdbc,OperationalFormService forms,MaintenanceSlaPolicyService policies){this.jdbc=jdbc;this.forms=forms;this.policies=policies;}
 
     public MaintenanceSlaEffective effectivePolicy(UUID tenant,UUID defectId,String actor,String statusKey){
@@ -45,16 +48,19 @@ public class MaintenanceActionService {
         boolean eligible=forms.publishedForDefect(tenant,defectId,FormPurpose.CORRECTIVE_ACTION).stream().anyMatch(candidate->candidate.id().equals(form.id())&&candidate.versionId().equals(form.versionId()));
         if(!eligible)throw new ResponseStatusException(HttpStatus.CONFLICT,"The selected maintenance form is not eligible for the case's current workflow state.");
         MaintenanceActionFormRules.requireValid(form.configuration());
+        forms.validateMaintenanceEvidence(tenant,defectId,form,statusKey,request.attachments());
         LocalDate date=policies.validateDate(tenant,statusKey,request.slaTargetDate());
         if(request.remark()!=null&&request.remark().codePointCount(0,request.remark().length())>2000)throw new IllegalArgumentException("Remarks must be 2,000 characters or fewer.");
         MaintenanceSlaPolicy policy=policies.requireConfigured(tenant,statusKey);
         ZoneId zone=ZoneId.of(policy.businessTimezone());
         Timestamp target=date==null?null:Timestamp.from(date.atStartOfDay(zone).toInstant());
         String nextAction=switch(statusKey){case "WORK_IN_PROGRESS"->"IN_PROGRESS";case "ON_HOLD"->"ON_HOLD";default->"COMPLETED";};
-        String nextDefect=statusKey.equals("CLOSE_SUBMITTED")?"AWAITING_VERIFICATION":"IN_PROGRESS";
+        // A Maintenance Close submission is the handoff to Closure Team review.
+        // Verification remains available for legacy workflows, but is not part of this path.
+        String nextDefect=statusKey.equals("CLOSE_SUBMITTED")?"APPROVAL_REQUIRED":"IN_PROGRESS";
         if(statusKey.equals("ON_HOLD")&&"ASSIGNED".equals(actionStatus))throw new ResponseStatusException(HttpStatus.CONFLICT,"Start the assigned action before placing it on hold.");
         if(statusKey.equals("CLOSE_SUBMITTED")&&!"IN_PROGRESS".equals(actionStatus))throw new ResponseStatusException(HttpStatus.CONFLICT,"Move the action to Work in Progress before submitting it for closure review.");
-        if(statusKey.equals("CLOSE_SUBMITTED"))DefectWorkflow.requireTransition(defectStatus,"AWAITING_VERIFICATION",request.remark()==null?"Maintenance submitted for closure review.":request.remark());
+        if(statusKey.equals("CLOSE_SUBMITTED"))DefectWorkflow.requireTransition(defectStatus,"APPROVAL_REQUIRED",request.remark()==null?"Maintenance submitted for closure review.":request.remark());
         LocalDate previousDate=null;
         Object previousDue=current.get("dueAt");
         if(previousDue instanceof Timestamp timestamp)previousDate=timestamp.toInstant().atZone(zone).toLocalDate();
@@ -66,10 +72,12 @@ public class MaintenanceActionService {
             int changed=jdbc.update("UPDATE defects_dtl SET status=?,updated_at=now(),version=version+1 WHERE operator_id=? AND id=? AND status=? AND isactive=1",nextDefect,tenant,defectId,defectStatus);
             if(changed!=1)throw new ResponseStatusException(HttpStatus.CONFLICT,"The case changed while saving. Refresh and try again.");
         }
-        jdbc.update("INSERT INTO defect_events_dtl(operator_id,defect_id,event_type,from_status,to_status,note,actor_id,entity_type,entity_id,previous_state,new_state,request_id) VALUES(?,?,?,?,?,?,?,'CORRECTIVE_ACTION',?,CAST(? AS jsonb),CAST(? AS jsonb),?)",
+        Map<String,Object> newState=new java.util.LinkedHashMap<>();newState.put("actionStatus",nextAction);newState.put("slaTargetDate",date==null?"":date.toString());newState.put("previousSlaTargetDate",previousDate==null?"":previousDate.toString());newState.put("remark",request.remark()==null?"":request.remark());newState.put("formId",form.id().toString());newState.put("formVersionId",form.versionId().toString());newState.put("maintenanceStatus",statusKey);newState.put("evidenceAttachments",request.attachments()==null?Map.of():request.attachments());
+        UUID eventId=jdbc.query("INSERT INTO defect_events_dtl(operator_id,defect_id,event_type,from_status,to_status,note,actor_id,entity_type,entity_id,previous_state,new_state,request_id) VALUES(?,?,?,?,?,?,?,'CORRECTIVE_ACTION',?,CAST(? AS jsonb),CAST(? AS jsonb),?) RETURNING id",(rs,n)->rs.getObject(1,UUID.class),
             tenant,defectId,statusKey.equals("CLOSE_SUBMITTED")?"ACTION_CLOSE_SUBMITTED":"MAINTENANCE_ACTION_UPDATED",defectStatus,nextDefect,request.remark()==null?"":request.remark().trim(),actor,actionId,
             new com.fasterxml.jackson.databind.ObjectMapper().valueToTree(Map.of("actionStatus",actionStatus,"slaTargetDate",previousDate==null?"":previousDate.toString())).toString(),
-            new com.fasterxml.jackson.databind.ObjectMapper().valueToTree(Map.of("actionStatus",nextAction,"slaTargetDate",date==null?"":date.toString(),"previousSlaTargetDate",previousDate==null?"":previousDate.toString(),"remark",request.remark()==null?"":request.remark(),"formId",form.id().toString(),"formVersionId",form.versionId().toString(),"maintenanceStatus",statusKey)).toString(),MDC.get("request_id"));
+            new com.fasterxml.jackson.databind.ObjectMapper().valueToTree(newState).toString(),MDC.get("request_id")).get(0);
+        if(statusKey.equals("CLOSE_SUBMITTED")&&emailOutbox!=null)emailOutbox.enqueue(tenant,defectId,eventId,actor,"ACTION_CLOSE_SUBMITTED",null,null);
         return new WorkflowRecord(actionId,nextDefect);
     }
 

@@ -2,18 +2,24 @@ package com.ecabin.ledger.api;
 
 import static com.ecabin.ledger.api.ApiModels.*;
 
+import java.sql.SQLException;
 import java.util.UUID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
 import org.springframework.web.server.ResponseStatusException;
 
 @RestControllerAdvice
 public class ApiExceptionHandler {
+    private static final Logger log = LoggerFactory.getLogger(ApiExceptionHandler.class);
+
     @ExceptionHandler(MethodArgumentNotValidException.class)
     ResponseEntity<ErrorBody> invalidRequest() {
         return ResponseEntity.badRequest().body(new ErrorBody(new ErrorDetail("validation_error", "Check the submitted fields.")));
@@ -29,6 +35,11 @@ public class ApiExceptionHandler {
         return ResponseEntity.status(HttpStatus.CONFLICT).body(new ErrorBody(new ErrorDetail("invalid_transition", ex.getMessage())));
     }
 
+    @ExceptionHandler(ReportApiException.class)
+    ResponseEntity<ErrorBody> reportFailure(ReportApiException ex) {
+        return ResponseEntity.status(ex.status()).body(new ErrorBody(new ErrorDetail(ex.code(), ex.getMessage())));
+    }
+
     @ExceptionHandler(ResponseStatusException.class)
     ResponseEntity<ErrorBody> status(ResponseStatusException ex) {
         var status = HttpStatus.valueOf(ex.getStatusCode().value());
@@ -37,7 +48,11 @@ public class ApiExceptionHandler {
     }
 
     @ExceptionHandler(DataIntegrityViolationException.class)
-    ResponseEntity<ErrorBody> conflict() {
+    ResponseEntity<ErrorBody> conflict(DataIntegrityViolationException ex, HttpServletRequest request) {
+        Throwable cause = ex.getMostSpecificCause();
+        String sqlState = cause instanceof SQLException sqlException ? sqlException.getSQLState() : "unavailable";
+        log.warn("Database integrity conflict on {} {} (SQL state: {}, cause type: {})",
+            request.getMethod(), request.getRequestURI(), sqlState, cause.getClass().getSimpleName());
         return ResponseEntity.status(HttpStatus.CONFLICT).body(new ErrorBody(new ErrorDetail("conflict", "This value conflicts with an existing record or is referenced by operational data.")));
     }
 

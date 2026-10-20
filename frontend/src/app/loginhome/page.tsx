@@ -3,12 +3,14 @@
 import { FormEvent, KeyboardEvent as ReactKeyboardEvent, useCallback, useEffect, useRef, useState } from "react";
 import ConfigurationPage from "../configuration";
 import FleetStatusPage from "@/common/fleet/FleetStatusPage";
+import DynamicReportViewer from "@/common/reports/DynamicReportViewer";
 import AircraftDefectListPage from "@/common/fleet/AircraftDefectListPage";
 import ReportDefectPage from "@/common/fleet/ReportDefectPage";
 import { FleetAircraft } from "@/common/fleet/FleetStatusPage";
 import MaintenanceWorkQueuePage from "@/common/fleet/MaintenanceWorkQueuePage";
 import ReviewerWorkQueuePage from "@/common/fleet/ReviewerWorkQueuePage";
 import GalleyReviewerDecisionForm from "@/common/fleet/GalleyReviewerDecisionForm";
+import DefectDetailsPage from "@/common/fleet/DefectDetailsPage";
 import DialogPortal from "@/common/dialogs/DialogPortal";
 import OperationalFormRenderer from "@/common/forms/OperationalFormRenderer";
 import { formPurposeForStatus } from "@/common/forms/formResolution";
@@ -17,26 +19,40 @@ import NotificationBell from "@/common/notifications/NotificationBell";
 import ApiRateLimitsPage from "@/common/configuration/ApiRateLimitsPage";
 import UserLoginMonitoringPage from "@/common/configuration/UserLoginMonitoringPage";
 import { alert, responseErrorMessage } from "@/common/alerts";
-import { canAdvanceWorkflow, hasPermission } from "@/common/rbac/permissions";
+import { hasPermission } from "@/common/rbac/permissions";
 import { applicationBasePath, clearLocalSession, getApplicationAccessToken, getLocalSession } from "@/common/auth/localSession";
+import { formatDateTime } from "@/common/dateTime";
+import { useDefectWorkflowStatuses, useDefectSeverities, workflowStatusLabel, WorkflowStatusBadge, SeverityBadge } from "@/common/workflow/workflowStatuses";
 
 type Defect = {
   id: string; reference: string; tailNumber: string; aircraftType: string; location: string; category: string; zone: string;
   areaId: string;
-  title: string; description: string; severity: string; severityName?: string; status: string; reportedBy: string; assignedTo: string | null; assignedTeam?: string | null; routingAttention?: string | null;
-  dueAt: string | null; activeActionId: string | null; conditionName?: string | null; reportedAt: string; updatedAt: string;
+  title: string; description: string; component: string; severity: string; severityName?: string; status: string; reportedBy: string; assignedTo: string | null; assignedTeam?: string | null; routingAttention?: string | null;
+  dueAt: string | null; activeActionId: string | null; conditionName?: string | null; reportedAt: string; updatedAt: string; closedAt?: string | null;
 };
 type Page = { items: Defect[]; nextCursor: string | null };
 type Summary = { openDefects: number; criticalDefects: number; reportedToday: number; closedThisMonth: number };
 type Identity = { organizationName: string; displayName: string; role: string; permissions: string[] };
 type NavigationItem = { key: string; label: string; icon: string; section: string; children: NavigationItem[] };
-type SearchFilters = { query: string; aircraftType: string; fromDate: string; toDate: string; mine: boolean };
+type SearchFilters = { query: string; fromDate: string; toDate: string };
+function defaultRegisterDateRange(): Pick<SearchFilters, "fromDate" | "toDate"> {
+  const parts = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date());
+  const value = (type: Intl.DateTimeFormatPartTypes) => parts.find(part => part.type === type)?.value ?? "";
+  const today = `${value("year")}-${value("month")}-${value("day")}`;
+  const start = new Date(`${today}T12:00:00Z`);
+  start.setUTCDate(start.getUTCDate() - 7);
+  return { fromDate: start.toISOString().slice(0, 10), toDate: today };
+}
+function registerDateRangeLabel(filters: SearchFilters): string {
+  const defaults = defaultRegisterDateRange();
+  if (filters.fromDate === defaults.fromDate && filters.toDate === defaults.toDate) return "Last 7 days";
+  return filters.fromDate || filters.toDate ? "Custom dates" : "All dates";
+}
 type MasterOption = { id?: string; code: string; name: string; areaId?: string };
 type AuditEvent = { id: string; eventType: string; fromStatus: string | null; toStatus: string | null; note: string; evidenceReference: string | null; inspectionOutcome: string | null; actorId: string; occurredAt: string };
 type SelectedReportForm = { id: string; versionId: string; versionNumber: number; name: string; configuration: { fields: ReportField[] } };
 const API = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8080/api/v1";
 const areas = ["ALL AREAS", "CABIN", "GALLEY", "LAVATORY", "ATTENDANT_SEAT"];
-const statuses = ["ALL STATUS", "REPORTED", "UNDER_REVIEW", "INSPECTION_REQUIRED", "INSPECTION_IN_PROGRESS", "INSPECTION_COMPLETE", "ACTION_ASSIGNED", "IN_PROGRESS", "AWAITING_VERIFICATION", "VERIFIED", "APPROVAL_REQUIRED", "CLOSED", "REOPENED", "REJECTED", "CANCELLED"];
 const human = (value: string) => value.replaceAll("_", " ").toLowerCase().replace(/\b\w/g, (char) => char.toUpperCase());
 
 async function apiFetch(path: string, init: RequestInit = {}) {
@@ -59,6 +75,9 @@ async function fleetStatusFetch(path: string, init: RequestInit = {}) {
 }
 
 export default function Home() {
+  const workflowStatusesQuery = useDefectWorkflowStatuses(apiFetch);
+  const severityDefinitions = useDefectSeverities(apiFetch).data || [];
+  const workflowStatuses = workflowStatusesQuery.data?.items || [];
   const [items, setItems] = useState<Defect[]>([]);
   const [filter, setFilter] = useState("ALL STATUS");
   const [area, setArea] = useState("ALL AREAS");
@@ -68,8 +87,11 @@ export default function Home() {
   const [saving, setSaving] = useState(false);
   const reportIdempotencyKey = useRef<string | null>(null);
   const [selected, setSelected] = useState<Defect | null>(null);
+  const [openDefectId, setOpenDefectId] = useState<string | null>(null);
+  const defectReturnScrollY = useRef(0);
   const [selectedAircraftId, setSelectedAircraftId] = useState("");
   const [selectedAircraft, setSelectedAircraft] = useState<FleetAircraft | null>(null);
+  const reportModalReturnContext = useRef<{ aircraftId: string; aircraft: FleetAircraft | null } | null>(null);
   const [selectedFormForReport, setSelectedFormForReport] = useState<SelectedReportForm | null>(null);
   const [reportFormAnswers, setReportFormAnswers] = useState<Record<string, unknown>>({});
   const [reportFormFiles, setReportFormFiles] = useState<Record<string, File[]>>({});
@@ -80,6 +102,7 @@ export default function Home() {
   const [initialFormForDefect, setInitialFormForDefect] = useState<{ defectId: string; formId: string; versionId: string; answers: Record<string, unknown>; files?: Record<string, File[]> } | null>(null);
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [summary, setSummary] = useState<Summary>({ openDefects: 0, criticalDefects: 0, reportedToday: 0, closedThisMonth: 0 });
+  const [summaryAvailable, setSummaryAvailable] = useState(false);
   const [identity, setIdentity] = useState<Identity | null>(null);
   const [authorizationError, setAuthorizationError] = useState("");
   const routeAccessChecked = useRef(false);
@@ -91,14 +114,11 @@ export default function Home() {
   const [notificationOpen, setNotificationOpen] = useState(false);
   const [configurationKey, setConfigurationKey] = useState("");
   const [currentNavKey, setCurrentNavKey] = useState("home");
-  const [searchDraft, setSearchDraft] = useState<SearchFilters>({ query: "", aircraftType: "", fromDate: "", toDate: "", mine: true });
-  const [searchFilters, setSearchFilters] = useState<SearchFilters>({ query: "", aircraftType: "", fromDate: "", toDate: "", mine: true });
-  const [searchBy, setSearchBy] = useState("Defect ID");
-  const [appliedSearchBy, setAppliedSearchBy] = useState("DEFECT_ID");
-  const [searchExecuted, setSearchExecuted] = useState(false);
+  const [searchDraft, setSearchDraft] = useState<SearchFilters>(() => ({ query: "", ...defaultRegisterDateRange() }));
+  const [searchFilters, setSearchFilters] = useState<SearchFilters>(() => ({ query: "", ...defaultRegisterDateRange() }));
+  const [searchExecuted, setSearchExecuted] = useState(true);
   const [areaMasterOptions, setAreaMasterOptions] = useState<MasterOption[]>([]);
   const [selectedAreaId, setSelectedAreaId] = useState("");
-  const [aircraftTypes, setAircraftTypes] = useState<string[]>([]);
   const [localSessionEmail, setLocalSessionEmail] = useState<string | null>(() => getLocalSession()?.email || null);
   const [activeSection, setActiveSection] = useState("defects");
   const currentPageLabel = navigation.flatMap((item) => [item, ...item.children]).find((item) => item.key === currentNavKey)?.label || (currentNavKey === "home" ? "Defect Summary" : "Defect register");
@@ -144,22 +164,20 @@ export default function Home() {
     if (filter !== "ALL STATUS") params.set("status", filter);
     if (area !== "ALL AREAS") params.set("location", area);
     if (searchFilters.query.trim()) params.set("q", searchFilters.query.trim());
-    if (searchFilters.query.trim()) params.set("searchBy", appliedSearchBy);
-    if (searchFilters.aircraftType) params.set("aircraftType", searchFilters.aircraftType);
-    if (searchFilters.fromDate) params.set("fromDate", `${searchFilters.fromDate}T00:00:00Z`);
-    if (searchFilters.toDate) params.set("toDate", `${searchFilters.toDate}T00:00:00Z`);
-    if (searchFilters.mine) params.set("mine", "true");
+    if (searchFilters.query.trim()) params.set("searchBy", "ALL");
+    if (searchFilters.fromDate) params.set("fromDate", `${searchFilters.fromDate}T00:00:00+05:30`);
+    if (searchFilters.toDate) params.set("toDate", `${searchFilters.toDate}T00:00:00+05:30`);
     if (append && after) params.set("cursor", after);
     try {
-      const [response, summaryResponse, identityResponse, navigationResponse] = await Promise.all([apiFetch(`${API}/defects?${params}`), apiFetch(`${API}/dashboard/summary`), apiFetch(`${API}/me`), apiFetch(`${API}/navigation`)]);
-      const responses = [response, summaryResponse, identityResponse, navigationResponse];
-      const rejectedResponse = responses.find((candidate) => candidate.status === 401 || candidate.status === 403);
+      const [identityResponse, navigationResponse] = await Promise.all([apiFetch(`${API}/me`), apiFetch(`${API}/navigation`)]);
+      const rejectedResponse = [identityResponse, navigationResponse].find((candidate) => candidate.status === 401 || candidate.status === 403);
       if (rejectedResponse) {
         const expired = rejectedResponse.status === 401;
         setIdentity(null);
         setNavigation([]);
         setItems([]);
         setSummary({ openDefects: 0, criticalDefects: 0, reportedToday: 0, closedThisMonth: 0 });
+        setSummaryAvailable(false);
         setSelected(null);
         setEvents([]);
         routeAccessChecked.current = false;
@@ -173,31 +191,67 @@ export default function Home() {
           ? "Your session has expired. Sign in through your organization’s enterprise access gateway."
           : "Your account is not authorized for this organization or application page. Contact your organization administrator.");
       }
-      if (!response.ok || !summaryResponse.ok || !identityResponse.ok || !navigationResponse.ok) throw new Error("We couldn’t load the defect register. Try again.");
-      const [data, summaryData, identityData, navigationData]: [Page, Summary, Identity, NavigationItem[]] = await Promise.all([response.json(), summaryResponse.json(), identityResponse.json(), navigationResponse.ok ? navigationResponse.json() : Promise.resolve([])]);
-      setSummary(summaryData);
+      const failedRequest = [
+        { label: "Account identity", response: identityResponse },
+        { label: "Navigation", response: navigationResponse },
+      ].find((item) => !item.response.ok);
+      if (failedRequest) throw new Error(await responseErrorMessage(failedRequest.response, `Could not load ${failedRequest.label} (HTTP ${failedRequest.response.status}).`));
+      const [identityData, navigationData]: [Identity, NavigationItem[]] = await Promise.all([identityResponse.json(), navigationResponse.json()]);
       setIdentity(identityData);
       setNavigation(navigationData);
       setAuthorizationError("");
+      const hasDefectRead = identityData.permissions.includes("VIEW") || identityData.permissions.includes("DEFECT_VIEW_ALL");
+      const hasDefectViewAll = identityData.permissions.includes("DEFECT_VIEW_ALL");
+      const hasReportView = identityData.permissions.includes("REPORT_VIEW");
+      const canOpenReports = hasReportView || identityData.permissions.includes("ADMINISTER_ORGANIZATION");
       if (!routeAccessChecked.current) {
         const accessibleItems = navigationData.flatMap((item) => [item, ...item.children]);
         const accessibleKeys = new Set(accessibleItems.map((item) => item.key));
-        const fallback = accessibleKeys.has("home") ? "home" : accessibleItems.find((item) => item.children.length === 0)?.key;
+        // Defect Summary is the post-login landing page. The register gives the
+        // same defect-read capability, so keep users on the summary even when
+        // a tenant's navigation configuration omitted its Home entry.
+        const fallback = accessibleKeys.has("home") || accessibleKeys.has("defects")
+          ? "home"
+          : canOpenReports && accessibleKeys.has("reports") ? "reports"
+          : accessibleItems.find((item) => item.children.length === 0)?.key;
         if (fallback) { setActiveSection("defects"); setCurrentNavKey(fallback); }
         else setAuthorizationError("Your account does not have access to an application page. Contact your organization administrator.");
         routeAccessChecked.current = true;
       }
-      const referenceResponse = await apiFetch(`${API}/reference-data`);
-      if (referenceResponse.ok) {
-        const referenceData: { areas: MasterOption[]; aircraftTypes: string[] } = await referenceResponse.json();
-        setAreaMasterOptions(referenceData.areas);
-        setAircraftTypes(referenceData.aircraftTypes);
+      if (hasDefectRead) {
+        const response = await apiFetch(`${API}/defects?${params}`);
+        if (response.status === 401) throw new Error("Your session has expired. Sign in again.");
+        if (!response.ok) throw new Error(await responseErrorMessage(response, `Could not load the defect register (HTTP ${response.status}).`));
+        const data = await response.json() as Page;
+        setItems((previous) => append ? [...previous, ...data.items] : data.items);
+        setCursor(data.nextCursor);
+      } else {
+        setItems([]);
+        setCursor(null);
       }
-      setItems((previous) => append ? [...previous, ...data.items] : data.items);
-      setCursor(data.nextCursor);
+      if (hasDefectRead && (hasReportView || hasDefectViewAll)) {
+        const summaryResponse = await apiFetch(`${API}/dashboard/summary`);
+        if (summaryResponse.ok) {
+          setSummary(await summaryResponse.json() as Summary);
+          setSummaryAvailable(true);
+        } else {
+          setSummaryAvailable(false);
+          setSummary({ openDefects: 0, criticalDefects: 0, reportedToday: 0, closedThisMonth: 0 });
+        }
+      } else {
+        setSummaryAvailable(false);
+        setSummary({ openDefects: 0, criticalDefects: 0, reportedToday: 0, closedThisMonth: 0 });
+      }
+      if (hasDefectRead || identityData.permissions.some(permission => ["REPORT", "REVIEW", "INSPECT", "PERFORM_ACTION", "VERIFY", "APPROVE", "CLOSE", "REOPEN"].includes(permission))) {
+        const referenceResponse = await apiFetch(`${API}/reference-data`);
+        if (referenceResponse.ok) {
+        const referenceData: { areas: MasterOption[] } = await referenceResponse.json();
+        setAreaMasterOptions(referenceData.areas);
+        }
+      }
     } catch (error) { const message = error instanceof Error ? error.message : "The service is unavailable."; setAuthorizationError(message); await alert.error(message); }
     finally { setLoading(false); }
-  }, [area, appliedSearchBy, filter, searchFilters, setSelected]);
+  }, [area, filter, searchFilters, setSelected]);
 
   useEffect(() => {
     let cancelled = false;
@@ -205,12 +259,24 @@ export default function Home() {
     return () => { cancelled = true; };
   }, [load]);
 
+  useEffect(() => {
+    if (searchDraft.query === searchFilters.query) return;
+    const timer = window.setTimeout(() => {
+      setSearchFilters((current) => ({ ...current, query: searchDraft.query }));
+      setCursor(null);
+      setSearchExecuted(true);
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [searchDraft.query, searchFilters.query]);
+
   async function confirmLogout() {
     if (await alert.confirm({ title: "Sign out?", text: `You will leave the ${identity?.organizationName || "current"} workspace.`, confirmText: "Sign out" })) window.location.replace(`${applicationBasePath}/logout`);
   }
 
   function openNavigation(item: NavigationItem, parentKey?: string) {
     setOpenNavigationMenu(null);
+    setOpenDefectId(null);
+    reportModalReturnContext.current = null;
     if (item.key === "home") leaveAircraft();
     if(item.key==="report-defect"){setSelectedAircraftId("");setSelectedAircraft(null);setSelectedAreaId("");setSelectedFormForReport(null);setReportFormAnswers({});setReportFormFiles({});setReportFormReady(false);setDialog(false);}
     if (item.key === "configuration" || parentKey === "configuration") {
@@ -287,25 +353,21 @@ export default function Home() {
         throw new Error(await responseErrorMessage(response, "Could not create the defect. Check your access and the details."));
       }
       const created = await response.json() as Defect;
-      reportIdempotencyKey.current = null; setDialog(false); formElement.reset(); setFilter("ALL STATUS"); setArea("ALL AREAS");
+      reportIdempotencyKey.current = null; formElement.reset(); setFilter("ALL STATUS"); setArea("ALL AREAS"); closeReportDialog();
+      window.dispatchEvent(new Event("aircraft-defect-list-refresh"));
       await load();
-      await alert.success(`Defect ${created.reference} reported successfully. Complete the published area form to add the report details.`);
-      await openDetail(created, selectedFormForReport || undefined, reportFormAnswers, reportFormFiles);
-      setSelectedFormForReport(null);
-      setReportFormAnswers({});
-      setReportFormFiles({});
+      await alert.success(`Defect ${created.reference} reported successfully.`);
     } catch (error) { await alert.error(error instanceof Error ? error.message : "Could not create the defect."); }
     finally { setSaving(false); }
   }
 
-  function openDefectForm() {
-    reportIdempotencyKey.current = null;
-    setSelectedAreaId(""); setSelectedFormForReport(null); setReportFormAnswers({}); setReportFormFiles({}); setReportFormReady(false);
-    setSelectedAircraft(null);setSelectedAircraftId("");setDialog(false);setActiveSection("defects");setCurrentNavKey("report-defect");
+  function navigateToDefect(defectId: string) {
+    void openQueueDefect(defectId);
   }
 
   function selectAircraft(aircraft: FleetAircraft) {
     reportIdempotencyKey.current = null;
+    reportModalReturnContext.current = null;
     setSelectedAreaId(""); setSelectedFormForReport(null); setReportFormAnswers({}); setReportFormFiles({}); setReportFormReady(false); setInitialFormForDefect(null); setDialog(false);
     setSelectedAircraft(aircraft);
     setSelectedAircraftId(aircraft.id);
@@ -313,55 +375,29 @@ export default function Home() {
 
   function leaveAircraft() {
     reportIdempotencyKey.current = null;
+    reportModalReturnContext.current = null;
     setSelectedAreaId(""); setSelectedFormForReport(null); setReportFormAnswers({}); setReportFormReady(false); setInitialFormForDefect(null); setDialog(false);
     setSelectedAircraftId(""); setSelectedAircraft(null);
   }
 
   function startAircraftDefect(aircraft: FleetAircraft, areaId: string, form: SelectedReportForm) {
     reportIdempotencyKey.current = null;
-    // Browsing context is not a report selection. The reporter must choose the aircraft again.
-    void aircraft; setSelectedAircraft(null); setSelectedAircraftId(""); setSelectedAreaId(areaId);
+    // Keep the originating aircraft page mounted beneath the modal, but require a fresh aircraft choice for this report.
+    reportModalReturnContext.current = { aircraftId: selectedAircraftId, aircraft: selectedAircraft };
+    void aircraft; setSelectedAircraft(null); setSelectedAreaId(areaId);
     setSelectedFormForReport(form); setReportFormAnswers({}); setReportFormFiles({}); setReportFormReady(false); setDialog(true);
   }
 
-  async function advance(defect: Defect) {
-    try {
-      let response: Response;
-      const json = { "content-type": "application/json" };
-      if (["REPORTED", "UNDER_REVIEW", "INSPECTION_REQUIRED", "VERIFIED", "CLOSED"].includes(defect.status)) {
-        const next: Record<string, string> = { REPORTED: "UNDER_REVIEW", UNDER_REVIEW: "INSPECTION_REQUIRED", INSPECTION_REQUIRED: "INSPECTION_IN_PROGRESS", VERIFIED: "APPROVAL_REQUIRED", CLOSED: "REOPENED" };
-        const status = next[defect.status];
-        const note = await alert.prompt({ title: `Add an audit reason for ${human(status)}`, placeholder: "Reason", required: true }); if (!note) return;
-        response = await apiFetch(`${API}/defects/${defect.id}/transitions`, { method: "POST", headers: json, body: JSON.stringify({ status, note }) });
-      } else if (defect.status === "INSPECTION_IN_PROGRESS") {
-        const result = (await alert.prompt({ title: "Inspection result", text: "Enter PASS, FAIL, CONDITIONAL or REQUIRES_FOLLOW_UP", initialValue: "PASS" }))?.toUpperCase(); if (!result) return;
-        const findings = await alert.prompt({ title: "Record inspection findings", required: true }); if (!findings) return;
-        response = await apiFetch(`${API}/defects/${defect.id}/inspections`, { method: "POST", headers: json, body: JSON.stringify({ result, findings, notes: "" }) });
-      } else if (defect.status === "INSPECTION_COMPLETE") {
-        const description = await alert.prompt({ title: "Describe the corrective action", required: true }); if (!description) return;
-        const assignedUserId = await alert.prompt({ title: "Assign to enterprise user ID", text: "Leave blank to assign a team.", required: false });
-        const assignedTeam = assignedUserId ? "" : await alert.prompt({ title: "Responsible maintenance team", required: true });
-        if (!assignedUserId && !assignedTeam) return;
-        response = await apiFetch(`${API}/defects/${defect.id}/actions`, { method: "POST", headers: json, body: JSON.stringify({ description, assignedUserId, assignedTeam, priority: defect.severity, dueAt: defect.dueAt }) });
-      } else if (defect.status === "ACTION_ASSIGNED" && defect.activeActionId) {
-        response = await apiFetch(`${API}/defects/${defect.id}/actions/${defect.activeActionId}/start`, { method: "POST" });
-      } else if (defect.status === "IN_PROGRESS" && defect.activeActionId) {
-        const completionNotes = await alert.prompt({ title: "Record completed corrective action", required: true }); if (!completionNotes) return;
-        response = await apiFetch(`${API}/defects/${defect.id}/actions/${defect.activeActionId}/complete`, { method: "POST", headers: json, body: JSON.stringify({ completionNotes }) });
-      } else if (defect.status === "AWAITING_VERIFICATION") {
-        const result = (await alert.prompt({ title: "Verification result", text: "Enter PASS or FAIL", initialValue: "PASS" }))?.toUpperCase(); if (!result) return;
-        const notes = await alert.prompt({ title: "Record verification notes", required: true }); if (!notes) return;
-        const evidenceReference = await alert.prompt({ title: "Verification evidence reference", required: true }); if (!evidenceReference) return;
-        response = await apiFetch(`${API}/defects/${defect.id}/verifications`, { method: "POST", headers: json, body: JSON.stringify({ result, notes, evidenceReference }) });
-      } else if (defect.status === "APPROVAL_REQUIRED") {
-        const reason = await alert.prompt({ title: "Approval reason", required: true }); if (!reason) return;
-        const evidenceReference = await alert.prompt({ title: "Closure evidence reference", required: true }); if (!evidenceReference) return;
-        response = await apiFetch(`${API}/defects/${defect.id}/approvals`, { method: "POST", headers: json, body: JSON.stringify({ decision: "APPROVED", reason, evidenceReference }) });
-      } else return;
-      if (!response.ok) throw new Error(await responseErrorMessage(response, "Could not update defect status."));
-      await load();
-      await alert.success("Defect workflow updated.");
-    } catch (error) { await alert.error(error instanceof Error ? error.message : "Could not update defect status."); }
+  function closeReportDialog() {
+    const returnContext = reportModalReturnContext.current;
+    reportModalReturnContext.current = null;
+    setDialog(false);
+    setSelectedFormForReport(null);
+    setReportFormAnswers({});
+    setReportFormFiles({});
+    setReportFormReady(false);
+    setSelectedAircraft(returnContext?.aircraft ?? null);
+    setSelectedAircraftId(returnContext?.aircraftId ?? "");
   }
 
   async function openDetail(defect: Defect, form?: SelectedReportForm, answers: Record<string, unknown> = {}, files?:Record<string,File[]>) {
@@ -374,11 +410,8 @@ export default function Home() {
   }
 
   async function openQueueDefect(defectId: string) {
-    try {
-      const response = await apiFetch(`${API}/defects/${encodeURIComponent(defectId)}`);
-      if (!response.ok) throw new Error(await responseErrorMessage(response, "This defect is no longer assigned to one of your active teams."));
-      await openDetail(await response.json() as Defect);
-    } catch (error) { await alert.error(error instanceof Error ? error.message : "Could not open this defect."); }
+    defectReturnScrollY.current = window.scrollY;
+    setOpenDefectId(defectId);
   }
 
   async function reassignDefect(defect: Defect) {
@@ -397,23 +430,6 @@ export default function Home() {
     } catch (error) { await alert.error(error instanceof Error ? error.message : "Could not reassign this corrective action."); }
   }
 
-  async function reassignReviewer(defect: Defect) {
-    try {
-      const teamsResponse=await apiFetch(`${API}/reviewer-teams`);
-      if(!teamsResponse.ok)throw new Error(await responseErrorMessage(teamsResponse,"Could not load eligible Reviewer teams."));
-      const teams=await teamsResponse.json() as Array<{id:string;name:string;eligibleMembers:number}>;
-      if(!teams.length)throw new Error("No active Reviewer team has an active member with REVIEW permission.");
-      const teamName=await alert.prompt({title:"Route defect to Reviewer team",text:`Eligible teams: ${teams.map(team=>`${team.name} (${team.eligibleMembers})`).join(", ")}`,placeholder:"Reviewer team name",required:true});
-      if(!teamName)return;
-      const team=teams.find(item=>item.name.toLocaleLowerCase()===teamName.trim().toLocaleLowerCase());
-      if(!team)throw new Error("Choose one of the eligible Reviewer teams listed in the prompt.");
-      const reason=await alert.prompt({title:"Reviewer routing reason",required:true});if(!reason)return;
-      const response=await apiFetch(`${API}/defects/${defect.id}/review-routing`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({teamId:team.id,reason})});
-      if(!response.ok)throw new Error(await responseErrorMessage(response,"Could not update Reviewer routing."));
-      const updated=await response.json() as Defect;setSelected(updated);await openDetail(updated);await load();await alert.success(`Defect routed to ${team.name}.`);
-    } catch(error){await alert.error(error instanceof Error?error.message:"Could not update Reviewer routing.");}
-  }
-
   async function refreshAfterReviewerDecision(defect:Defect,status:string){
     const response=await apiFetch(`${API}/defects/${defect.id}`);
     if(!response.ok)throw new Error(await responseErrorMessage(response,"Decision recorded, but the updated case could not be refreshed."));
@@ -430,13 +446,13 @@ export default function Home() {
     await alert.success(status==="CLOSED"?"Closure accepted. The defect is now closed.":"Closure declined. The defect has returned to its assigned Maintenance Team.");
   }
 
-  if (!identity) return <main className="authorization-gate" role={loading ? "status" : "alert"} aria-live="polite">
-    <section><span className="eyebrow">ECABIN LEDGER ACCESS</span><h1>{loading ? "Verifying access…" : "Access unavailable"}</h1><p>{loading ? "Checking your enterprise identity and organization permissions." : authorizationError || "We could not verify your application access."}</p>{!loading && <button type="button" className="button-primary" onClick={() => void load()}>Try again</button>}</section>
+  if (!identity) return <main className="grid min-h-[100svh] place-items-center bg-[#eaf1ff] p-6 font-[var(--sans)] text-[#000000]" role={loading ? "status" : "alert"} aria-live="polite">
+    <section className="w-[min(520px,100%)] rounded-2xl border border-[#e1e8f2] bg-white p-8 text-center shadow-[0_14px_32px_#263d5a1c]"><span className="eyebrow">ECABIN LEDGER ACCESS</span><h1 className="my-[10px] text-2xl text-[#000000]">{loading ? "Verifying access…" : "Access unavailable"}</h1><p className="mb-5 mt-0 leading-[1.6] text-[#000000]">{loading ? "Checking your enterprise identity and organization permissions." : authorizationError || "We could not verify your application access."}</p>{!loading && <button type="button" className="button-primary" onClick={() => void load()}>Try again</button>}</section>
   </main>;
 
-  return <main className="shell app-shell">
+  return <main className="shell app-shell block min-h-screen w-full max-w-full overflow-x-clip bg-[#eaf1ff]">
     <div className="app-shell-header">
-      <header className="app-topbar">
+      <header className="app-topbar sticky top-0 z-[5] flex min-h-[70px] items-center gap-[clamp(14px,2vw,38px)] px-[clamp(18px,2.4vw,52px)]">
         <button type="button" className="app-logo app-logo-button" onClick={() => openNavigation({key:"home",label:"Defect Summary",icon:"⌂",section:"home",children:[]})} aria-label="eCabin Ledger Defect Summary"><span>e</span><b>eCabin Ledger</b></button>
         <div className="app-organization"><small>ORGANIZATION</small><strong>{identity?.organizationName || "Loading…"}</strong></div>
         <div className="app-profile" ref={profileRef}>
@@ -447,49 +463,48 @@ export default function Home() {
           <button className="app-signout" aria-label="Sign out" onClick={() => void confirmLogout()} title="Sign out"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M10 17l5-5-5-5M15 12H3"/><path d="M12 3h6a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-6"/></svg></button>
         </div>
       </header>
-      <nav ref={navigationRef} className="app-navigation" aria-label="Main navigation" onKeyDown={handleNavigationKeyDown}>
-        <div className="app-navigation-items">{navigation.map(renderNavigationItem)}</div>
+      <nav ref={navigationRef} className="app-navigation flex min-w-0 flex-1 flex-wrap items-stretch gap-[5px] self-stretch overflow-visible" aria-label="Main navigation" onKeyDown={handleNavigationKeyDown}>
+        <div className="app-navigation-items mx-auto flex min-h-[54px] w-max max-w-full items-center gap-[clamp(4px,.7vw,12px)]">{navigation.map(renderNavigationItem)}</div>
       </nav>
     </div>
-    <section className="workspace" id="home">
-      {currentNavKey === "user-login-monitoring" && hasPermission(identity?.permissions, "ADMINISTER_ORGANIZATION") ? <UserLoginMonitoringPage request={configurationFetch} /> : currentNavKey === "api-rate-limits" && hasPermission(identity?.permissions, "ADMINISTER_ORGANIZATION") ? <ApiRateLimitsPage request={configurationFetch} /> : activeSection === "configuration" && hasPermission(identity?.permissions, "ADMINISTER_ORGANIZATION") ? <ConfigurationPage request={configurationFetch} initialKey={configurationKey} /> : currentNavKey === "report-defect" && hasPermission(identity?.permissions,"REPORT") ? <ReportDefectPage request={operationalFormFetch} organizationCacheKey={identity?.organizationName||""} onCreated={()=>{void load();}} onOpenDefect={id=>{void openQueueDefect(id);}} /> : currentNavKey === "home" && selectedAircraftId ? <AircraftDefectListPage request={fleetStatusFetch} aircraftId={selectedAircraftId} organizationCacheKey={identity.organizationName} onBack={leaveAircraft} onLogDefect={startAircraftDefect} onOpenDefect={id => { void openQueueDefect(id); }} canReport={hasPermission(identity?.permissions, "REPORT")} /> : currentNavKey === "home" ? <FleetStatusPage request={fleetStatusFetch} onSelectAircraft={selectAircraft} /> : currentNavKey === "corrective-actions" && hasPermission(identity?.permissions, "PERFORM_ACTION") ? <MaintenanceWorkQueuePage request={fleetStatusFetch} onOpen={(defectId) => { void openQueueDefect(defectId); }} /> : currentNavKey === "review-queue" && (hasPermission(identity?.permissions, "REVIEW") || hasPermission(identity?.permissions, "APPROVE") || hasPermission(identity?.permissions, "ADMINISTER_ORGANIZATION")) ? <ReviewerWorkQueuePage request={fleetStatusFetch} onOpen={(defectId) => { void openQueueDefect(defectId); }} /> : <div className="content" id="defects">
-        <div className="heading"><div><div className="eyebrow"><span></span> CABIN OPERATIONS <em>·</em> FLEET OVERVIEW</div><h1>{currentPageLabel}</h1><p>Search and track cabin findings from initial report through verified closure.</p></div>{hasPermission(identity?.permissions, "REPORT") && <button className="button-primary" onClick={openDefectForm}><span>＋</span> Log a defect</button>}</div>
-        <form className="operational-search" onSubmit={(event) => { event.preventDefault(); setSearchFilters({ ...searchDraft }); setAppliedSearchBy(({ "Defect ID": "DEFECT_ID", "Aircraft registration": "AIRCRAFT_REGISTRATION", Category: "CATEGORY", Component: "COMPONENT", "Assigned person": "ASSIGNED_USER" })[searchBy] || "DEFECT_ID"); setCursor(null); setSearchExecuted(true); }}>
-          <label>Search by<div className="search-control-row"><select value={searchBy} onChange={(event) => setSearchBy(event.target.value)} aria-label="Search field"><option>Defect ID</option><option>Aircraft registration</option><option>Category</option><option>Component</option><option>Assigned person</option></select><input value={searchDraft.query} onChange={(event) => setSearchDraft({ ...searchDraft, query: event.target.value })} placeholder={`Enter ${searchBy.toLowerCase()}`} /></div></label>
-          <label>Aircraft type<select value={searchDraft.aircraftType} onChange={(event) => setSearchDraft({ ...searchDraft, aircraftType: event.target.value })}><option value="">All types</option>{aircraftTypes.map((type) => <option key={type} value={type}>{type}</option>)}</select></label>
-          <label>From date<input type="date" value={searchDraft.fromDate} onChange={(event) => setSearchDraft({ ...searchDraft, fromDate: event.target.value })} /></label>
-          <label>To date<input type="date" value={searchDraft.toDate} onChange={(event) => setSearchDraft({ ...searchDraft, toDate: event.target.value })} /></label>
-          <label className="my-cases">My cases<input type="checkbox" checked={searchDraft.mine} onChange={(event) => setSearchDraft({ ...searchDraft, mine: event.target.checked })} /></label>
-          <div className="search-actions"><button className="button-primary" type="submit"><span>⌕</span> Search</button><button type="button" className="button-secondary" onClick={() => { const cleared = { query: "", aircraftType: "", fromDate: "", toDate: "", mine: false }; setSearchDraft(cleared); setSearchFilters(cleared); setSearchBy("Defect ID"); setAppliedSearchBy("DEFECT_ID"); setFilter("ALL STATUS"); setArea("ALL AREAS"); setCursor(null); setSearchExecuted(false); }}>× &nbsp; Clear all</button></div>
-        </form>
-        {currentNavKey === "reports" && <section className="metrics" aria-label="Defect summary">
+    <section className="workspace m-0 min-h-[calc(100vh-70px)] w-full min-w-0" id="home">
+      {openDefectId ? <DefectDetailsPage defectId={openDefectId} onBack={()=>{setOpenDefectId(null);requestAnimationFrame(()=>window.scrollTo({top:defectReturnScrollY.current,behavior:"instant"}));}} /> : currentNavKey === "user-login-monitoring" && hasPermission(identity?.permissions, "ADMINISTER_ORGANIZATION") ? <UserLoginMonitoringPage request={configurationFetch} /> : currentNavKey === "api-rate-limits" && hasPermission(identity?.permissions, "ADMINISTER_ORGANIZATION") ? <ApiRateLimitsPage request={configurationFetch} /> : activeSection === "configuration" && hasPermission(identity?.permissions, "ADMINISTER_ORGANIZATION") ? <ConfigurationPage request={configurationFetch} initialKey={configurationKey} /> : currentNavKey === "report-defect" && hasPermission(identity?.permissions,"REPORT") ? <ReportDefectPage request={operationalFormFetch} organizationCacheKey={identity?.organizationName||""} onCreated={()=>{void load();}} onOpenDefect={id=>{void openQueueDefect(id);}} /> : currentNavKey === "home" && selectedAircraftId ? <AircraftDefectListPage request={fleetStatusFetch} aircraftId={selectedAircraftId} organizationCacheKey={identity.organizationName} onBack={leaveAircraft} onLogDefect={startAircraftDefect} onOpenDefect={id => { void openQueueDefect(id); }} canReport={hasPermission(identity?.permissions, "REPORT")} /> : currentNavKey === "home" ? <FleetStatusPage request={fleetStatusFetch} onSelectAircraft={selectAircraft} /> : currentNavKey === "corrective-actions" && hasPermission(identity?.permissions, "PERFORM_ACTION") ? <MaintenanceWorkQueuePage request={fleetStatusFetch} onOpen={(defectId) => { void openQueueDefect(defectId); }} /> : currentNavKey === "review-queue" && (hasPermission(identity?.permissions, "REVIEW") || hasPermission(identity?.permissions, "APPROVE") || hasPermission(identity?.permissions, "ADMINISTER_ORGANIZATION")) ? <ReviewerWorkQueuePage request={fleetStatusFetch} onOpen={(defectId) => { void openQueueDefect(defectId); }} /> : <div className={`content max-w-none min-h-[calc(100vh-70px)] px-[clamp(20px,2.5vw,52px)] py-[clamp(24px,3vw,56px)]${currentNavKey === "reports" ? " reports-page-shell" : ""}`} id="defects">
+        <div className="heading"><div><h1>{currentPageLabel}</h1></div></div>
+        {currentNavKey === "reports" && !hasPermission(identity?.permissions, "REPORT_VIEW") && (hasPermission(identity?.permissions, "ADMINISTER_ORGANIZATION")
+          ? <section className="report-access-restricted" role="status"><h2>Report data access is not granted</h2><p>Your organization administrator access does not automatically include report data access. In Report Master, grant this role View access for the report; running reports also requires Execute access. The matching report permissions must be assigned to this role as well.</p></section>
+          : <p role="alert">Your account does not have access to Reports.</p>)}
+        {currentNavKey === "reports" && summaryAvailable && <section className="metrics reports-copy-protected grid grid-cols-[repeat(4,minmax(0,1fr))] gap-3 max-[700px]:grid-cols-2" aria-label="Defect summary" onCopy={(event) => event.preventDefault()} onCut={(event) => event.preventDefault()}>
           <article className="metric-card"><div className="metric-head">OPEN DEFECTS <span className="metric-icon green">↗</span></div><strong>{loading ? "—" : summary.openDefects}</strong><div className="metric-foot">Across active fleet <span className="sparkline">▁▃▂▅▃▆▄▇</span></div></article>
           <article className="metric-card"><div className="metric-head">CRITICAL ITEMS <span className="metric-icon red">!</span></div><strong className={summary.criticalDefects ? "critical-number" : ""}>{loading ? "—" : summary.criticalDefects.toString().padStart(2, "0")}</strong><div className="metric-foot"><span className="status-dot amber"></span> Requiring immediate attention</div></article>
-          <article className="metric-card"><div className="metric-head">REPORTED TODAY <span className="metric-icon blue">◷</span></div><strong>{loading ? "—" : summary.reportedToday.toString().padStart(2, "0")}</strong><div className="metric-foot">New cabin findings</div></article>
-          <article className="metric-card compliance-card"><div className="metric-head">CLOSED THIS MONTH <span className="metric-icon green">✓</span></div><strong>{loading ? "—" : summary.closedThisMonth.toString().padStart(2, "0")}</strong><div className="metric-foot"><span className="status-dot green-dot"></span> With audit event history</div></article>
+          <article className="metric-card"><div className="metric-head">{workflowStatusLabel("REPORTED", workflowStatuses).toUpperCase()} TODAY <span className="metric-icon blue">◷</span></div><strong>{loading ? "—" : summary.reportedToday.toString().padStart(2, "0")}</strong><div className="metric-foot">New cabin findings</div></article>
+          <article className="metric-card compliance-card"><div className="metric-head">{workflowStatusLabel("CLOSED", workflowStatuses).toUpperCase()} THIS MONTH <span className="metric-icon green">✓</span></div><strong>{loading ? "—" : summary.closedThisMonth.toString().padStart(2, "0")}</strong><div className="metric-foot"><span className="status-dot green-dot"></span> With audit event history</div></article>
         </section>}
-        <section className="register">
-          <div className="register-title"><div><div className="eyebrow">LIVE FLEET LOG</div><h2>{currentPageLabel} <span className="result-count">{searchExecuted ? items.length : "—"}</span></h2></div><div className="register-tools">{searchExecuted && <button className="filter-button" onClick={() => setFilter(filter === "ALL STATUS" ? "REPORTED" : "ALL STATUS")}>☷ <span>Filter</span></button>}</div></div>
-          {searchExecuted && <div className="filter-row"><div className="chips" role="group" aria-label="Filter by status">{statuses.slice(0, 5).map((value) => <button key={value} className={filter === value ? "chip active" : "chip"} onClick={() => { setFilter(value); setSearchExecuted(true); }}>{value === "ALL STATUS" ? "All status" : human(value)}</button>)}</div><label className="area-filter"><span>AREA</span><select value={area} onChange={(event) => { setArea(event.target.value); setSearchExecuted(true); }} aria-label="Filter by area">{areas.map((value) => <option key={value} value={value}>{human(value)}</option>)}</select></label></div>}
-          <div className="table-scroll"><table><thead><tr><th>DEFECT / AIRCRAFT</th><th>LOCATION</th><th>SEVERITY</th><th>STATUS</th><th>REPORTED</th><th>OWNER</th><th></th></tr></thead><tbody>
-            {searchExecuted && items.map((defect) => <tr key={defect.id} data-search-row={`${defect.title} ${defect.reference} ${defect.tailNumber} ${defect.zone} ${defect.location}`.toLowerCase()} onClick={() => void openDetail(defect)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") void openDetail(defect); }}>
-              <td><div className="defect-name"><span className="defect-icon">{defect.location === "GALLEY" ? "▤" : defect.location === "LAVATORY" ? "◉" : "⌂"}</span><span><b>{defect.title}</b><small>{defect.reference} <i>·</i> {defect.tailNumber} · {defect.zone}</small></span></div></td>
-              <td><span className="location-tag">{human(defect.location)}</span></td><td><span className={`severity ${defect.severity.toLowerCase()}`}><i></i>{defect.severityName || human(defect.severity)}</span></td><td><span className={`status ${defect.status.toLowerCase()}`}>{human(defect.status)}</span></td><td className="date">{new Intl.DateTimeFormat(undefined, { month: "short", day: "2-digit" }).format(new Date(defect.reportedAt))}<small>{new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" }).format(new Date(defect.reportedAt))}</small></td><td><span className="owner"><i>{(defect.assignedTo || defect.assignedTeam) ? (defect.assignedTo || defect.assignedTeam || "").split(" ").map((name) => name[0]).slice(0, 2).join("") : "—"}</i>{defect.assignedTo || defect.assignedTeam || "Unassigned"}</span></td><td>{canAdvanceWorkflow(identity?.permissions, defect.status) && <button className="row-more" aria-label={`Advance ${defect.reference}`} title="Advance workflow" onClick={(event) => { event.stopPropagation(); void advance(defect); }}>···</button>}</td>
+        {currentNavKey === "reports" && hasPermission(identity?.permissions, "REPORT_VIEW") && <DynamicReportViewer request={fleetStatusFetch} permissions={identity?.permissions || []} />}
+        {currentNavKey !== "reports" && <section className="register defect-register-data">
+          <div className="register-title"><div><div className="eyebrow">LIVE FLEET LOG</div><h2>Defect Register <span className="result-count">{searchExecuted ? items.length : "—"}</span></h2></div></div>
+          <form className="register-toolbar" aria-label="Defect register filters" onSubmit={(event) => { event.preventDefault(); setSearchFilters({ ...searchDraft }); setCursor(null); setSearchExecuted(true); }}>
+            <label className="register-keyword-search"><span aria-hidden="true">⌕</span><input type="search" value={searchDraft.query} onChange={(event) => setSearchDraft({ ...searchDraft, query: event.target.value })} placeholder="Search defect ID, component, condition…" aria-label="Search defect ID, component, or condition" /></label>
+            <label className="register-toolbar-filter"><span>Area</span><select value={area} onChange={(event) => { setArea(event.target.value); setCursor(null); setSearchExecuted(true); }}>{areas.map((value) => <option key={value} value={value}>{value === "ALL AREAS" ? "All areas" : human(value)}</option>)}</select></label>
+            <label className="register-toolbar-filter"><span>Status</span><select value={filter} onChange={(event) => { setFilter(event.target.value); setCursor(null); setSearchExecuted(true); }}><option value="ALL STATUS">All statuses</option>{workflowStatuses.filter(value => value.isActive).map((value) => <option key={value.statusCode} value={value.statusCode}>{workflowStatusLabel(value.statusCode, workflowStatuses)}</option>)}</select></label>
+            <div className="register-date-filter"><span>Date range</span><details className="register-date-menu"><summary aria-label="Choose a date range"><span className="register-date-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><rect x="3.5" y="5" width="17" height="16" rx="2"/><path d="M7.5 3v4M16.5 3v4M4 9.5h16"/></svg></span>{registerDateRangeLabel(searchDraft)}<span className="register-date-chevron" aria-hidden="true">⌄</span></summary><div className="register-date-popover"><label>From date<input type="date" value={searchDraft.fromDate} onChange={(event) => setSearchDraft({ ...searchDraft, fromDate: event.target.value })} /></label><label>To date<input type="date" value={searchDraft.toDate} onChange={(event) => setSearchDraft({ ...searchDraft, toDate: event.target.value })} /></label><button type="submit" className="button-primary">Apply dates</button></div></details></div>
+          </form>
+          <div className="table-scroll"><table><thead><tr><th>Defect ID</th><th>Area</th><th>Cabin zone</th><th>Component</th><th>Condition</th><th>Severity</th><th>Status</th><th>Case Created Date</th><th>Case Closed Date</th></tr></thead><tbody>
+            {searchExecuted && items.map((defect) => <tr key={defect.id} data-search-row={`${defect.title} ${defect.reference} ${defect.tailNumber} ${defect.zone} ${defect.location}`.toLowerCase()} onClick={() => navigateToDefect(defect.id)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") navigateToDefect(defect.id); }}>
+              <td><button type="button" className="fleet-aircraft-link" onClick={(event)=>{event.stopPropagation();navigateToDefect(defect.id);}}>{defect.reference}</button></td><td>{defect.location}</td><td>{defect.zone || "—"}</td><td>{defect.component || "—"}</td><td>{defect.conditionName || "—"}</td><td><SeverityBadge request={fleetStatusFetch} definitions={severityDefinitions} severityCode={defect.severity} severityName={defect.severityName} /></td><td><WorkflowStatusBadge statusCode={defect.status} statuses={workflowStatuses} /></td><td className="date">{formatDateTime(defect.reportedAt)}</td><td className="date">{defect.closedAt ? formatDateTime(defect.closedAt) : "—"}</td>
             </tr>)}
-            {!searchExecuted && <tr><td className="empty" colSpan={7}><span className="empty-art">⌕</span><b>No search performed</b><small>Enter your search criteria above to find cabin defect records.</small></td></tr>}
-            {searchExecuted && !loading && items.length === 0 && <tr><td className="empty" colSpan={7}><span className="empty-art">✧</span><b>No defects in this view</b><small>Try another search, or log a newly discovered cabin defect.</small>{hasPermission(identity?.permissions, "REPORT") && <button onClick={openDefectForm}>Log a defect <span>→</span></button>}</td></tr>}
-            {searchExecuted && loading && items.length === 0 && <tr><td className="empty" colSpan={7}>Searching the operator’s defect register…</td></tr>}
+            {!searchExecuted && <tr><td className="empty" colSpan={9}><span className="empty-art">⌕</span><b>Search the live fleet log</b><small>Enter search criteria above to find cabin defect records.</small></td></tr>}
+            {searchExecuted && !loading && items.length === 0 && <tr><td className="empty" colSpan={9}><span className="empty-art">✧</span><b>No defects in this view</b><small>Try changing your search or date range.</small></td></tr>}
+            {searchExecuted && loading && items.length === 0 && <tr><td className="empty" colSpan={9}>Searching the operator’s defect register…</td></tr>}
           </tbody></table></div>
-          <div className="table-foot"><span>Showing <b>{items.length}</b> recent records</span>{cursor && <button className="load-more" onClick={() => void load(cursor, true)}>Load more defects <span>↓</span></button>}<span className="audit-note"><i>✓</i> Changes are recorded in the audit trail</span></div>
-        </section>
-        <footer><span>eCabin Ledger <i>·</i> Operational recordkeeping</span><span>UTC <i>·</i> Data synced just now</span></footer>
+          <div className="table-foot"><span>Showing <b>{items.length}</b> recent records</span>{cursor && <button className="load-more" onClick={() => void load(cursor, true)}>Load more defects <span>↓</span></button>}</div>
+        </section>}
       </div>}
     </section>
 
-    {dialog && hasPermission(identity?.permissions, "REPORT") && <DialogPortal onClose={() => { setDialog(false); setSelectedFormForReport(null); setReportFormAnswers({}); setReportFormFiles({}); setReportFormReady(false); setSelectedAircraft(null);setSelectedAircraftId(""); }} labelledBy="modal-title" className="modal report-modal"><div className="modal-heading"><div><div className="eyebrow">NEW OPERATIONAL RECORD</div><h2 id="modal-title">Log a defect</h2></div><button type="button" className="close" onClick={() => { setDialog(false); setSelectedFormForReport(null); setReportFormAnswers({}); setReportFormFiles({}); setReportFormReady(false);setSelectedAircraft(null);setSelectedAircraftId(""); }} aria-label="Close">×</button></div><section className="report-system-context" aria-label="System-controlled report context"><span>Aircraft registration<b>{selectedAircraft?.tailNumber || "Select in the form below"}</b></span><span>Cabin area<b>{areaMasterOptions.find(item => item.id === selectedAreaId)?.name || "Unavailable"}</b></span></section><form id="defect-report-form" onChange={() => { if(reportIdempotencyKey.current)reportIdempotencyKey.current=null; }} onSubmit={createDefect}>
-      {selectedFormForReport && selectedAreaId ? <><p className="operational-form-preview-note">Complete the configured fields below. The selected published design controls the report fields and their order.</p><OperationalFormRenderer key={`${selectedAreaId}:${selectedFormForReport.id}:${selectedFormForReport.versionId}`} request={operationalFormFetch} areaId={selectedAreaId} areaName={areaMasterOptions.find(item => item.id === selectedAreaId)?.name} areaCode={areaMasterOptions.find(item=>item.id===selectedAreaId)?.code} initialFormId={selectedFormForReport.id} initialVersionId={selectedFormForReport.versionId} preparationMode initialAnswers={reportFormAnswers} onAnswersChange={updateReportFormAnswers} onFilesChange={updateReportFormFiles} onAircraftSelected={option=>{setSelectedAircraft(option?{...option,openDefects:0}:null);setSelectedAircraftId(option?.id||"");}} onPreparationReady={updateReportFormReady} /></> : <p role="alert">Choose a cabin area and published form before reporting.</p>}
-      <div className="modal-note"><span>✓</span> Aircraft and organization identifiers are system-controlled. Answers and evidence are retained against the selected published version.</div><div className="modal-actions"><button type="button" className="button-secondary" onClick={() => { setDialog(false); setSelectedFormForReport(null); setReportFormAnswers({}); setReportFormReady(false); }}>Cancel</button><button className="button-primary" disabled={saving || !selectedFormForReport || !reportFormReady}>{saving ? "Saving…" : "Save defect →"}</button></div>
+    {dialog && hasPermission(identity?.permissions, "REPORT") && <DialogPortal onClose={closeReportDialog} labelledBy="modal-title" className="modal report-modal"><div className="modal-heading flex items-start justify-between mb-[18px]"><div><div className="eyebrow">NEW OPERATIONAL RECORD</div><h2 id="modal-title">Log a defect</h2></div><button type="button" className="close" onClick={closeReportDialog} aria-label="Close">×</button></div><section className="report-system-context" aria-label="System-controlled report context"><span>Aircraft registration<b>{selectedAircraft?.tailNumber || "Select in the form below"}</b></span><span>Cabin area<b>{areaMasterOptions.find(item => item.id === selectedAreaId)?.name || "Unavailable"}</b></span></section><form id="defect-report-form" onChange={() => { if(reportIdempotencyKey.current)reportIdempotencyKey.current=null; }} onSubmit={createDefect}>
+      {selectedFormForReport && selectedAreaId ? <><OperationalFormRenderer key={`${selectedAreaId}:${selectedFormForReport.id}:${selectedFormForReport.versionId}`} request={operationalFormFetch} areaId={selectedAreaId} areaName={areaMasterOptions.find(item => item.id === selectedAreaId)?.name} areaCode={areaMasterOptions.find(item=>item.id===selectedAreaId)?.code} initialFormId={selectedFormForReport.id} initialVersionId={selectedFormForReport.versionId} preparationMode initialAnswers={reportFormAnswers} onAnswersChange={updateReportFormAnswers} onFilesChange={updateReportFormFiles} onAircraftSelected={option=>{setSelectedAircraft(option?{...option,openDefects:0}:null);setSelectedAircraftId(option?.id||"");}} onPreparationReady={updateReportFormReady} /></> : <p role="alert">Choose a cabin area and published form before reporting.</p>}
+      <div className="modal-actions flex justify-end gap-2 border-t border-[#edf0ec] pt-[14px] mt-[13px]"><button type="button" className="button-secondary" onClick={closeReportDialog}>Cancel</button><button className="button-primary" disabled={saving || !selectedFormForReport || !reportFormReady}>{saving ? "Saving…" : "Save defect →"}</button></div>
     </form></DialogPortal>}
-    {selected && <DialogPortal onClose={() => setSelected(null)} labelledBy="defect-detail-title" className="modal detail-modal"><div className="modal-heading"><div><div className="eyebrow">{selected.reference} · {selected.tailNumber}</div><h2 id="defect-detail-title">{selected.title}</h2></div><button className="close" onClick={() => setSelected(null)} aria-label="Close">×</button></div><p className="detail-description">{selected.description}</p><div className="detail-grid"><span>Location<b>{human(selected.location)} · {selected.zone}</b></span><span>Condition<b>{selected.conditionName || "Not recorded"}</b></span><span>Severity<b>{selected.severityName || human(selected.severity)}</b></span><span>Status<b>{human(selected.status)}</b></span><span>Reported by<b>{selected.reportedBy}</b></span><span>Assigned to<b>{selected.assignedTo || selected.assignedTeam || "Unassigned"}</b></span></div>{selected.routingAttention&&<p className="configuration-field-error" role="status">{selected.routingAttention}</p>}{hasPermission(identity?.permissions,"REVIEW")&&["REPORTED","UNDER_REVIEW"].includes(selected.status)&&areaMasterOptions.find(item=>item.id===selected.areaId)?.code==="GALLEY"&&<GalleyReviewerDecisionForm key={`${selected.id}:${selected.status}`} request={fleetStatusFetch} defect={selected} onComplete={status=>{void refreshAfterReviewerDecision(selected,status).catch(error=>alert.error(error instanceof Error?error.message:"Decision saved, but the case could not be refreshed."));}}/>}{formPurposeForStatus(selected.status,identity?.permissions) && <OperationalFormRenderer key={`${selected.id}:${formPurposeForStatus(selected.status,identity?.permissions)}:${initialFormForDefect?.formId || ""}:${initialFormForDefect?.versionId || ""}`} request={operationalFormFetch} defectId={selected.id} actionId={selected.activeActionId||undefined} areaId={selected.areaId} areaName={areaMasterOptions.find(item => item.id === selected.areaId)?.name} areaCode={areaMasterOptions.find(item => item.id === selected.areaId)?.code} purpose={formPurposeForStatus(selected.status,identity?.permissions)!} initialFormId={initialFormForDefect?.defectId === selected.id ? initialFormForDefect.formId : undefined} initialVersionId={initialFormForDefect?.defectId === selected.id ? initialFormForDefect.versionId : undefined} initialAnswers={initialFormForDefect?.defectId === selected.id ? initialFormForDefect.answers : undefined} initialFiles={initialFormForDefect?.defectId===selected.id?initialFormForDefect.files:undefined} onWorkflowComplete={status=>{void refreshAfterClosureDecision(selected,status).catch(error=>alert.error(error instanceof Error?error.message:"Decision saved, but the case could not be refreshed."));}}/>}<h3 className="timeline-heading">Audit history</h3><div className="timeline">{events.map((item) => <div className="timeline-item" key={item.id}><span className="timeline-dot"></span><div><b>{human(item.eventType)}{item.toStatus ? ` · ${human(item.toStatus)}` : ""}{item.inspectionOutcome ? ` · Inspection ${human(item.inspectionOutcome)}` : ""}</b><p>{item.note}{item.evidenceReference ? `\nEvidence: ${item.evidenceReference}` : ""}</p><small>{item.actorId} · {new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(item.occurredAt))}</small></div></div>)}{!events.length && <span className="timeline-empty">Loading history or no recorded events.</span>}</div><p className="modal-note"><span>✓</span> Form submissions and evidence are retained against the exact published version.</p><div className="modal-actions"><button className="button-secondary" onClick={() => setSelected(null)}>Close</button>{hasPermission(identity?.permissions, "REVIEW") && <button className="button-secondary" onClick={() => void reassignReviewer(selected)}>Reassign Reviewer team</button>}{hasPermission(identity?.permissions, "ASSIGN_ACTION") && selected.activeActionId && ["ACTION_ASSIGNED", "IN_PROGRESS"].includes(selected.status) && <button className="button-secondary" onClick={() => void reassignDefect(selected)}>Reassign maintenance team</button>}{canAdvanceWorkflow(identity?.permissions, selected.status) && <button className="button-primary" onClick={() => { void advance(selected); setSelected(null); }}>Advance workflow →</button>}</div></DialogPortal>}
+    {selected && <DialogPortal onClose={() => setSelected(null)} labelledBy="defect-detail-title" className="modal detail-modal"><div className="modal-heading flex items-start justify-between mb-[18px]"><div><div className="eyebrow">{selected.reference} · {selected.tailNumber}</div><h2 id="defect-detail-title">{selected.title}</h2></div><button className="close" onClick={() => setSelected(null)} aria-label="Close">×</button></div><p className="detail-description">{selected.description}</p><div className="detail-grid"><span>Location<b>{human(selected.location)} · {selected.zone}</b></span><span>Condition<b>{selected.conditionName || "Not recorded"}</b></span><span>Severity<SeverityBadge request={apiFetch} definitions={severityDefinitions} severityCode={selected.severity} severityName={selected.severityName} /></span><span>Status<WorkflowStatusBadge statusCode={selected.status} statuses={workflowStatuses} /></span><span>Reported by<b>{selected.reportedBy}</b></span><span>Assigned to<b>{selected.assignedTo || selected.assignedTeam || "Unassigned"}</b></span></div>{selected.routingAttention&&<p className="configuration-field-error" role="status">{selected.routingAttention}</p>}{hasPermission(identity?.permissions,"REVIEW")&&["REPORTED","UNDER_REVIEW"].includes(selected.status)&&areaMasterOptions.find(item=>item.id===selected.areaId)?.code==="GALLEY"&&<GalleyReviewerDecisionForm key={`${selected.id}:${selected.status}`} request={fleetStatusFetch} defect={selected} onComplete={status=>{void refreshAfterReviewerDecision(selected,status).catch(error=>alert.error(error instanceof Error?error.message:"Decision saved, but the case could not be refreshed."));}}/>}{formPurposeForStatus(selected.status,identity?.permissions) && <OperationalFormRenderer key={`${selected.id}:${formPurposeForStatus(selected.status,identity?.permissions)}:${initialFormForDefect?.formId || ""}:${initialFormForDefect?.versionId || ""}`} request={operationalFormFetch} defectId={selected.id} actionId={selected.activeActionId||undefined} areaId={selected.areaId} areaName={areaMasterOptions.find(item => item.id === selected.areaId)?.name} areaCode={areaMasterOptions.find(item => item.id === selected.areaId)?.code} purpose={formPurposeForStatus(selected.status,identity?.permissions)!} initialFormId={initialFormForDefect?.defectId === selected.id ? initialFormForDefect.formId : undefined} initialVersionId={initialFormForDefect?.defectId === selected.id ? initialFormForDefect.versionId : undefined} initialAnswers={initialFormForDefect?.defectId === selected.id ? initialFormForDefect.answers : undefined} initialFiles={initialFormForDefect?.defectId===selected.id?initialFormForDefect.files:undefined} onWorkflowComplete={status=>{void refreshAfterClosureDecision(selected,status).catch(error=>alert.error(error instanceof Error?error.message:"Decision saved, but the case could not be refreshed."));}}/>}<h3 className="timeline-heading">Audit history</h3><div className="timeline">{events.map((item) => <div className="timeline-item relative flex pb-[13px]" key={item.id}><span className="timeline-dot"></span><div><b>{human(item.eventType)}{item.toStatus ? <> · <WorkflowStatusBadge statusCode={item.toStatus} statuses={workflowStatuses}/></> : ""}{item.inspectionOutcome ? ` · Inspection ${human(item.inspectionOutcome)}` : ""}</b><p>{item.note}{item.evidenceReference ? `\nEvidence: ${item.evidenceReference}` : ""}</p><small>{item.actorId} · {formatDateTime(item.occurredAt)}</small></div></div>)}{!events.length && <span className="timeline-empty">Loading history or no recorded events.</span>}</div><p className="modal-note"><span>✓</span> Form submissions and evidence are retained against the exact published version.</p><div className="modal-actions flex justify-end gap-2 border-t border-[#edf0ec] pt-[14px] mt-[13px]"><button className="button-secondary" onClick={() => setSelected(null)}>Close</button>{hasPermission(identity?.permissions, "ASSIGN_ACTION") && selected.activeActionId && ["ACTION_ASSIGNED", "IN_PROGRESS"].includes(selected.status) && <button className="button-secondary" onClick={() => void reassignDefect(selected)}>Reassign maintenance team</button>}</div></DialogPortal>}
   </main>;
 }

@@ -573,8 +573,8 @@ public class OperationalFormService {
         for(FieldDefinition field:form.configuration().fields()) if(field.type()==FieldType.FILE_UPLOAD||field.type()==FieldType.IMAGE_UPLOAD) {
             Object value=answers.get(field.key()); if(value instanceof List<?> ids) for(Object raw:ids) {
                 UUID attachmentId=parseUuid(raw,field.key());
-                int updated=jdbc.update("UPDATE attachments_dtl SET form_submission_id=? WHERE operator_id=? AND id=? AND defect_id=? AND form_id=? AND form_version_id=? AND field_key=? AND form_submission_id IS NULL AND scan_status='CLEAN' AND isactive=1",submissionId,operatorId,attachmentId,defectId,form.id(),form.versionId(),field.key());
-                if(updated!=1) throw new IllegalArgumentException("Evidence must be uploaded, validated and clean before form submission.");
+                int updated=jdbc.update("UPDATE attachments_dtl SET form_submission_id=? WHERE operator_id=? AND id=? AND defect_id=? AND form_id=? AND form_version_id=? AND field_key=? AND form_submission_id IS NULL AND scan_status IN ('CLEAN','NOT_SCANNED') AND isactive=1",submissionId,operatorId,attachmentId,defectId,form.id(),form.versionId(),field.key());
+                if(updated!=1) throw new IllegalArgumentException("Evidence must be uploaded, validated, and available before form submission.");
             }
         }
         audit(operatorId,actor,defectId,"FORM_SUBMITTED","FORM_SUBMISSION",submissionId,"Operational form submitted.",null,Map.of("formId",form.id(),"versionId",form.versionId()));
@@ -678,7 +678,7 @@ public class OperationalFormService {
         if(purpose==FormPurpose.CLOSURE_APPROVAL)ClosureApprovalFormRules.requireValid(config);
         if(purpose==FormPurpose.CORRECTIVE_ACTION)MaintenanceActionFormRules.requireValid(config);
         else if(config.fields().stream().anyMatch(field->field.visibleWhen()!=null)&&purpose!=FormPurpose.CLOSURE_APPROVAL)throw new IllegalArgumentException("Conditional visibility is currently supported only for approved Reviewer Decision fields.");
-        for(FieldDefinition field:config.fields())if(field.requiredWhen()!=null){if(purpose!=FormPurpose.CLOSURE_APPROVAL||field.binding()!=DefectFieldBinding.CLOSURE_REMARK||field.required()||!config.fields().stream().anyMatch(parent->parent.binding()==DefectFieldBinding.CLOSURE_DECISION&&parent.key().equals(field.requiredWhen().fieldKey()))||!"DECLINE".equals(field.requiredWhen().expectedValue()))throw new IllegalArgumentException("Conditional requiredness is supported only for Closure Remarks when Closure Decision is DECLINE.");}
+        for(FieldDefinition field:config.fields())if(field.requiredWhen()!=null){boolean closureRule=purpose==FormPurpose.CLOSURE_APPROVAL&&field.binding()==DefectFieldBinding.CLOSURE_REMARK&&!field.required()&&config.fields().stream().anyMatch(parent->parent.binding()==DefectFieldBinding.CLOSURE_DECISION&&parent.key().equals(field.requiredWhen().fieldKey()))&&"DECLINE".equals(field.requiredWhen().expectedValue());boolean maintenanceRule=purpose==FormPurpose.CORRECTIVE_ACTION&&field.binding()==DefectFieldBinding.EVIDENCE_ATTACHMENTS&&field.type()==FieldType.IMAGE_UPLOAD&&!field.required()&&field.fileRules()!=null&&Integer.valueOf(0).equals(field.fileRules().minCount())&&config.fields().stream().anyMatch(parent->parent.binding()==DefectFieldBinding.MAINTENANCE_STATUS&&parent.key().equals(field.requiredWhen().fieldKey()))&&"CLOSE_SUBMITTED".equals(field.requiredWhen().expectedValue());if(!closureRule&&!maintenanceRule)throw new IllegalArgumentException("Conditional requiredness is supported only for Closure Remarks on decline or Maintenance image evidence on Close Submitted.");}
         for(FieldDefinition f:config.fields()) {
             if(f.optionFilter()!=null) {
                 if(f.optionFilter().areaFieldKey()!=null && (!keys.contains(f.optionFilter().areaFieldKey()) || f.key().equals(f.optionFilter().areaFieldKey()))) throw new IllegalArgumentException("The area filter must reference another configured field.");
@@ -708,7 +708,7 @@ public class OperationalFormService {
             case DEFECT_CATEGORIES -> jdbc.query("SELECT id,code,name FROM defect_categories_mst WHERE operator_id=? AND isactive=1 ORDER BY name LIMIT 500",(rs,n)->new FormOption(rs.getObject("id",UUID.class),rs.getString("code"),rs.getString("name")),operatorId);
             case DEFECT_SEVERITIES -> jdbc.query("SELECT id,severity_code AS code,severity_name AS name FROM defect_severities_mst WHERE operator_id=? AND isactive=1 ORDER BY sort_order,severity_code LIMIT 500",(rs,n)->new FormOption(rs.getObject("id",UUID.class),rs.getString("code"),rs.getString("name")),operatorId);
             case GALLEY_SEVERITIES -> {String code=jdbc.queryForObject("SELECT code FROM cabin_areas_mst WHERE operator_id=? AND id=? AND isactive=1",String.class,operatorId,formArea);if(!code.equals("GALLEY"))throw new IllegalArgumentException("Galley severity options are only available for Galley forms.");yield jdbc.query("SELECT id,severity_code AS code,severity_name AS name FROM defect_severities_mst WHERE operator_id=? AND isactive=1 AND severity_code IN ('CRITICAL','MAJOR','MINOR','OBSERVATION') ORDER BY CASE severity_code WHEN 'CRITICAL' THEN 1 WHEN 'MAJOR' THEN 2 WHEN 'MINOR' THEN 3 ELSE 4 END",(rs,n)->new FormOption(rs.getObject("id",UUID.class),rs.getString("code"),rs.getString("name")),operatorId);}
-            case REVIEW_DECISIONS -> {String code=jdbc.queryForObject("SELECT code FROM cabin_areas_mst WHERE operator_id=? AND id=? AND isactive=1",String.class,operatorId,formArea);if(!code.equals("GALLEY"))throw new IllegalArgumentException("Reviewer decision options are only available for Galley forms.");yield List.of(new FormOption(UUID.nameUUIDFromBytes("REVIEW_DECISION:APPROVE".getBytes(java.nio.charset.StandardCharsets.UTF_8)),"APPROVE","Approve"),new FormOption(UUID.nameUUIDFromBytes("REVIEW_DECISION:REJECT".getBytes(java.nio.charset.StandardCharsets.UTF_8)),"REJECT","Reject / Return for Correction"));}
+            case REVIEW_DECISIONS -> {String code=jdbc.queryForObject("SELECT code FROM cabin_areas_mst WHERE operator_id=? AND id=? AND isactive=1",String.class,operatorId,formArea);if(!code.equals("GALLEY"))throw new IllegalArgumentException("Reviewer decision options are only available for Galley forms.");yield List.of(new FormOption(UUID.nameUUIDFromBytes("REVIEW_DECISION:APPROVE".getBytes(java.nio.charset.StandardCharsets.UTF_8)),"APPROVE","Approve"),new FormOption(UUID.nameUUIDFromBytes("REVIEW_DECISION:REJECT".getBytes(java.nio.charset.StandardCharsets.UTF_8)),"REJECT","Reject"));}
             case CLOSURE_DECISIONS -> List.of(new FormOption(UUID.nameUUIDFromBytes("CLOSURE_DECISION:ACCEPT".getBytes(java.nio.charset.StandardCharsets.UTF_8)),"ACCEPT","Accept"),new FormOption(UUID.nameUUIDFromBytes("CLOSURE_DECISION:DECLINE".getBytes(java.nio.charset.StandardCharsets.UTF_8)),"DECLINE","Decline"));
             case MAINTENANCE_ACTION_STATUSES -> List.of("WORK_IN_PROGRESS","ON_HOLD","CLOSE_SUBMITTED").stream().map(code->new FormOption(UUID.nameUUIDFromBytes(("MAINTENANCE_ACTION:"+code).getBytes(java.nio.charset.StandardCharsets.UTF_8)),code,switch(code){case "WORK_IN_PROGRESS"->"Work in Progress";case "ON_HOLD"->"On Hold";default->"Close Submitted";})).toList();
             case CABIN_AREAS -> jdbc.query("SELECT id,code,name FROM cabin_areas_mst WHERE operator_id=? AND id=? AND isactive=1",(rs,n)->new FormOption(rs.getObject("id",UUID.class),rs.getString("code"),rs.getString("name")),operatorId,formArea);
@@ -772,6 +772,27 @@ public class OperationalFormService {
         }
     }
 
+    /** Validate Maintenance form evidence against the published field rules before Close Submitted is persisted. */
+    public void validateMaintenanceEvidence(UUID operatorId,UUID defectId,FormForArea form,String maintenanceStatus,Map<String,List<UUID>> attachments) {
+        Map<String,List<UUID>> supplied=attachments==null?Map.of():attachments;
+        List<FieldDefinition> uploadFields=form.configuration().fields().stream()
+            .filter(field->field.type()==FieldType.IMAGE_UPLOAD||field.type()==FieldType.FILE_UPLOAD).toList();
+        Set<String> configuredKeys=uploadFields.stream().map(FieldDefinition::key).collect(java.util.stream.Collectors.toSet());
+        for(String key:supplied.keySet())if(!configuredKeys.contains(key))throw new IllegalArgumentException("Unknown Maintenance evidence field: "+key);
+        for(FieldDefinition field:uploadFields){
+            List<UUID> ids=supplied.getOrDefault(field.key(),List.of());
+            if(ids==null)ids=List.of();
+            if(new HashSet<>(ids).size()!=ids.size())throw new IllegalArgumentException("The same evidence file cannot be attached more than once.");
+            boolean conditionRequired=field.requiredWhen()!=null&&"CLOSE_SUBMITTED".equals(maintenanceStatus)&&"CLOSE_SUBMITTED".equals(field.requiredWhen().expectedValue());
+            int configuredMinimum=field.fileRules()==null||field.fileRules().minCount()==null?0:field.fileRules().minCount();
+            int minimum=field.required()||conditionRequired?Math.max(1,configuredMinimum):configuredMinimum;
+            int maximum=field.fileRules()==null||field.fileRules().maxCount()==null?0:field.fileRules().maxCount();
+            if(ids.size()<minimum)throw new IllegalArgumentException("Attach at least "+minimum+" image file(s) for "+field.label()+" before submitting Close Submitted.");
+            if(ids.size()>maximum)throw new IllegalArgumentException("Attach no more than "+maximum+" file(s) for "+field.label()+".");
+            for(UUID id:ids)validateAttachments(operatorId,defectId,form,field,List.of(id));
+        }
+    }
+
     private void validateText(FieldDefinition f,Object value) {
         if(!(value instanceof String s)) throw new IllegalArgumentException(f.label()+" must be text.");
         TextRules r=f.textRules(); int length=s.codePointCount(0,s.length());
@@ -798,7 +819,7 @@ public class OperationalFormService {
     }
     private void validateAttachments(UUID operatorId,UUID defectId,FormForArea form,FieldDefinition f,Object value) {
         if(!(value instanceof List<?> ids))return;
-        for(Object raw:ids){UUID id=parseUuid(raw,f.key()); Integer count=jdbc.queryForObject("SELECT count(*) FROM attachments_dtl WHERE operator_id=? AND id=? AND defect_id=? AND form_id=? AND form_version_id=? AND field_key=? AND size_bytes<=? AND lower(split_part(original_filename,'.',array_length(string_to_array(original_filename,'.'),1)))=ANY(?) AND lower(detected_mime_type)=ANY(?) AND scan_status='CLEAN' AND isactive=1",Integer.class,operatorId,id,defectId,form.id(),form.versionId(),f.key(),f.fileRules().maxFileSizeBytes(),f.fileRules().extensions().stream().map(x->x.toLowerCase(java.util.Locale.ROOT)).toArray(String[]::new),f.fileRules().mimeTypes().stream().map(x->x.toLowerCase(java.util.Locale.ROOT)).toArray(String[]::new)); if(count==null||count!=1)throw new IllegalArgumentException("Each file must satisfy this field's restrictions, belong to this form version, and pass the configured malware scan.");}
+        for(Object raw:ids){UUID id=parseUuid(raw,f.key()); Integer count=jdbc.queryForObject("SELECT count(*) FROM attachments_dtl WHERE operator_id=? AND id=? AND defect_id=? AND form_id=? AND form_version_id=? AND field_key=? AND size_bytes<=? AND lower(split_part(original_filename,'.',array_length(string_to_array(original_filename,'.'),1)))=ANY(?) AND lower(detected_mime_type)=ANY(?) AND scan_status IN ('CLEAN','NOT_SCANNED') AND isactive=1",Integer.class,operatorId,id,defectId,form.id(),form.versionId(),f.key(),f.fileRules().maxFileSizeBytes(),f.fileRules().extensions().stream().map(x->x.toLowerCase(java.util.Locale.ROOT)).toArray(String[]::new),f.fileRules().mimeTypes().stream().map(x->x.toLowerCase(java.util.Locale.ROOT)).toArray(String[]::new)); if(count==null||count!=1)throw new IllegalArgumentException("Each file must satisfy this field's restrictions and belong to this form version.");}
     }
 
     private void validateFieldShape(FieldDefinition f) {

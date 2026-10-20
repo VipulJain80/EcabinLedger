@@ -1,1 +1,9 @@
-.timeline-heading{font:600 12px var(--display);color:#536157;margin:17px 0 9px}.timeline{border-left:1px solid #e5ebe4;margin-left:5px;padding:1px 0 1px 15px}.timeline-item{position:relative;display:flex;padding:0 0 13px;color:#657268}.timeline-dot{position:absolute;left:-19px;top:3px;width:7px;height:7px;border:2px solid #789579;background:#fff;border-radius:50%}.timeline-item b{font-size:9px;font-weight:600}.timeline-item p{font-size:9px;line-height:1.45;margin:4px 0;color:#768279;white-space:pre-wrap}.timeline-item small,.timeline-empty{font-size:8px;color:#a0a9a1}.timeline-empty{display:block;padding:0 0 10px}
+.timeline-heading{font:600 12px var(--display);color:#000000;margin:17px 0 9px}.timeline{border-left:1px solid #e5ebe4}.timeline-item{color:#000000}.timeline-dot{position:absolute;left:-19px;top:3px;width:7px;height:7px;border:2px solid #789579;background:#fff;border-radius:50%}.timeline-item b{font-size:9px;font-weight:600}.timeline-item p{font-size:9px;line-height:1.45;margin:4px 0;color:#000000;white-space:pre-wrap}.timeline-item small,.timeline-empty{font-size:8px;color:#000000}.timeline-empty{display:block;padding:0 0 10px}
+
+/* A restrained moving highlight marks the active defect-detail tab. */
+.case-detail-tab{position:relative;isolation:isolate;overflow:hidden}
+.case-detail-tab::before{content:"";position:absolute;inset:0;border-radius:inherit;padding:1.5px;pointer-events:none;opacity:0;background:conic-gradient(from 0deg,transparent 0deg 278deg,rgba(255,255,255,.9) 298deg,#ff8a65 316deg,#ffd5c6 326deg,transparent 345deg 360deg);-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask-composite:exclude}
+.case-detail-tab>span{position:relative;z-index:1}
+.case-detail-tab-active::before{opacity:.95;animation:case-tab-light-flow 4s linear infinite}
+@keyframes case-tab-light-flow{to{transform:rotate(1turn)}}
+@media(prefers-reduced-motion:reduce){.case-detail-tab-active::before{animation:none;opacity:.7;transform:none}}

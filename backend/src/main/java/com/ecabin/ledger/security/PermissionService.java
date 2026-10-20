@@ -7,7 +7,6 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Component;
-import java.util.EnumSet;
 
 @Component
 public class PermissionService {
@@ -20,6 +19,29 @@ public class PermissionService {
     public void require(AuthenticatedUser user, Permission permission) {
         if (!permissionsFor(user.organizationId(), user.role()).contains(permission))
             throw new AccessDeniedException("Your application role does not allow this operation.");
+    }
+
+    /** Defect read endpoints may be granted by VIEW or by the separate tenant-wide read capability. */
+    public Set<Permission> requireDefectRead(AuthenticatedUser user) {
+        Set<Permission> grants = permissionsFor(user.organizationId(), user.role());
+        if (!grants.contains(Permission.VIEW) && !grants.contains(Permission.DEFECT_VIEW_ALL))
+            throw new AccessDeniedException("Defect view permission is required.");
+        return grants;
+    }
+
+    /** Evidence can also be read by a report-author; the controller still enforces case ownership. */
+    public Set<Permission> requireEvidenceRead(AuthenticatedUser user) {
+        Set<Permission> grants = permissionsFor(user.organizationId(), user.role());
+        if (!grants.contains(Permission.VIEW) && !grants.contains(Permission.REPORT)
+                && !grants.contains(Permission.PERFORM_ACTION)
+                && !grants.contains(Permission.REVIEW) && !grants.contains(Permission.APPROVE)
+                && !grants.contains(Permission.DEFECT_VIEW_ALL))
+            throw new AccessDeniedException("Evidence view permission is required.");
+        return grants;
+    }
+
+    public static boolean hasDefectViewAll(Set<Permission> grants) {
+        return grants.contains(Permission.DEFECT_VIEW_ALL);
     }
 
     public Set<Permission> permissionsFor(java.util.UUID organizationId, String role) {
@@ -59,7 +81,12 @@ public class PermissionService {
 
     private Set<Permission> legacyPermissions(String role) {
         return switch (role) {
-            case "ADMIN" -> Set.copyOf(EnumSet.allOf(Permission.class));
+            // Keep this legacy test-only fallback explicit so new enum values are not
+            // silently granted to the Administrator role. Production grants are tenant-backed.
+            case "ADMIN" -> Set.of(Permission.VIEW, Permission.DEFECT_VIEW_ALL, Permission.REPORT,
+                Permission.REVIEW, Permission.INSPECT, Permission.ASSIGN_ACTION, Permission.PERFORM_ACTION,
+                Permission.VERIFY, Permission.APPROVE, Permission.CLOSE, Permission.REOPEN, Permission.AUDIT,
+                Permission.ADMINISTER_ORGANIZATION);
             case "SUPERVISOR" -> Set.of(Permission.VIEW, Permission.REPORT, Permission.REVIEW, Permission.INSPECT, Permission.ASSIGN_ACTION, Permission.PERFORM_ACTION, Permission.VERIFY, Permission.APPROVE, Permission.CLOSE, Permission.REOPEN, Permission.AUDIT);
             case "INSPECTOR" -> Set.of(Permission.VIEW, Permission.REPORT, Permission.INSPECT);
             case "MAINTENANCE_TECHNICIAN" -> Set.of(Permission.VIEW, Permission.PERFORM_ACTION);

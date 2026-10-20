@@ -1,4 +1,4 @@
-export type Permission = "VIEW" | "REPORT" | "REVIEW" | "INSPECT" | "ASSIGN_ACTION" | "PERFORM_ACTION" | "VERIFY" | "APPROVE" | "CLOSE" | "REOPEN" | "AUDIT" | "ADMINISTER_ORGANIZATION";
+export type Permission = "VIEW" | "DEFECT_VIEW_ALL" | "REPORT" | "REPORT_VIEW" | "REPORT_EXECUTE" | "REPORT_EXPORT" | "REVIEW" | "INSPECT" | "ASSIGN_ACTION" | "PERFORM_ACTION" | "VERIFY" | "APPROVE" | "CLOSE" | "REOPEN" | "AUDIT" | "ADMINISTER_ORGANIZATION";
 
 export function hasPermission(grants: readonly string[] | undefined, required: Permission) {
   return grants?.includes(required) ?? false;

@@ -50,7 +50,7 @@ public class ConfigurationImportService {
         Map.entry("users", new Definition("Users / memberships", List.of("external_user_id","display_name","role"), List.of("existing.enterprise.subject","Demo User","VIEWER"), "externalUserId")),
         Map.entry("menu-items", new Definition("Menus & submenus", List.of("menu_key","label","parent_key","required_permissions","icon","route_key","display_order"), List.of("cabin-operations","Cabin Operations","","VIEW","✈","operations","100"), "key")),
         Map.entry("roles", new Definition("Roles", List.of("role_key","role_name","description","permissions"), List.of("CABIN_VIEWER","Cabin Viewer","Organization-defined role with VIEW and AUDIT access.","VIEW|AUDIT"), "roleKey")),
-        Map.entry("severities", new Definition("Severity Master", List.of("severity_code","severity_name","description","sort_order"), List.of("LOW","Low","Starter display label only; not an airworthiness classification or maintenance threshold.","10"), "code"))
+        Map.entry("severities", new Definition("Severity Master", List.of("severity_code","severity_name","description","sort_order","background_color","text_color","border_color","icon","display_style"), List.of("LOW","Low","Starter display label only; not an airworthiness classification or maintenance threshold.","10","#E5E7EB","#374151","#9CA3AF","−","SOLID"), "code"))
     );
 
     private final JdbcTemplate jdbc;
@@ -168,7 +168,7 @@ public class ConfigurationImportService {
             case "users" -> { fields.put("externalUserId",raw.get("external_user_id")); fields.put("displayName",raw.get("display_name")); fields.put("role",raw.get("role")); }
             case "menu-items" -> { fields.put("key",raw.get("menu_key")); fields.put("label",raw.get("label")); fields.put("requiredPermissions",raw.get("required_permissions")); fields.put("icon",raw.get("icon")); fields.put("routeKey",raw.get("route_key")); fields.put("displayOrder",raw.get("display_order")); String parent=raw.get("parent_key"); fields.put("parentId", parent==null||parent.isBlank()?"":activeId("navigation_menu_items_mst","menu_key",parent,operatorId,"parent_key")); }
             case "roles" -> { fields.put("roleKey",raw.get("role_key")); fields.put("name",raw.get("role_name")); fields.put("description",raw.get("description")); fields.put("permissions",raw.get("permissions")); }
-            case "severities" -> { fields.put("code",raw.get("severity_code")); fields.put("name",raw.get("severity_name")); fields.put("description",raw.get("description")); fields.put("sortOrder",raw.get("sort_order")); }
+            case "severities" -> { fields.put("code",raw.get("severity_code")); fields.put("name",raw.get("severity_name")); fields.put("description",raw.get("description")); fields.put("sortOrder",raw.get("sort_order")); fields.put("backgroundColor",raw.get("background_color")); fields.put("textColor",raw.get("text_color")); fields.put("borderColor",raw.get("border_color")); fields.put("icon",raw.get("icon")); fields.put("displayStyle",raw.get("display_style")); }
             case "organizations" -> throw new IllegalArgumentException("Organizations are provisioned through operator onboarding and cannot be imported.");
             default -> throw new IllegalArgumentException("Unknown configuration import resource.");
         }
@@ -234,7 +234,7 @@ public class ConfigurationImportService {
             case "users" -> value.contains("role")?"role":value.contains("display")?"display_name":"external_user_id";
             case "menu-items" -> value.contains("parent")?"parent_key":value.contains("permission")?"required_permissions":value.contains("route")?"route_key":value.contains("order")?"display_order":"menu_key";
             case "roles" -> value.contains("permission")?"permissions":value.contains("name")?"role_name":"role_key";
-            case "severities" -> value.contains("order")?"sort_order":value.contains("description")?"description":value.contains("name")?"severity_name":"severity_code";
+            case "severities" -> value.contains("background")?"background_color":value.contains("text")?"text_color":value.contains("border")?"border_color":value.contains("style")?"display_style":value.contains("icon")?"icon":value.contains("order")?"sort_order":value.contains("description")?"description":value.contains("name")?"severity_name":"severity_code";
             case "fleets" -> "fleet_name";
             case "maintenance-teams" -> "team_name";
             default -> "row";

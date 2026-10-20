@@ -19,6 +19,10 @@ public class AreaMaintenanceRoutingService {
     public record WorkflowRequest(String assignmentMode, String reason) {}
     private final JdbcTemplate jdbc;
     private final NotificationService notifications;
+    private com.ecabin.ledger.email.EmailOutboxService emailOutbox;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setEmailOutbox(com.ecabin.ledger.email.EmailOutboxService emailOutbox) { this.emailOutbox = emailOutbox; }
 
     public AreaMaintenanceRoutingService(JdbcTemplate jdbc, NotificationService notifications) {
         this.jdbc = jdbc; this.notifications = notifications;
@@ -47,7 +51,7 @@ public class AreaMaintenanceRoutingService {
         UUID previous=jdbc.query("SELECT default_closure_team_id FROM operators_mst WHERE id=? FOR UPDATE",rs->rs.next()?rs.getObject(1,UUID.class):null,tenant);
         if(teamId.equals(previous))throw new IllegalArgumentException("That team is already configured for closure review.");
         jdbc.update("UPDATE operators_mst SET default_closure_team_id=?,updated_at=now() WHERE id=? AND isactive=1",teamId,tenant);
-        jdbc.update("INSERT INTO defect_events_dtl(operator_id,event_type,note,actor_id,entity_type,entity_id,previous_state,new_state,request_id) VALUES(?,'CLOSURE_REVIEW_ROUTING_CONFIGURED',?,?, 'ORGANIZATION',?,jsonb_build_object('teamId',CAST(? AS text)),jsonb_build_object('teamId',CAST(? AS text)),?)",tenant,change,actor,tenant,previous==null?null:previous.toString(),teamId.toString(),MDC.get("request_id"));
+        jdbc.update("INSERT INTO defect_events_dtl(operator_id,event_type,note,actor_id,entity_type,entity_id,previous_state,new_state,request_id) VALUES(?,'CLOSURE_ROUTE_CONFIGURED',?,?, 'ORGANIZATION',?,jsonb_build_object('teamId',CAST(? AS text)),jsonb_build_object('teamId',CAST(? AS text)),?)",tenant,change,actor,tenant,previous==null?null:previous.toString(),teamId.toString(),MDC.get("request_id"));
         return closureRouting(tenant);
     }
 
@@ -122,6 +126,7 @@ public class AreaMaintenanceRoutingService {
         jdbc.update("UPDATE defects_dtl SET status='ACTION_ASSIGNED',assigned_team=?,updated_at=now(),version=version+1 WHERE operator_id=? AND id=?",teamName,tenant,defectId);
         UUID event=jdbc.query("INSERT INTO defect_events_dtl(operator_id,defect_id,event_type,from_status,to_status,note,actor_id,entity_type,entity_id,new_state,request_id) VALUES(?,?,'AREA_MAINTENANCE_ROUTED','REPORTED','ACTION_ASSIGNED','Defect directly assigned using the active cabin-area mapping.',?,'DEFECT',?,jsonb_build_object('mappingId',CAST(? AS text),'teamName',?,'correctiveActionId',CAST(? AS text)),?) RETURNING id",(rs,row)->rs.getObject(1,UUID.class),tenant,defectId,actor,defectId,mappingId.toString(),teamName,action,MDC.get("request_id")).get(0);
         if(notifications!=null)notifications.notifyMaintenance(tenant,defectId,event,actor,teamName,null,"ACTION_ASSIGNED","A new defect was assigned to your maintenance team.");
+        if(emailOutbox!=null)emailOutbox.enqueue(tenant,defectId,event,actor,"ACTION_ASSIGNED",teamName,null);
         return true;
     }
 

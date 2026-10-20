@@ -82,8 +82,23 @@ public class SecurityConfig {
                 .dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
                 .requestMatchers("/actuator/health", "/actuator/health/**", "/actuator/info").permitAll()
                 .requestMatchers("/api/dev/token").permitAll()
+                .requestMatchers(HttpMethod.GET, "/actuator/prometheus").access(authorization.anyOf(Permission.ADMINISTER_ORGANIZATION))
                 .requestMatchers("/actuator/**", "/api-docs", "/api-docs/**", "/swagger-ui", "/swagger-ui/**", "/swagger-ui.html", "/v3/api-docs/**", "/webjars/**").authenticated()
                 .requestMatchers(HttpMethod.GET, "/api/v1/me", "/api/v1/navigation").access(authorization.authenticatedMember())
+                // The summary endpoint is protected by DefectController's active
+                // membership, defect-read, and record-scope checks. It is not a
+                // report catalog or report-data API.
+                .requestMatchers(HttpMethod.GET, "/api/v1/dashboard/summary").access(authorization.authenticatedMember())
+                .requestMatchers(HttpMethod.GET, "/api/v1/reports", "/api/v1/reports/**").access(authorization.anyOf(Permission.REPORT_VIEW))
+                // Service checks both permissions and the per-report execute grant; the request
+                // gate accepts either permission so authenticated callers receive that precise check.
+                .requestMatchers(HttpMethod.POST, "/api/v1/reports/*/query").access(authorization.anyOf(Permission.REPORT_VIEW, Permission.REPORT_EXECUTE))
+                .requestMatchers(HttpMethod.POST, "/api/v1/reports/*/export").access(authorization.anyOf(Permission.REPORT_VIEW, Permission.REPORT_EXECUTE, Permission.REPORT_EXPORT))
+                .requestMatchers(HttpMethod.GET, "/api/v1/report-templates").access(authorization.anyOf(Permission.ADMINISTER_ORGANIZATION))
+                .requestMatchers(HttpMethod.GET, "/api/v1/report-admin/**").access(authorization.anyOf(Permission.ADMINISTER_ORGANIZATION))
+                .requestMatchers(HttpMethod.POST, "/api/v1/report-admin/**").access(authorization.anyOf(Permission.ADMINISTER_ORGANIZATION))
+                .requestMatchers(HttpMethod.GET, "/api/v1/workflow-statuses", "/api/v1/workflow-statuses/**").access(authorization.anyOf(Permission.VIEW, Permission.DEFECT_VIEW_ALL, Permission.REPORT, Permission.REVIEW, Permission.INSPECT, Permission.ASSIGN_ACTION, Permission.PERFORM_ACTION, Permission.VERIFY, Permission.APPROVE, Permission.CLOSE, Permission.REOPEN))
+                .requestMatchers(HttpMethod.POST, "/api/v1/workflow-statuses/**").access(authorization.anyOf(Permission.ADMINISTER_ORGANIZATION))
                 .requestMatchers(HttpMethod.GET, "/api/v1/administration/login-monitoring/**").access(authorization.anyOf(Permission.ADMINISTER_ORGANIZATION))
                 .requestMatchers(HttpMethod.POST, "/api/v1/auth/logout").access(authorization.authenticatedMember())
                 .requestMatchers(HttpMethod.GET, "/api/v1/rate-limits/**").access(authorization.anyOf(Permission.ADMINISTER_ORGANIZATION))
@@ -93,15 +108,25 @@ public class SecurityConfig {
                 .requestMatchers(HttpMethod.GET, "/api/v1/notifications").access(authorization.anyOf(Permission.VIEW))
                 .requestMatchers(HttpMethod.GET, "/api/v1/review-queue").access(authorization.anyOf(Permission.REVIEW, Permission.ADMINISTER_ORGANIZATION))
                 .requestMatchers(HttpMethod.GET, "/api/v1/reviewer-teams").access(authorization.anyOf(Permission.REVIEW))
-                .requestMatchers(HttpMethod.GET, "/api/v1/defects/*/review-decision-options", "/api/v1/defects/*/attachments").access(authorization.anyOf(Permission.REVIEW))
-                .requestMatchers(HttpMethod.GET, "/api/v1/defects/*/events").access(authorization.anyOf(Permission.AUDIT, Permission.REVIEW))
+                .requestMatchers(HttpMethod.GET, "/api/v1/defects/*/review-decision-options").access(authorization.anyOf(Permission.REVIEW))
+                .requestMatchers(HttpMethod.GET, "/api/v1/defects/*/attachments").access(authorization.anyOf(Permission.REPORT, Permission.PERFORM_ACTION, Permission.REVIEW, Permission.APPROVE, Permission.DEFECT_VIEW_ALL))
+                .requestMatchers(HttpMethod.GET, "/api/v1/defects/*/events").access(authorization.anyOf(Permission.AUDIT, Permission.PERFORM_ACTION, Permission.REVIEW, Permission.DEFECT_VIEW_ALL))
                 .requestMatchers(HttpMethod.GET, "/api/v1/defects/*/operational-forms").access(authorization.authenticatedMember())
-                .requestMatchers(HttpMethod.GET, "/api/v1/areas/*/forms", "/api/v1/forms/**", "/api/v1/reference-data", "/api/v1/reference-data/**", "/api/v1/defects/*/form-submissions").access(authorization.anyOf(Permission.VIEW,Permission.REPORT,Permission.REVIEW))
+                .requestMatchers(HttpMethod.GET, "/api/v1/areas/*/forms").access(authorization.anyOf(Permission.VIEW, Permission.DEFECT_VIEW_ALL, Permission.REPORT, Permission.REVIEW))
+                .requestMatchers(HttpMethod.GET, "/api/v1/reference-data/severity-badges").access(authorization.anyOf(Permission.VIEW,Permission.DEFECT_VIEW_ALL,Permission.REPORT,Permission.REVIEW,Permission.INSPECT,Permission.ASSIGN_ACTION,Permission.PERFORM_ACTION,Permission.VERIFY,Permission.APPROVE,Permission.CLOSE,Permission.REOPEN))
+                .requestMatchers(HttpMethod.GET, "/api/v1/reference-data", "/api/v1/reference-data/**").access(authorization.anyOf(Permission.VIEW,Permission.REPORT,Permission.REVIEW))
+                // Published form definitions/options and case submissions are needed by the
+                // corresponding operational teams; controller/service checks still enforce
+                // the exact form purpose, case scope, and workflow permission.
+                .requestMatchers(HttpMethod.GET, "/api/v1/forms/**", "/api/v1/defects/*/form-submissions").access(authorization.anyOf(
+                    Permission.VIEW, Permission.REPORT, Permission.REVIEW, Permission.INSPECT,
+                    Permission.PERFORM_ACTION, Permission.VERIFY, Permission.APPROVE, Permission.REOPEN, Permission.DEFECT_VIEW_ALL))
                 .requestMatchers(HttpMethod.GET, "/api/v1/aircraft/options").access(authorization.anyOf(Permission.REPORT))
-                .requestMatchers(HttpMethod.GET, "/api/v1/aircraft/**").access(authorization.anyOf(Permission.VIEW))
-                .requestMatchers(HttpMethod.GET, "/api/v1/defects", "/api/v1/defects/*", "/api/v1/dashboard/summary",
-                    "/api/v1/fleet-status/**", "/api/v1/attachments/*/download")
-                    .access(authorization.anyOf(Permission.VIEW))
+                .requestMatchers(HttpMethod.GET, "/api/v1/aircraft/**").access(authorization.anyOf(Permission.VIEW, Permission.DEFECT_VIEW_ALL))
+                .requestMatchers(HttpMethod.GET, "/api/v1/attachments/*/download").access(authorization.anyOf(Permission.VIEW, Permission.REPORT, Permission.PERFORM_ACTION, Permission.REVIEW, Permission.APPROVE, Permission.DEFECT_VIEW_ALL))
+                .requestMatchers(HttpMethod.GET, "/api/v1/defects", "/api/v1/defects/*",
+                    "/api/v1/fleet-status/**")
+                    .access(authorization.anyOf(Permission.VIEW, Permission.DEFECT_VIEW_ALL))
                 .requestMatchers(HttpMethod.GET, "/api/v1/configuration/**").access(authorization.anyOf(Permission.ADMINISTER_ORGANIZATION))
                 .requestMatchers(HttpMethod.POST, "/api/v1/defects").access(authorization.anyOf(Permission.REPORT))
                 .requestMatchers(HttpMethod.POST, "/api/v1/notifications/**").access(authorization.anyOf(Permission.VIEW))
