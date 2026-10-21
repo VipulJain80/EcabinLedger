@@ -70,7 +70,7 @@ class PostgresMigrationSmokeTest {
                 assertTrue(!actual.contains("legacy_cabin_zones_archive"), "The retired cabin-zones table and its temporary archive must be removed.");
                 assertTrue(!actual.contains("cabin_zones_mst"), "The retired cabin-zones master must not remain under its application name.");
                 assertTrue(actual.stream().noneMatch(name -> name.endsWith("_mst_mst") || name.endsWith("_dtl_dtl") || name.endsWith("_mst_dtl") || name.endsWith("_dtl_mst")), "No table may have a duplicated or conflicting suffix.");
-                assertEquals(63, appliedMigrationCount(connection), "All versioned migrations, including V63, must be recorded as applied.");
+                assertEquals(67, appliedMigrationCount(connection), "All versioned migrations, including V67, must be recorded as applied.");
                 try (var emailObjects = connection.prepareStatement("SELECT (SELECT count(*) FROM pg_constraint WHERE conrelid=?::regclass AND conname='defect_events_operator_id_id_uq' AND contype='u'),(SELECT count(*) FROM pg_constraint WHERE conrelid=?::regclass AND conname='email_outbox_source_event_fk' AND contype='f'),(SELECT count(*) FROM pg_constraint WHERE conrelid=?::regclass AND conname='email_outbox_idempotency_uq' AND contype='u'),(SELECT count(*) FROM pg_indexes WHERE schemaname=? AND indexname IN ('email_outbox_due_idx','email_outbox_expired_lease_idx','email_outbox_tenant_status_idx','email_outbox_event_idx')),(SELECT count(DISTINCT trigger_name) FROM information_schema.triggers WHERE trigger_schema=? AND event_object_table IN ('email_notification_settings_mst','email_notification_event_settings_mst','email_outbox_dtl','email_outbox_attempts_dtl') AND trigger_name LIKE 'audit_email_%'),(SELECT count(DISTINCT trigger_name) FROM information_schema.triggers WHERE trigger_schema=? AND trigger_name IN ('email_global_setting_audit','email_event_setting_audit'))")) {
                     emailObjects.setString(1, SCHEMA + ".defect_events_dtl"); emailObjects.setString(2, SCHEMA + ".email_outbox_dtl"); emailObjects.setString(3, SCHEMA + ".email_outbox_dtl"); emailObjects.setString(4, SCHEMA); emailObjects.setString(5, SCHEMA); emailObjects.setString(6, SCHEMA);
                     try (var emailRows = emailObjects.executeQuery()) { emailRows.next(); assertEquals(1, emailRows.getInt(1), "V62 must add the tenant composite event key only once."); assertEquals(1, emailRows.getInt(2), "Outbox source events must use a tenant-safe FK."); assertEquals(1, emailRows.getInt(3), "Outbox enqueueing must be idempotent per event, recipient and type."); assertEquals(4, emailRows.getInt(4), "Worker claim and operational paths must have their supporting indexes."); assertEquals(4, emailRows.getInt(5), "Email settings and worker writes must use the standard audit metadata trigger."); assertEquals(2, emailRows.getInt(6), "Switch changes must be appended to the existing audit event stream."); }
@@ -296,7 +296,9 @@ class PostgresMigrationSmokeTest {
             assertTrue(service.table(demoOperator, "role-permissions", 0, 100, "", "ACTIVE", null, null, null, "name", "ASC").totalElements() >= 6);
             assertEquals(7, service.table(demoOperator, "severities", 0, 100, "", "ACTIVE", null, null, null, "sortOrder", "ASC").totalElements());
             assertEquals("Low", service.list(demoOperator, "severities", false).get(0).get("name"));
-            assertEquals(Set.of(com.ecabin.ledger.security.Permission.VIEW,com.ecabin.ledger.security.Permission.REPORT,com.ecabin.ledger.security.Permission.AUDIT),permissions.permissionsFor(demoOperator, "AUDITOR"));
+            assertTrue(permissions.permissionsFor(demoOperator, "AUDITOR").containsAll(Set.of(
+                com.ecabin.ledger.security.Permission.VIEW, com.ecabin.ledger.security.Permission.REPORT)),
+                "The Auditor role must retain its baseline permissions while preserving any existing tenant-configured grants.");
             assertTrue(permissions.permissionsFor(demoOperator, "REVIEWER").containsAll(Set.of(
                 com.ecabin.ledger.security.Permission.VIEW, com.ecabin.ledger.security.Permission.REVIEW)),
                 "The Reviewer role must retain its baseline permissions while preserving any existing tenant-configured grants.");
@@ -311,7 +313,9 @@ class PostgresMigrationSmokeTest {
             assertTrue(reviewerMenu.contains("defects"), "The Reviewer account should receive the shared Defect Register through its VIEW permission.");
             assertTrue(!reviewerMenu.contains("review-queue"), "The separate Reviewer queue is no longer an Operations menu entry.");
             assertTrue(!flattenNavigation(reviewerNavigation).contains("roles") && !flattenNavigation(reviewerNavigation).contains("menu-items"), "Reviewer must not receive organization administration screens.");
-            assertTrue(flattenNavigation(auditorNavigation).contains("audit"), "The Auditor account should receive the backend-authorized audit menu.");
+            assertEquals(permissions.permissionsFor(demoOperator, "AUDITOR").contains(com.ecabin.ledger.security.Permission.AUDIT),
+                flattenNavigation(auditorNavigation).contains("audit"),
+                "The Auditor audit menu must match its configured AUDIT permission.");
             assertTrue(!flattenNavigation(auditorNavigation).contains("review-queue"), "Auditor must not receive Reviewer queue access without REVIEW.");
             assertTrue(!flattenNavigation(maintenanceNavigation).contains("audit"), "Maintenance must not receive the audit menu without AUDIT.");
             assertTrue(flattenNavigation(adminNavigation).contains("roles") && flattenNavigation(adminNavigation).contains("menu-items"), "The separate tenant ADMIN account should receive organization administration menus.");

@@ -16,7 +16,7 @@ import ActivityTimeline from "./ActivityTimeline";
 import { DefectActivity, safeReturnPath } from "./defectDetailsModel";
 
 type Defect = { id:string; reference:string; tailNumber:string; aircraftType:string; location:string; category:string; zone:string; rowNumber:number|null; seatReference:string|null; component:string|null; areaId:string; componentId:string|null; conditionId:string|null; conditionName:string|null; title:string; description:string; severity:string; severityName:string; status:string; reportedBy:string; assignedTo:string|null; assignedTeam:string|null; activeActionId:string|null; dueAt:string|null; reportedAt:string; updatedAt:string; routingAttention:string|null };
-type Identity = { organizationName:string; displayName:string; role:string; permissions:string[] };
+type Identity = { organizationName:string; applicationName:string; displayName:string; role:string; permissions:string[] };
 type Attachment = { id:string; defectId:string; formSubmissionId:string|null; fieldKey:string; filename:string; mimeType:string; sizeBytes:number; scanStatus:string; uploadedAt:string };
 type Props = { defectId:string; onBack?:()=>void };
 const API = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8080/api/v1";
@@ -57,7 +57,7 @@ export default function DefectDetailsPage({defectId,onBack}:Props) {
 
   useEffect(()=>{const url=attachmentPreview?.url;return()=>{if(url)URL.revokeObjectURL(url);};},[attachmentPreview?.url]);
 
-  useEffect(()=>{const previousTitle=document.title;document.title=defect?`${defect.reference} · Defect Details | eCabin Ledger`:"Defect Details | eCabin Ledger";return()=>{document.title=previousTitle;};},[defect]);
+  useEffect(()=>{const previousTitle=document.title;const applicationName=identity?.applicationName?.trim()||"eCabin Ledger";document.title=defect?`${defect.reference} · Defect Details | ${applicationName}`:`Defect Details | ${applicationName}`;return()=>{document.title=previousTitle;};},[defect,identity?.applicationName]);
 
   async function viewAttachment(file:Attachment) {
     if(file.scanStatus==="REJECTED")return;

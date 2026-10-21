@@ -100,6 +100,8 @@ public class SecurityConfig {
                 .requestMatchers(HttpMethod.GET, "/api/v1/workflow-statuses", "/api/v1/workflow-statuses/**").access(authorization.anyOf(Permission.VIEW, Permission.DEFECT_VIEW_ALL, Permission.REPORT, Permission.REVIEW, Permission.INSPECT, Permission.ASSIGN_ACTION, Permission.PERFORM_ACTION, Permission.VERIFY, Permission.APPROVE, Permission.CLOSE, Permission.REOPEN))
                 .requestMatchers(HttpMethod.POST, "/api/v1/workflow-statuses/**").access(authorization.anyOf(Permission.ADMINISTER_ORGANIZATION))
                 .requestMatchers(HttpMethod.GET, "/api/v1/administration/login-monitoring/**").access(authorization.anyOf(Permission.ADMINISTER_ORGANIZATION))
+                .requestMatchers(HttpMethod.GET, "/api/v1/email-notification-settings").access(authorization.anyOf(Permission.ADMINISTER_ORGANIZATION))
+                .requestMatchers(HttpMethod.POST, "/api/v1/email-notification-settings/global", "/api/v1/email-notification-settings/events/*").access(authorization.anyOf(Permission.ADMINISTER_ORGANIZATION))
                 .requestMatchers(HttpMethod.POST, "/api/v1/auth/logout").access(authorization.authenticatedMember())
                 .requestMatchers(HttpMethod.GET, "/api/v1/rate-limits/**").access(authorization.anyOf(Permission.ADMINISTER_ORGANIZATION))
                 .requestMatchers(HttpMethod.POST, "/api/v1/rate-limits/**").access(authorization.anyOf(Permission.ADMINISTER_ORGANIZATION))

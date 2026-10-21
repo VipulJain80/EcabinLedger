@@ -146,7 +146,7 @@ public final class ApiModels {
     public record ReviewerQueuePage(List<ReviewerQueueRow> items, int page, int size, long totalElements, int totalPages) {}
     public record ReviewerTeamOption(UUID id,String name,int eligibleMembers) {}
     public record ConditionOption(UUID id, String code, String name, String description) {}
-    public record CurrentUserView(String organizationName, String displayName, String role, Set<String> permissions) {}
+    public record CurrentUserView(String organizationName, String applicationName, String displayName, String role, Set<String> permissions) {}
     public record NavigationItem(String key, String label, String icon, String section, List<NavigationItem> children) {}
     public record ErrorBody(ErrorDetail error) {}
     public record ErrorDetail(String code, String message) {}

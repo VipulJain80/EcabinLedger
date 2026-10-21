@@ -96,5 +96,5 @@ public final class FormModels {
     public record FormSubmission(UUID id, UUID defectId, UUID formId, UUID versionId, int versionNumber, FormPurpose purpose, WorkflowStage workflowStage,
         String submittedBy, FormDataSnapshot snapshot, Instant submittedAt) {}
     public record AttachmentView(UUID id, UUID defectId, UUID formSubmissionId, String fieldKey, String filename,
-        String mimeType, long sizeBytes, String scanStatus, Instant uploadedAt) {}
+        String mimeType, long sizeBytes, String scanStatus, Instant uploadedAt, String source, String uploadedBy) {}
 }

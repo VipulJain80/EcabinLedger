@@ -35,7 +35,7 @@ public class ConfigurationService {
     private record TableQuery(String from, String select, String where, List<Object> args, String orderBy) {}
 
     private enum Resource {
-        ORGANIZATION("organizations", "Organization", "operators_mst", "id,name,isactive,created_at,updated_at", Map.of("name", "name"), false),
+        ORGANIZATION("organizations", "Organization", "operators_mst", "id,name,application_name AS \"applicationName\",isactive,created_at,updated_at", Map.of("name", "name", "applicationName", "application_name"), false),
         FLEETS("fleets", "Fleets", "fleets_mst", "id,name,isactive,created_at,updated_at", Map.of("name", "name"), true),
         AIRCRAFT("aircraft", "Aircraft", "aircraft_mst", "id,fleet_id AS \"fleetId\",msn_number AS \"msnNumber\",tail_number AS \"tailNumber\",aircraft_type AS \"aircraftType\",isactive,created_at,updated_at", Map.of("fleetId", "fleet_id", "msnNumber", "msn_number", "tailNumber", "tail_number", "aircraftType", "aircraft_type"), true),
         CATEGORIES("defect-categories", "Defect categories", "defect_categories_mst", "id,code,name,description,isactive,created_at,updated_at", Map.of("code", "code", "name", "name", "description", "description"), true),
@@ -64,7 +64,7 @@ public class ConfigurationService {
 
     private static final Set<String> PERMISSIONS = java.util.Arrays.stream(Permission.values()).map(Enum::name).collect(java.util.stream.Collectors.toUnmodifiableSet());
     private static final Set<String> DEFECT_VIEW_ALL_NAVIGATION_ROUTES = Set.of("home", "operations", "defects");
-    private static final Set<String> NAVIGATION_ROUTE_KEYS = Set.of("home","operations","reports","audit","configuration","defects","fleet","quality","organizations","fleets","aircraft","areas","defect-categories","defect-conditions","components","maintenance-teams","reviewer-routing","area-team-mapping","maintenance-sla-policies","review-queue","users","menu-items","roles","severities","permissions","role-permissions","api-rate-limits","user-login-monitoring","report-defect","report-master");
+    private static final Set<String> NAVIGATION_ROUTE_KEYS = Set.of("home","operations","reports","audit","configuration","defects","fleet","quality","organizations","fleets","aircraft","areas","defect-categories","defect-conditions","components","maintenance-teams","reviewer-routing","area-team-mapping","maintenance-sla-policies","review-queue","users","menu-items","roles","severities","permissions","role-permissions","api-rate-limits","user-login-monitoring","report-defect","report-master","email-notifications");
     private final JdbcTemplate jdbc;
     private final ObjectMapper mapper;
 
@@ -98,6 +98,7 @@ public class ConfigurationService {
         items.add(new MenuItem("role-permissions", "Role-Permission Mapping", "Review each role’s effective supported permissions and restrictions"));
         items.add(new MenuItem("forms", "Form Master", "Versioned area-specific operational forms"));
         items.add(new MenuItem("report-master", "Report Master", "Configure tenant reports, filters, columns and role access"));
+        items.add(new MenuItem("email-notifications", "Email Notifications", "Control organization-wide and workflow email delivery"));
         return List.copyOf(items);
     }
 
@@ -294,7 +295,7 @@ public class ConfigurationService {
 
     private String tableSelect(Resource resource) {
         return switch (resource) {
-            case ORGANIZATION -> "o.id,o.name,o.isactive,o.created_at,o.updated_at";
+            case ORGANIZATION -> "o.id,o.name,o.application_name AS \"applicationName\",o.isactive,o.created_at,o.updated_at";
             case FLEETS -> "r.id,r.name,r.isactive,r.created_at,r.updated_at";
             case AIRCRAFT -> "r.id,r.msn_number AS \"msnNumber\",r.tail_number AS \"tailNumber\",r.aircraft_type AS \"aircraftType\",r.fleet_id AS \"fleetId\",f.name AS \"fleetName\",r.isactive,r.created_at,r.updated_at";
             case AREAS -> "r.id,r.code,r.name,r.shortcode,r.description,r.isactive,r.created_at,r.updated_at";
@@ -313,7 +314,7 @@ public class ConfigurationService {
 
     private List<String> searchColumns(Resource resource) {
         return switch (resource) {
-            case ORGANIZATION -> List.of("o.name");
+            case ORGANIZATION -> List.of("o.name","o.application_name");
             case FLEETS -> List.of("r.name");
             case TEAMS -> List.of("r.name","r.team_type");
             case AIRCRAFT -> List.of("r.msn_number","r.tail_number","r.aircraft_type");
@@ -332,7 +333,7 @@ public class ConfigurationService {
 
     private Map<String,String> sortableColumns(Resource resource) {
         return switch (resource) {
-            case ORGANIZATION -> Map.of("name","o.name","created_at","o.created_at","updated_at","o.updated_at");
+            case ORGANIZATION -> Map.of("name","o.name","applicationName","o.application_name","created_at","o.created_at","updated_at","o.updated_at");
             case FLEETS -> Map.of("name","r.name","created_at","r.created_at","updated_at","r.updated_at");
             case AIRCRAFT -> Map.of("msnNumber","r.msn_number","tailNumber","r.tail_number","aircraftType","r.aircraft_type","fleetName","f.name","created_at","r.created_at");
             case AREAS -> Map.of("code","r.code","name","r.name","shortcode","r.shortcode","description","r.description","created_at","r.created_at");
@@ -351,7 +352,7 @@ public class ConfigurationService {
 
     private List<String[]> exportColumns(Resource resource) {
         return switch (resource) {
-            case ORGANIZATION -> List.of(new String[]{"Organization","name"},new String[]{"Status","isactive"},new String[]{"Created","created_at"});
+            case ORGANIZATION -> List.of(new String[]{"Organization","name"},new String[]{"Application name","applicationName"},new String[]{"Status","isactive"},new String[]{"Created","created_at"});
             case FLEETS -> List.of(new String[]{"Fleet","name"},new String[]{"Status","isactive"},new String[]{"Created","created_at"});
             case AIRCRAFT -> List.of(new String[]{"MSN Number","msnNumber"},new String[]{"Registration","tailNumber"},new String[]{"Aircraft type","aircraftType"},new String[]{"Fleet","fleetName"},new String[]{"Status","isactive"},new String[]{"Created","created_at"});
             case AREAS -> List.of(new String[]{"Area code","code"},new String[]{"Area name","name"},new String[]{"Shortcode","shortcode"},new String[]{"Description","description"},new String[]{"Status","isactive"},new String[]{"Created","created_at"});
@@ -744,7 +745,7 @@ public class ConfigurationService {
             args.add(dbValue(resource, entry.getKey(), entry.getValue()));
         }
         if (resource == Resource.ORGANIZATION) {
-            jdbc.update("UPDATE operators_mst SET name=?,updated_at=now() WHERE id=? AND isactive=1", values.get("name"), UUID.fromString(id));
+            jdbc.update("UPDATE operators_mst SET name=?,application_name=COALESCE(?,application_name),updated_at=now() WHERE id=? AND isactive=1", values.get("name"), values.get("applicationName"), UUID.fromString(id));
             return;
         }
         if (resource == Resource.USERS) {

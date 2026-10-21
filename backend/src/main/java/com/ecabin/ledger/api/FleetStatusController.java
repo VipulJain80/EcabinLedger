@@ -25,7 +25,7 @@ import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBo
 @RestController
 @RequestMapping("/api/v1/fleet-status")
 public class FleetStatusController {
-    private record ReadContext(AuthenticatedUser user, boolean viewAll) {}
+    private record ReadContext(AuthenticatedUser user) {}
     private final DefectService defects;
     private final CurrentUserResolver users;
     private final PermissionService permissions;
@@ -45,18 +45,18 @@ public class FleetStatusController {
             @RequestParam(defaultValue = "ASC") String sortDirection) {
         ReadContext context = requireView(auth);
         AuthenticatedUser user = context.user();
-        boolean viewAll = context.viewAll();
-        return defects.fleetStatus(user.organizationId(), user.externalUserId(), !viewAll && permissions.isMaintenanceTeamScoped(user.organizationId(), user.role()),
-            !viewAll && permissions.isReporterScoped(user.organizationId(), user.role()), !viewAll && permissions.isReviewerTeamScoped(user.organizationId(),user.role()), fleetId, aircraftType, page, size, search, sortBy, sortDirection);
+        // Fleet Status is a shared organization overview. Keep tenant isolation and
+        // requireView above, while showing the same fleet/defect aggregates to each role.
+        return defects.fleetStatus(user.organizationId(), user.externalUserId(), false,
+            false, false, fleetId, aircraftType, page, size, search, sortBy, sortDirection);
     }
 
     @GetMapping("/summary")
     public com.ecabin.ledger.api.ApiModels.FleetDefectSummary summary(JwtAuthenticationToken auth) {
         ReadContext context = requireView(auth);
         AuthenticatedUser user = context.user();
-        boolean viewAll = context.viewAll();
-        return defects.fleetDefectSummary(user.organizationId(), user.externalUserId(), !viewAll && permissions.isMaintenanceTeamScoped(user.organizationId(), user.role()),
-            !viewAll && permissions.isReporterScoped(user.organizationId(), user.role()), !viewAll && permissions.isReviewerTeamScoped(user.organizationId(),user.role()));
+        return defects.fleetDefectSummary(user.organizationId(), user.externalUserId(), false,
+            false, false);
     }
 
     @GetMapping(value = "/export", produces = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -70,11 +70,7 @@ public class FleetStatusController {
         ReadContext context = requireView(auth);
         AuthenticatedUser user = context.user();
         UUID operatorId = user.organizationId();
-        boolean viewAll = context.viewAll();
-        boolean teamScoped = !viewAll && permissions.isMaintenanceTeamScoped(operatorId, user.role());
-        boolean reporterScoped = !viewAll && permissions.isReporterScoped(operatorId, user.role());
-        boolean reviewerScoped = !viewAll && permissions.isReviewerTeamScoped(operatorId,user.role());
-        StreamingResponseBody body = output -> defects.exportFleetStatus(operatorId, user.externalUserId(), teamScoped, reporterScoped, reviewerScoped, fleetId, aircraftType, search, sortBy, sortDirection, columns, output);
+        StreamingResponseBody body = output -> defects.exportFleetStatus(operatorId, user.externalUserId(), false, false, false, fleetId, aircraftType, search, sortBy, sortDirection, columns, output);
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.parseMediaType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"));
         headers.setContentDisposition(ContentDisposition.attachment().filename("ecabin-fleet-status.xlsx", StandardCharsets.UTF_8).build());
@@ -85,6 +81,6 @@ public class FleetStatusController {
     private ReadContext requireView(JwtAuthenticationToken auth) {
         AuthenticatedUser user = users.require(auth);
         var grants = permissions.requireDefectRead(user);
-        return new ReadContext(user, PermissionService.hasDefectViewAll(grants));
+        return new ReadContext(user);
     }
 }

@@ -1963,3 +1963,233 @@ Verification:
 - `frontend/pnpm lint` — passed with the existing `loginhome/page.tsx:83` unused-variable warning.
 - `frontend/pnpm exec tsc --noEmit` — passed.
 - `git diff --check` — passed.
+
+-------------------------------------21OCT2026--------
+
+2026-10-21 — Correct workflow-status API routing and defer severity metadata
+
+The login-home page now requests workflow-status metadata through the backend API base URL, so the request targets `/api/v1/workflow-statuses` rather than the frontend origin. Removed the page-level eager severity metadata fetch; severity definitions are requested by `SeverityBadge` only when a defect view renders a badge. The defect-details badge also uses the API-prefixed request wrapper.
+
+Files modified for this update:
+- frontend/src/app/loginhome/page.tsx — route workflow-status and severity requests through the backend API wrapper and remove redundant eager severity loading.
+- updatesfiles.me — append this implementation record.
+
+Verification:
+- `git diff --check` — passed.
+- Tests, lint, and build were not run.
+
+2026-10-21 — Handle missing evidence source metadata
+
+Made the Closure Review evidence labels resilient when an older backend response or legacy attachment lacks source/uploader metadata. The interface now displays a safe “source unavailable” fallback instead of throwing a runtime error.
+
+Files modified:
+- frontend/src/common/forms/OperationalFormRenderer.tsx — support missing source/uploader fields and render a fallback label.
+- updatesfiles.me — append this implementation record.
+
+Verification:
+- `git diff --check` — passed.
+- Tests, lint, and build were not run.
+
+2026-10-21 — Identify evidence source in Closure Review
+
+Closure Review evidence now shows the source form purpose (such as Auditor report or Maintenance action), uploader identity, and upload time. The attachment list derives these values from tenant-scoped attachment, form, and submission metadata; image retrieval and authorization are unchanged.
+
+Files modified:
+- backend/src/main/java/com/ecabin/ledger/api/FormModels.java — include source purpose and uploader in attachment metadata responses.
+- backend/src/main/java/com/ecabin/ledger/service/AttachmentService.java — return tenant-scoped source and uploader metadata with each case attachment.
+- frontend/src/common/forms/OperationalFormRenderer.tsx — display evidence source, uploader, and upload time in Closure Review.
+- updatesfiles.me — append this implementation record.
+
+Verification:
+- `git diff --check` — passed.
+- Tests, lint, and build were not run.
+
+2026-10-21 — Remove case-wide Submitted forms panel from Update Case
+
+Removed the redundant Submitted forms history from the editable Update Case form, including the Reviewer and Maintenance workflow forms. Prior form submissions and decisions remain available in the case Audit Trail. Removed the associated form-submission history fetches/refetches from the operational form renderer; workflow submit requests and refresh behavior are unchanged.
+
+Files modified:
+- frontend/src/common/forms/OperationalFormRenderer.tsx — remove the redundant submission history UI and its read requests from Update Case.
+- updatesfiles.me — append this implementation record.
+
+Verification:
+- `git diff --check` — passed.
+- Tests, lint, and build were not run.
+
+2026-10-21 — Hide form version labels in Update Case
+
+Removed displayed version numbers from the Update Case workflow, including the Reviewer submitted-report heading, Reviewer form selector, operational form selector, and submitted-forms history. Form version IDs and backend submission behavior remain unchanged.
+
+Files modified:
+- frontend/src/common/fleet/GalleyReviewerDecisionForm.tsx — show submitted and selectable Reviewer form names without version numbers.
+- frontend/src/common/forms/OperationalFormRenderer.tsx — hide version labels in defect workflow selectors and submitted-form history while retaining versions outside that workflow.
+- updatesfiles.me — append this implementation record.
+
+Verification:
+- `git diff --check` — passed.
+- Tests, lint, and build were not run.
+
+2026-10-21 — Preview Reviewer decision evidence in a modal
+
+Reviewer decision evidence now opens in the shared attachment preview modal instead of a new browser tab. The modal provides the same image/PDF preview, download, and close controls used for Supporting documents. Authenticated attachment fetching remains in place, rejected evidence stays unavailable, and preview object URLs are revoked when the modal closes or the preview changes.
+
+Files modified:
+- frontend/src/common/fleet/GalleyReviewerDecisionForm.tsx — use the shared attachment preview dialog for Reviewer decision evidence.
+- updatesfiles.me — append this implementation record.
+
+Verification:
+- `git diff --check` — passed.
+- Tests, lint, and build were not run.
+
+2026-10-21 — Show Report Defect success as an alert
+
+Successful defect submissions now use the shared success toast with the defect reference and reported status instead of rendering the confirmation in a green banner below the form. The Open defect and Report another defect actions remain beside the form controls; submission errors continue to appear inline and as an error alert.
+
+Files modified:
+- frontend/src/common/fleet/ReportDefectPage.tsx — send the success message through the shared alert service and remove the duplicate inline success banner.
+- updatesfiles.me — append this implementation record.
+
+Verification:
+- `git diff --check` — passed.
+- Tests, lint, and build were not run.
+
+Other worktree changes observed today and left untouched by this update: README.md and docs/my.backup.
+
+2026-10-21 — Show shared organization-wide Fleet Status data
+
+Fleet Status now uses the same organization-wide aircraft and defect aggregates for every role that has defect-read access. Tenant isolation and the existing VIEW/DEFECT_VIEW_ALL authorization remain enforced. Reviewer, reporter, and maintenance role scopes continue to apply on their dedicated defect and work-queue pages. Fleet Status export uses the same shared scope as its table.
+
+Files modified:
+- backend/src/main/java/com/ecabin/ledger/api/FleetStatusController.java — stop applying per-role record scopes to Fleet Status table, summary, and export requests while retaining tenant resolution and defect-read authorization.
+- updatesfiles.me — append this implementation record.
+
+Verification:
+- `git diff --check` — passed.
+- Tests, lint, and build were not run.
+
+2026-10-21 — Serve application branding per operator
+
+Added a tenant-specific application name to each operator record, defaulting existing and newly provisioned operators to “eCabin Ledger”. The authenticated `/me` response now returns that name alongside the organization name, and the application header, logo initial, and page title use the backend value. Operators can be given distinct names by setting their own `operators_mst.application_name` value.
+
+Files modified:
+- backend/src/main/resources/db/migration/V64__operator_application_name.sql — add the nonblank, tenant-specific application name with a backward-compatible default.
+- backend/src/main/java/com/ecabin/ledger/service/DefectService.java — load the organization and application names together for the authenticated tenant.
+- backend/src/main/java/com/ecabin/ledger/api/ApiModels.java — include `applicationName` in the current-user response DTO.
+- backend/src/main/java/com/ecabin/ledger/api/DefectController.java — return branding from the authenticated tenant's operator record.
+- frontend/src/app/loginhome/page.tsx — render the server-provided application name and initial in the shell and use it in the page title.
+- frontend/src/common/fleet/DefectDetailsPage.tsx — use the server-provided application name in the detail page title.
+- updatesfiles.me — append this implementation record.
+
+Verification:
+- `git diff --check` — passed.
+- Tests, lint, and build were not run.
+
+2026-10-21 — Update migration smoke-test head for V64
+
+Updated the migration smoke test's expected applied migration count and message to include V64, matching the migration head applied by Flyway.
+
+Files modified:
+- backend/src/test/java/com/ecabin/ledger/service/PostgresMigrationSmokeTest.java — expect migrations through V64.
+- updatesfiles.me — append this implementation record.
+
+Verification:
+- `git diff --check` — passed.
+- The migration smoke test was not rerun; the provided run already applied V64 to the local verification schema.
+
+2026-10-21 — Add Email Notifications administration master
+
+Added one Administration page for the organization-wide email switch and all 14 workflow-event switches. Tenant-scoped GET/POST APIs require active membership and ADMINISTER_ORGANIZATION in both the security boundary and service layer. Updates set transaction-local actor and request context before changing rows, so V63 writes actor-attributed audit events. Delivery remains off by default; existing worker behavior pauses queued delivery when either switch is off.
+
+Files modified:
+- backend/src/main/java/com/ecabin/ledger/api/EmailNotificationSettingsController.java — expose the authorized settings read and switch updates.
+- backend/src/main/java/com/ecabin/ledger/service/EmailNotificationSettingsService.java — load and update tenant settings with audit context and server-defined event catalog.
+- backend/src/main/java/com/ecabin/ledger/config/SecurityConfig.java — explicitly protect the new GET/POST routes and preserve default deny.
+- backend/src/main/java/com/ecabin/ledger/service/ConfigurationService.java — allowlist the administration route and include it in the administration section catalog.
+- backend/src/main/resources/db/migration/V65__email_notification_settings_navigation.sql — add the authorized Administration menu item for existing and provisioned tenants.
+- backend/src/test/java/com/ecabin/ledger/service/ConfigurationServiceRouteTest.java — cover the new navigation route key.
+- backend/src/test/java/com/ecabin/ledger/service/PostgresMigrationSmokeTest.java — expect V65 as the current migration head.
+- frontend/src/common/configuration/EmailNotificationSettingsPage.tsx — add the global and per-event switch screen with loading, retry, save, and error states.
+- frontend/src/app/configuration.tsx — route the new Administration section to the page and expose its allowlisted navigation key.
+- frontend/src/app/configuration.css — style the responsive switch cards.
+- updatesfiles.me — append this implementation record.
+
+Verification:
+- `git diff --check` — passed.
+- Tests, lint, and build were not run.
+
+2026-10-21 — Make migration smoke test tolerate tenant-configured Auditor grants
+
+Updated the smoke-test assertion to verify the Auditor role's required VIEW and REPORT permissions without requiring an optional AUDIT grant on a pre-existing tenant role. The migration seed intentionally preserves existing role rows, so local tenant configuration may differ from the development seed.
+
+Files modified:
+- backend/src/test/java/com/ecabin/ledger/service/PostgresMigrationSmokeTest.java — assert required Auditor baseline permissions, consistent with the Reviewer role check.
+- updatesfiles.me — append this implementation record.
+
+Verification:
+- The provided PostgreSQL run applied V65, then failed at the Auditor permission assertion.
+- The test was not rerun.
+
+2026-10-21 — Align Auditor navigation assertion with configured AUDIT grant
+
+Updated the smoke test to verify that Audit Log visibility matches the Auditor role's actual AUDIT permission. Existing tenant role configuration is preserved by the seed, so Audit Log is intentionally hidden when AUDIT is absent.
+
+Files modified:
+- backend/src/test/java/com/ecabin/ledger/service/PostgresMigrationSmokeTest.java — assert audit navigation follows the configured permission.
+- updatesfiles.me — append this implementation record.
+
+Verification:
+- The provided PostgreSQL run was up to date at V65 and failed at the Audit Log visibility assertion.
+- The test was not rerun.
+
+2026-10-21 — Expand Email Notifications layout to available page width
+
+Removed the 980px content cap for the Email Notifications screen and scoped a full-width configuration layout to that screen only. Email delivery and workflow event cards now use the available responsive page width; other Administration pages retain their existing layout.
+
+Files modified:
+- frontend/src/app/configuration.tsx — add a screen-specific layout class.
+- frontend/src/app/configuration.css — allow the Email Notifications page and cards to use the available width with responsive side padding.
+- updatesfiles.me — append this implementation record.
+
+Verification:
+- Visual behavior not browser-tested.
+
+2026-10-21 — Add application name to Organization Master
+
+Exposed the existing operators_mst.application_name field through Organization Master list/table/edit APIs and the administration form. The application name can now be searched, sorted, exported, and updated for the authenticated tenant. The update remains tenant-scoped; requests omitting applicationName preserve its existing value for compatibility.
+
+Files modified:
+- backend/src/main/java/com/ecabin/ledger/service/ConfigurationService.java — include application_name in organization projections, search/sort/export metadata, and update handling.
+- frontend/src/app/configuration.tsx — show and edit Application name in Organization Master.
+- updatesfiles.me — append this implementation record.
+
+Verification:
+- git diff --check — passed.
+- Tests and build were not run.
+
+2026-10-21 — Fix email notification setting audit trigger
+
+The global settings update failed because the shared audit trigger referenced OLD.event_key, a column present only on event settings. Added V66 to read optional event fields from the trigger row's JSON representation while retaining actor/request audit metadata for both settings tables. Updated the migration smoke test's expected migration head.
+
+Files modified:
+- backend/src/main/resources/db/migration/V66__fix_email_setting_audit_trigger.sql — replace the shared trigger function with safe optional-field access.
+- backend/src/test/java/com/ecabin/ledger/service/PostgresMigrationSmokeTest.java — expect migrations through V66.
+- updatesfiles.me — append this implementation record.
+
+Verification:
+- The supplied log identified the failure in the V63 audit trigger during a global settings update.
+- git diff --check — passed.
+- Migration and save behavior have not been rerun.
+
+2026-10-21 — Widen defect audit event type for email settings events
+
+Email settings audit writes use event names longer than the original defect_events_dtl.event_type varchar(32) limit. Added V67 to widen the column to varchar(64), preserving existing values and the shared audit stream, and updated the smoke test migration head.
+
+Files modified:
+- backend/src/main/resources/db/migration/V67__widen_email_setting_audit_event_type.sql — increase event_type capacity to 64 characters.
+- backend/src/test/java/com/ecabin/ledger/service/PostgresMigrationSmokeTest.java — expect migrations through V67.
+- updatesfiles.me — append this implementation record.
+
+Verification:
+- The supplied logs show SQL state 22001 on both global and event setting updates.
+- git diff --check — passed.
+- Migration and save behavior have not been rerun.

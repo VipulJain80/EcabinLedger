@@ -36,7 +36,8 @@ public class AttachmentService {
     public UUID defectForAttachment(UUID operatorId,UUID attachmentId){return jdbc.query("SELECT defect_id FROM attachments_dtl WHERE operator_id=? AND id=? AND isactive=1",rs->rs.next()?rs.getObject(1,UUID.class):null,operatorId,attachmentId);}
 
     public java.util.List<AttachmentView> listForDefect(UUID operatorId,UUID defectId){
-        return jdbc.query("SELECT id,defect_id,form_submission_id,field_key,original_filename,detected_mime_type,size_bytes,scan_status,uploaded_at FROM attachments_dtl WHERE operator_id=? AND defect_id=? AND isactive=1 ORDER BY uploaded_at,id",(rs,n)->new AttachmentView(rs.getObject("id",UUID.class),rs.getObject("defect_id",UUID.class),rs.getObject("form_submission_id",UUID.class),rs.getString("field_key"),rs.getString("original_filename"),rs.getString("detected_mime_type"),rs.getLong("size_bytes"),rs.getString("scan_status"),rs.getTimestamp("uploaded_at").toInstant()),operatorId,defectId);
+        String sql="SELECT a.id,a.defect_id,a.form_submission_id,a.field_key,a.original_filename,a.detected_mime_type,a.size_bytes,a.scan_status,a.uploaded_at,a.uploaded_by,COALESCE(s.purpose,f.purpose,'CASE_EVIDENCE') AS source FROM attachments_dtl a LEFT JOIN operational_form_submissions_dtl s ON s.operator_id=a.operator_id AND s.id=a.form_submission_id LEFT JOIN operational_forms_dtl f ON f.operator_id=a.operator_id AND f.id=a.form_id WHERE a.operator_id=? AND a.defect_id=? AND a.isactive=1 ORDER BY a.uploaded_at,a.id";
+        return jdbc.query(sql,(rs,n)->new AttachmentView(rs.getObject("id",UUID.class),rs.getObject("defect_id",UUID.class),rs.getObject("form_submission_id",UUID.class),rs.getString("field_key"),rs.getString("original_filename"),rs.getString("detected_mime_type"),rs.getLong("size_bytes"),rs.getString("scan_status"),rs.getTimestamp("uploaded_at").toInstant(),rs.getString("source"),rs.getString("uploaded_by")),operatorId,defectId);
     }
 
     private Permission permissionFor(FormPurpose purpose){return switch(purpose){case DEFECT_REPORT->Permission.REPORT;case REVIEW_DECISION->throw new ResponseStatusException(HttpStatus.CONFLICT,"Reviewer decision forms do not accept file uploads.");case INSPECTION->Permission.INSPECT;case CORRECTIVE_ACTION->Permission.PERFORM_ACTION;case VERIFICATION->Permission.VERIFY;case CLOSURE_APPROVAL->Permission.APPROVE;case REOPEN->Permission.REOPEN;};}
@@ -65,7 +66,7 @@ public class AttachmentService {
             String digest=HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
             jdbc.update("INSERT INTO attachments_dtl(id,operator_id,defect_id,object_key,original_filename,detected_mime_type,size_bytes,sha256,uploaded_by,form_id,form_version_id,field_key,scan_status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",id,user.organizationId(),defectId,key,safeName,detected,bytes.length,digest,user.externalUserId(),formId,versionId,fieldKey,status);
             audit(user,id,defectId,"ATTACHMENT_UPLOADED",safeName,status);
-            return new AttachmentView(id,defectId,null,fieldKey,safeName,detected,bytes.length,status,Instant.now());
+            return new AttachmentView(id,defectId,null,fieldKey,safeName,detected,bytes.length,status,Instant.now(),forms.requireOperationalForm(user.organizationId(),defectId,formId,versionId).purpose().name(),user.externalUserId());
         } catch(RuntimeException ex){if(stored)try{storage.delete(key);}catch(RuntimeException ignored){}throw ex;}
         catch(Exception ex){if(stored)try{storage.delete(key);}catch(RuntimeException ignored){}throw new IllegalStateException("Evidence upload could not be completed.");}
     }

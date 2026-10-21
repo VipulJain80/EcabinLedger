@@ -14,6 +14,7 @@ class ConfigurationServiceRouteTest {
         assertTrue(ConfigurationService.isSupportedNavigationRoute("user-login-monitoring"));
         assertTrue(ConfigurationService.isSupportedNavigationRoute("report-defect"));
         assertTrue(ConfigurationService.isSupportedNavigationRoute("report-master"));
+        assertTrue(ConfigurationService.isSupportedNavigationRoute("email-notifications"));
         assertTrue(ConfigurationService.isSupportedNavigationRoute("areas"));
         assertTrue(ConfigurationService.isSupportedNavigationRoute("area-team-mapping"));
         assertTrue(ConfigurationService.isSupportedNavigationRoute("home"));

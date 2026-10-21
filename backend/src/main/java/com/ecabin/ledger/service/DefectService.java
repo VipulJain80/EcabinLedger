@@ -358,9 +358,13 @@ public class DefectService {
 
     private static String value(String value) { return value == null ? "—" : value; }
 
-    public String organizationName(UUID operatorId) {
-        return jdbc.query("SELECT name FROM operators_mst WHERE id=? AND isactive=1", rs -> rs.next() ? rs.getString(1) : null, operatorId);
+    public OrganizationBranding organizationBranding(UUID operatorId) {
+        return jdbc.query("SELECT name, application_name FROM operators_mst WHERE id=? AND isactive=1",
+                rs -> rs.next() ? new OrganizationBranding(rs.getString("name"), rs.getString("application_name")) : null,
+                operatorId);
     }
+
+    public record OrganizationBranding(String organizationName, String applicationName) {}
 
     public DefectView get(UUID operatorId, UUID id) {
         return jdbc.query("SELECT d.*, " + closedAtProjection() + ", " + severityNameProjection() + ", a.tail_number, a.aircraft_type, current_action.id AS active_action_id FROM defects_dtl d JOIN aircraft_mst a ON a.id=d.aircraft_id AND a.operator_id=d.operator_id LEFT JOIN LATERAL (SELECT ca.id FROM corrective_actions_dtl ca WHERE ca.operator_id=d.operator_id AND ca.defect_id=d.id AND ca.isactive=1 AND ca.status IN ('ASSIGNED','IN_PROGRESS','ON_HOLD') ORDER BY ca.created_at DESC LIMIT 1) current_action ON TRUE WHERE d.operator_id=? AND d.id=? AND d.isactive=1 AND a.isactive=1", DEFECT, operatorId, id)

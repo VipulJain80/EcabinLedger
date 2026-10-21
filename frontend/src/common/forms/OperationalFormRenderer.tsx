@@ -3,12 +3,12 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { alert, responseErrorMessage } from "@/common/alerts";
+import { formatDateTime } from "@/common/dateTime";
 import { isPublishedFormForArea, orderedOperationalFields, unsupportedPublishedField } from "./publishedFormDefinition";
 import { defectReportBindingIssue } from "./defectReportMapping";
 import EvidenceUploadField from "./EvidenceUploadField";
 import { partitionEvidenceFiles, validateEvidenceFile } from "./evidenceFileRules";
 import { isFieldRequired, isFieldVisible } from "./conditionalFieldVisibility";
-import { formatDateTime } from "@/common/dateTime";
 import AttachmentPreviewDialog from "@/common/dialogs/AttachmentPreviewDialog";
 
 type Request = (path: string, init?: RequestInit) => Promise<Response>;
@@ -37,9 +37,14 @@ type Choice = { id: string; label: string; code: string };
 type AircraftOption = { id:string; tailNumber:string; msnNumber:string|null; aircraftType:string };
 type AircraftOptionPage = { items:AircraftOption[]; page:number; size:number; totalElements:number; totalPages:number };
 type Uploaded = { id: string; filename: string; sizeBytes?: number; scanStatus: string };
-type CaseEvidence = { id:string;formSubmissionId:string|null;fieldKey:string;filename:string;mimeType:string;sizeBytes:number;scanStatus:string;uploadedAt:string };
+type CaseEvidence = { id:string;formSubmissionId:string|null;fieldKey:string;filename:string;mimeType:string;sizeBytes:number;scanStatus:string;uploadedAt:string;source?:string|null;uploadedBy?:string|null };
 type EvidencePreview = { file:CaseEvidence; url?:string; error?:string };
-type Submission = { id: string; versionNumber: number; submittedBy: string; submittedAt: string; snapshot: { defectCategory: string; componentId: string; conditionId: string; zone: string; rowNumber: number | null; seatReference: string | null; title: string; description: string; severityId: string } | null };
+
+function evidenceSourceLabel(source?:string|null){
+  if(source==="DEFECT_REPORT")return "Auditor report";
+  if(source==="CORRECTIVE_ACTION")return "Maintenance action";
+  return source?source.replaceAll("_"," "):"Case evidence · source unavailable";
+}
 
 function fileIdentity(file: File) { return `${file.name}:${file.size}:${file.lastModified}`; }
 const EMPTY_FILES: File[] = [];
@@ -137,15 +142,6 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
   useEffect(() => {
     if (preparationMode) onPreparationReady?.(Boolean(initialDefinition.isSuccess && selected && !definitionIssue && !reportBindingIssue));
   }, [definitionIssue, initialDefinition.isSuccess, onPreparationReady, preparationMode, reportBindingIssue, selected]);
-  const submissions = useQuery<Submission[]>({
-    queryKey: ["defect-form-submissions", defectId],
-    enabled: Boolean(selected && defectId && purpose !== "CLOSURE_APPROVAL" && !previewOnly),
-    queryFn: async () => {
-      const response = await request(`/defects/${encodeURIComponent(defectId! as string)}/form-submissions`);
-      if (!response.ok) throw new Error(await responseErrorMessage(response, "Could not load submitted forms."));
-      return response.json();
-    },
-  });
   const closureEvidence = useQuery<CaseEvidence[]>({
     queryKey:["closure-review-evidence",defectId],
     enabled:Boolean(defectId&&purpose==="CLOSURE_APPROVAL"&&!previewOnly),
@@ -320,7 +316,7 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
         const result=await response.json() as {status:string};
         const confirmation=decision==="ACCEPT"?"Defect closed successfully.":"Defect returned to its assigned Maintenance Team.";
         setSuccessMessage(confirmation);void alert.success(confirmation);
-        setValues({});await Promise.all([available.refetch(),submissions.refetch()]);onWorkflowComplete?.(result.status);
+        setValues({});await available.refetch();onWorkflowComplete?.(result.status);
       }catch(error){const failure=error instanceof Error?error.message:"Closure decision could not be saved.";setMessage(failure);void alert.error(failure);}
       finally{submissionGuard.current=false;setSubmitting(false);}
       return;
@@ -345,7 +341,7 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
       const remark=String(values[remarkField?.key||""]||"");
       submissionGuard.current=true;setSubmitting(true);setMessage("");setSuccessMessage("");
       const attachments=Object.fromEntries(selectedFields.filter(field=>field.type==="IMAGE_UPLOAD"||field.type==="FILE_UPLOAD").map(field=>[field.key,(files[field.key]||[]).filter(file=>file.scanStatus!=="REJECTED").map(file=>file.id)]));
-      try{const response=await request(`/defects/${encodeURIComponent(defectId)}/actions/${encodeURIComponent(actionId)}/maintenance-form`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({formId:selected.id,formVersionId:selected.versionId,status:statusCode,slaTargetDate:targetDate||null,remark:remark||null,attachments})});if(!response.ok)throw new Error(await responseErrorMessage(response,"Maintenance update failed validation."));const confirmation="Maintenance action updated.";setSuccessMessage(confirmation);void alert.success(confirmation);setValues({});await Promise.all([available.refetch(),submissions.refetch()]);onWorkflowComplete?.("");}
+      try{const response=await request(`/defects/${encodeURIComponent(defectId)}/actions/${encodeURIComponent(actionId)}/maintenance-form`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({formId:selected.id,formVersionId:selected.versionId,status:statusCode,slaTargetDate:targetDate||null,remark:remark||null,attachments})});if(!response.ok)throw new Error(await responseErrorMessage(response,"Maintenance update failed validation."));const confirmation="Maintenance action updated.";setSuccessMessage(confirmation);void alert.success(confirmation);setValues({});await available.refetch();onWorkflowComplete?.("");}
       catch(error){const failure=error instanceof Error?error.message:"Maintenance update failed.";setMessage(failure);void alert.error(failure);}
       finally{submissionGuard.current=false;setSubmitting(false);}
       return;
@@ -360,7 +356,7 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
       setSuccessMessage("Operational form submitted successfully.");
       void alert.success("Operational form submitted and added to the defect audit trail.");
       if (purpose === "DEFECT_REPORT") setReportSubmitted(true);
-      setValues({}); setFiles({}); setPendingFiles({}); setUploadErrors({}); await Promise.all([submissions.refetch(), available.refetch()]);onWorkflowComplete?.("");
+      setValues({}); setFiles({}); setPendingFiles({}); setUploadErrors({}); await available.refetch();onWorkflowComplete?.("");
     } catch (error) { const failure=error instanceof Error ? error.message : "Form submission failed.";setMessage(failure);void alert.error(failure); }
     finally { submissionGuard.current = false; setSubmitting(false); }
   }
@@ -377,14 +373,13 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
     {requestPending && <p role="status">Loading the selected published form…</p>}
     {requestFailed && <p role="alert">{requestError instanceof Error ? requestError.message : "Could not load the selected published form."}</p>}
     {noForms && !(defectId && purpose === "DEFECT_REPORT") && <p role="status">{purpose === "DEFECT_REPORT" ? "No published operational form is configured for this cabin area. Please contact your administrator." : `No published ${purpose.replaceAll("_", " ").toLowerCase()} form is configured for this workflow stage. Please contact your administrator.`}</p>}
-    {defectId&&purpose==="CLOSURE_APPROVAL"&&!previewOnly&&<section className="closure-review-evidence my-[14px] grid min-w-0 gap-[9px] rounded-[10px] border border-[#dce6df] bg-[#f8fbf9] p-[13px_15px]" aria-labelledby="closure-review-evidence-title"><h4 id="closure-review-evidence-title" className="m-0">Maintenance and case evidence</h4>{closureEvidence.isPending?<p className="m-0" role="status">Loading authorized evidence…</p>:closureEvidence.isError?<p className="m-0" role="alert">{closureEvidence.error.message} <button type="button" className="button-secondary" onClick={()=>void closureEvidence.refetch()}>Retry</button></p>:!closureEvidence.data?.length?<p className="m-0">No evidence is attached to this case.</p>:<ul className="m-0 grid list-none gap-2 p-0">{closureEvidence.data.map(item=><li className="flex min-w-0 flex-wrap items-center justify-between gap-3 rounded-lg border border-[#e2e9e4] bg-white px-[10px] py-2" key={item.id}><span className="grid min-w-0 gap-[3px]"><strong className="break-all text-[12px] text-[#000000]">{item.filename}</strong><small className="text-[11px] text-[#000000]">{item.fieldKey} · {(item.sizeBytes/1024/1024).toFixed(1)} MB</small></span><button type="button" className="button-secondary" disabled={item.scanStatus==="REJECTED"} onClick={()=>void viewCaseEvidence(item)}>{item.scanStatus==="REJECTED"?"Unavailable":"View evidence"}</button></li>)}</ul>}</section>}
-    {!initialFormId && !requestPending && !requestFailed && availableForms.length > 1 && <label className="flex flex-col gap-[7px] my-[10px]">Published form<select value={formId} onChange={event => { setFormId(event.target.value); setValues({}); setFiles({}); setPendingFiles({}); setUploadErrors({}); setOptions({}); setMessage(""); initialUploadsStarted.current=false; }}><option value="">Choose a form…</option>{availableForms.map(form => <option key={`${form.id}:${form.versionId}`} value={form.id}>{form.name} · v{form.versionNumber}</option>)}</select></label>}
+    {defectId&&purpose==="CLOSURE_APPROVAL"&&!previewOnly&&<section className="closure-review-evidence my-[14px] grid min-w-0 gap-[9px] rounded-[10px] border border-[#dce6df] bg-[#f8fbf9] p-[13px_15px]" aria-labelledby="closure-review-evidence-title"><h4 id="closure-review-evidence-title" className="m-0">Case evidence</h4>{closureEvidence.isPending?<p className="m-0" role="status">Loading authorized evidence…</p>:closureEvidence.isError?<p className="m-0" role="alert">{closureEvidence.error.message} <button type="button" className="button-secondary" onClick={()=>void closureEvidence.refetch()}>Retry</button></p>:!closureEvidence.data?.length?<p className="m-0">No evidence is attached to this case.</p>:<ul className="m-0 grid list-none gap-2 p-0">{closureEvidence.data.map(item=><li className="flex min-w-0 flex-wrap items-center justify-between gap-3 rounded-lg border border-[#e2e9e4] bg-white px-[10px] py-2" key={item.id}><span className="grid min-w-0 gap-[3px]"><strong className="break-all text-[12px] text-[#000000]">{item.filename}</strong><small className="text-[11px] font-semibold text-[#315b43]">{evidenceSourceLabel(item.source)}</small><small className="text-[11px] text-[#000000]">Uploaded by {item.uploadedBy||"uploader unavailable"} · {formatDateTime(item.uploadedAt)}</small><small className="text-[11px] text-[#000000]">{item.fieldKey} · {(item.sizeBytes/1024/1024).toFixed(1)} MB</small></span><button type="button" className="button-secondary" disabled={item.scanStatus==="REJECTED"} onClick={()=>void viewCaseEvidence(item)}>{item.scanStatus==="REJECTED"?"Unavailable":"View evidence"}</button></li>)}</ul>}</section>}
+    {!initialFormId && !requestPending && !requestFailed && availableForms.length > 1 && <label className="flex flex-col gap-[7px] my-[10px]">Published form<select value={formId} onChange={event => { setFormId(event.target.value); setValues({}); setFiles({}); setPendingFiles({}); setUploadErrors({}); setOptions({}); setMessage(""); initialUploadsStarted.current=false; }}><option value="">Choose a form…</option>{availableForms.map(form => <option key={`${form.id}:${form.versionId}`} value={form.id}>{form.name}{defectId ? "" : ` · v${form.versionNumber}`}</option>)}</select></label>}
     {selected && <>
       {definitionIssue ? <p role="alert">{definitionIssue}</p> : <>
         {reportBindingIssue && !previewOnly && <p className="configuration-field-error" role="alert">This form is unavailable for new defect reports right now. Please contact your organization administrator.</p>}
         {previewOnly || preparationMode ? <div className="operational-form-fields grid grid-cols-[repeat(2,minmax(0,1fr))] gap-x-4 gap-y-[10px] mt-4 max-[700px]:grid-cols-[minmax(0,1fr)]" aria-readonly={previewOnly || undefined}>{selectedFields.map(field => renderField(field, previewOnly))}{preparationMode&&message&&<p className="configuration-field-error" role="alert">{message}</p>}</div> : <>
         {defectId && <form onSubmit={submit} className="operational-form-fields grid grid-cols-[repeat(2,minmax(0,1fr))] gap-x-4 gap-y-[10px] mt-4 max-[700px]:grid-cols-[minmax(0,1fr)]">{selectedFields.map(field => renderField(field, false))}{message && <p className="configuration-field-error" role="alert">{message}</p>}{successMessage&&<p className="col-span-full m-0 rounded-lg border border-[#cfe6d4] bg-[#f1faf3] p-3 text-sm font-medium text-[#2f7042]" role="status">{successMessage}</p>}<button className="button-primary" disabled={submitting || Boolean(uploading) || Object.values(files).flat().some(file => file.scanStatus === "REJECTED")}>{submitting ? "Submitting…" : `Submit ${selected.purpose.replaceAll("_", " ").toLowerCase()} form`}</button></form>}
-        {defectId && purpose !== "CLOSURE_APPROVAL" && !previewOnly && <div className="operational-form-history"><h4>Submitted forms</h4>{submissions.isPending ? <p>Loading submission history…</p> : submissions.isError ? <p role="alert">{submissions.error.message}</p> : !submissions.data?.length ? <p>No forms have been submitted for this defect.</p> : submissions.data.map(item => <details key={item.id}><summary>Version {item.versionNumber} · {formatDateTime(item.submittedAt)} · {item.submittedBy}</summary>{item.snapshot?<dl className="form-submission-snapshot"><dt>Category</dt><dd>{item.snapshot.defectCategory}</dd><dt>Component</dt><dd>{item.snapshot.componentId}</dd><dt>Condition</dt><dd>{item.snapshot.conditionId}</dd><dt>Location</dt><dd>{item.snapshot.zone}</dd><dt>Row / Seat</dt><dd>{[item.snapshot.rowNumber,item.snapshot.seatReference].filter(Boolean).join(" / ")||"—"}</dd><dt>Title</dt><dd>{item.snapshot.title}</dd><dt>Description</dt><dd>{item.snapshot.description}</dd><dt>Severity reference</dt><dd>{item.snapshot.severityId}</dd></dl>:<p>Evidence or workflow submission recorded against the published version.</p>}</details>)}</div>}
       </>}
       </>}
     </>}
