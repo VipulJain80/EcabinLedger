@@ -2205,3 +2205,66 @@ Files modified:
 Verification:
 - Source inspection confirmed the lookup helper allowlist contains fleets_mst but the aircraft resolver passed fleets.
 - Tests were not run.
+
+2026-10-22 — Add nonce-based frontend Content Security Policy
+
+Added a centralized, environment-aware CSP for the Next.js app, using per-request nonces for scripts and styles, explicit API and optional external origins, and report-only mode for development with enforcement by default in production. Added startup/build validation, deployment guidance, and policy/smoke tests. The current policy retains `style-src-attr 'unsafe-inline'` for existing inline style attributes, as requested; script execution remains nonce-based and does not allow `unsafe-inline` or `unsafe-eval`. No policy change was made during the follow-up clarification.
+
+Files modified or added:
+- frontend/cspPolicy.mjs and frontend/cspPolicy.d.mts — define and validate CSP configuration and policy.
+- frontend/next.config.ts, frontend/proxy.ts, frontend/src/proxy.ts, frontend/src/app/layout.tsx, and frontend/src/instrumentation.ts — apply request nonces, CSP headers, and runtime/build validation.
+- frontend/cspPolicy.test.mjs and frontend/cspProductionSmoke.test.mjs — cover policy validation and production behavior.
+- .env.example — document CSP and API-origin settings.
+- docs/frontend-content-security-policy.md — document configuration and rollout.
+- updatesfiles.me — append this implementation record.
+
+Verification:
+- CSP policy, smoke, and routing tests — passed (11 tests).
+- pnpm lint — passed with 3 warnings in untouched files.
+- pnpm exec tsc --noEmit — passed.
+- NEXT_PUBLIC_API_BASE_URL=https://api.example.test/api/v1 pnpm exec next build --webpack — passed.
+- Standard pnpm build — blocked by the environment's process/port permission error; the webpack production build succeeded.
+- git diff --check — passed.
+
+2026-10-22 — Validate uploaded evidence content and bound CSV parsing
+
+Added backend content validation before evidence files enter normal storage processing. Supported PNG, JPEG, WebP, and PDF files are parsed according to their actual content; image dimensions, pixel/frame limits, PDF page count, and PDF page streams are checked. Invalid or extension/MIME-mismatched content receives a generic validation error. No antivirus scanner or external scanning service was added, and evidence continues to use the existing `NOT_SCANNED` status. The CSV importer now enforces its 5,000-data-row limit while parsing and decodes strict UTF-8 before existing header and resource validation. Existing endpoints, authorization, tenant checks, storage keys, and size limits remain in place. The pre-existing aircraft fleet reference lookup change (`fleets_mst`) was preserved.
+
+Files modified or added:
+- `backend/src/main/java/com/ecabin/ledger/storage/EvidenceFileValidator.java` — parse and validate image/PDF content and enforce format resource bounds.
+- `backend/src/main/java/com/ecabin/ledger/service/AttachmentService.java` — validate evidence content before storage while retaining the existing authorized upload path.
+- `backend/src/main/java/com/ecabin/ledger/service/ConfigurationImportService.java` — strict UTF-8 decoding and bounded CSV row parsing; existing `fleets_mst` aircraft reference lookup retained.
+- `backend/pom.xml` — add Apache PDFBox 3.0.8 and TwelveMonkeys WebP ImageIO 3.15.3.
+- `backend/src/test/java/com/ecabin/ledger/storage/EvidenceFileValidatorTest.java` — cover valid and malformed/mismatched image and PDF content.
+- `backend/src/test/java/com/ecabin/ledger/service/AttachmentServiceValidationTest.java` — verify rejected evidence does not reach blob storage.
+- `backend/src/test/java/com/ecabin/ledger/service/ConfigurationImportServiceTest.java` — cover UTF-8 and CSV row bounds.
+- `updatesfiles.me` — append this implementation record.
+
+Verification reported:
+- `mvn -f backend/pom.xml '-Dtest=EvidenceFileValidatorTest,ConfigurationImportServiceTest,AttachmentServiceValidationTest,OperationalFormServiceTest,EvidenceScanStatusTest,LocalFileBlobStorageTest' test` — 32 tests passed; 0 failures, 0 errors, 0 skipped.
+- `git diff --check` — passed.
+- Full backend suite and PostgreSQL integration tests were not run.
+
+Limit: format parsing rejects malformed or disguised files, but it does not establish that valid files are malware-free.
+
+2026-10-22 — Document manual IIS deployment and run steps
+
+Added a repository-specific Windows/IIS deployment runbook below. IIS is the HTTPS front door and reverse proxy; the Next.js standalone server and Spring Boot API run as separate local services, and the Python email worker is optional and separately operated. The instructions use the checked-in `/ecabin` base path, Next standalone output, Spring Boot JAR, API URL/CSP settings, and existing Windows worker service example.
+
+Manual deployment steps:
+1. **Prepare the server.** Install organization-approved Java 17, Node.js/pnpm compatible with the checked-in Next.js 16.3.3, and IIS URL Rewrite plus Application Request Routing (ARR). Enable ARR proxying. Bind the approved UAT/production hostname and TLS certificate in IIS. Keep the Node and Java listening ports inaccessible to external clients; allow IIS to reach them locally.
+2. **Build the backend.** From PowerShell, run `cd backend; .\mvnw.cmd clean package`. Deploy `backend\target\ecabin-ledger-api-0.1.0.jar` and required runtime files to the approved application directory. Run it as a dedicated Windows service identity using the organization's approved service wrapper. Set `PORT=8080`, `SERVER_ADDRESS=127.0.0.1`, `SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI`, `OAUTH2_AUDIENCE`, `SPRING_DATASOURCE_URL`, `SPRING_DATASOURCE_USERNAME`, `SPRING_DATASOURCE_PASSWORD`, `SPRING_FLYWAY_USER`, `SPRING_FLYWAY_PASSWORD`, and any required `DB_SCHEMA`, Azure storage, CORS, and report-export variables through protected service environment/secret injection. Back up the target database and confirm the migration account before first startup; Flyway is enabled in `application.properties` and runs on application startup. Verify health and migration logs before routing requests.
+3. **Build the frontend with environment-specific public settings.** From PowerShell in `frontend/`, set `APP_BASE_PATH=/ecabin`, `NEXT_PUBLIC_API_BASE_URL` to the browser-visible API base ending in `/api/v1`, `CSP_MODE=enforce`, and only approved exact `CSP_EXTRA_CONNECT_ORIGINS` / `CSP_EXTRA_SCRIPT_ORIGINS`. Install from the lockfile with `pnpm install --frozen-lockfile`, then run `pnpm build`. These public URL/base-path values are build-time configuration; build a separate artifact for each environment. Keep backend credentials and other secrets out of frontend variables. Configure runtime secrets in the Windows service environment or approved secret-injection system, not only in an interactive shell.
+4. **Package and run Next standalone.** Copy `.next\standalone` to the release directory. Copy `.next\static` into `<release>\.next\static`; copy `public` into `<release>\public` when that directory exists. Set runtime `NODE_ENV=production`, `HOSTNAME=127.0.0.1`, `PORT=3000`, and the required CSP runtime settings, then run `node server.js` from the standalone release directory under an approved Windows service identity. Do not serve the standalone output as static files; server rendering and the nonce-based CSP require the Node server. `pnpm start` runs `next start` from the source project and is not the command for the packaged standalone artifact.
+5. **Configure IIS reverse proxy.** Install/enable URL Rewrite and ARR proxy mode. Add the `/api/*` reverse-proxy rule before the frontend catch-all, forwarding to `http://127.0.0.1:8080`; forward the remaining site paths, including `/ecabin/*` and the root redirect, to `http://127.0.0.1:3000`. Preserve query strings, request bodies, and supported HTTP methods. If the browser API uses a separate hostname, set backend `CORS_ALLOWED_ORIGINS` to the exact frontend origin and allow the browser's required preflight behavior. Do not add a second/conflicting CSP response header in IIS; pass through the application CSP. Keep page HTML out of shared proxy/CDN caches.
+6. **Check upload and security limits.** Configure IIS request filtering/proxy limits to accept at least the backend's 64 MiB multipart request maximum (64 × 1024 × 1024 bytes) and suitable request timeouts; do not raise application per-file limits. Verify forwarded HTTPS headers, secure TLS, DNS, and restricted port access. Check that an HTML page response has one enforced CSP with a fresh nonce and that the browser UI, API, login/SSO, and evidence upload flows work.
+7. **Optional email worker.** Deploy only if email delivery is approved and its prerequisites are met. Follow `email-worker/README.md` and `email-worker/deployment/EmailWorkerService.xml.example`; use the dedicated least-privilege DB role, verified recipient identity provider, approved SMTP settings, TLS, and protected service environment. Never place credentials in XML or source control.
+
+**Deployment blocker:** the checked-in `backend/src/main/resources/application.properties` still contains fallback local datasource values (`localhost:5432/postgres`, user `postgres`, password `root`) and fallback Flyway credentials. UAT/production must set every datasource and Flyway variable explicitly; otherwise the application can silently select those local defaults. Remove those fallbacks in a separately reviewed security change before treating deployment as safe. The actual UAT/production database, SSO, SMTP, Azure, IIS hostnames, certificates, and service wrapper are organization-supplied and were not verified here.
+
+Files modified:
+- `updatesfiles.me` — add the manual IIS deployment checklist; no application configuration or deployment files changed.
+
+Verification:
+- `git diff --check` — passed.
+- Deployment steps are documentation only; no IIS server or UAT/production environment was accessed and no deployment was performed.

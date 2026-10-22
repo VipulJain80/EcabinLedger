@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { headers } from "next/headers";
 import localFont from "next/font/local";
 import "./globals.css";
 import "./details.css";
@@ -25,6 +26,10 @@ export const metadata: Metadata = {
   description: "Track cabin defects from inspection through closure with an audit-ready operational record.",
 };
 
-export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+export default async function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+  // Reading the per-request proxy headers makes nonce-bearing HTML dynamic.
+  // Next.js extracts the nonce from Content-Security-Policy for its own scripts.
+  const requestHeaders = await headers();
+  requestHeaders.get("x-nonce");
   return <html lang="en" className={montserrat.variable}><body><QueryProvider>{children}</QueryProvider></body></html>;
 }

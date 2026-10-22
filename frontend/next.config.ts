@@ -1,7 +1,12 @@
 import type { NextConfig } from "next";
 import { normalizeAppBasePath } from "./appBasePath.mjs";
+import { readCspConfiguration } from "./cspPolicy.mjs";
 
 const appBasePath = normalizeAppBasePath(process.env.APP_BASE_PATH);
+
+// next.config is evaluated during `next build`; require production origin
+// configuration there as well as again when the server starts.
+if (process.env.NODE_ENV === "production") readCspConfiguration(process.env);
 
 const nextConfig: NextConfig = {
   basePath: appBasePath,
