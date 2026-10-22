@@ -75,12 +75,11 @@ public class ConfigurationImportService {
         if (file.getOriginalFilename() == null || !file.getOriginalFilename().toLowerCase(Locale.ROOT).endsWith(".csv")) throw new IllegalArgumentException("Choose a CSV file with a .csv extension.");
         if (file.getSize() > MAX_FILE_BYTES) throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE, "CSV files must be 5 MB or smaller.");
         String text = decode(file);
-        List<List<String>> records = parse(text);
+        List<List<String>> records = parse(text, MAX_ROWS);
         if (records.isEmpty()) throw new IllegalArgumentException("The CSV must contain a header row and at least one data row.");
         if (!records.get(0).equals(definition.headers())) throw new IllegalArgumentException("CSV headers must exactly match: " + String.join(",", definition.headers()));
         List<List<String>> data = records.subList(1, records.size());
         if (data.isEmpty()) throw new IllegalArgumentException("The CSV does not contain any data rows.");
-        if (data.size() > MAX_ROWS) throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE, "CSV files may contain at most 5,000 data rows.");
 
         List<Staged> accepted = new ArrayList<>();
         List<RowIssue> report = new ArrayList<>();
@@ -161,7 +160,7 @@ public class ConfigurationImportService {
             case "areas" -> { fields.put("code", raw.get("area_code")); fields.put("name", raw.get("area_name")); fields.put("shortcode", raw.get("shortcode")); fields.put("description", raw.get("description")); }
             case "components" -> { fields.put("code", raw.get("component_code")); fields.put("name", raw.get("component_name")); fields.put("description", raw.get("description")); fields.put("areaId", activeId("cabin_areas_mst","code",raw.get("area_code"),operatorId,"area_code")); }
             case "fleets" -> fields.put("name", raw.get("fleet_name"));
-            case "aircraft" -> { fields.put("msnNumber",raw.get("msn_number")); fields.put("tailNumber",raw.get("registration")); fields.put("aircraftType",raw.get("aircraft_type")); fields.put("fleetId",activeId("fleets","name",raw.get("fleet_name"),operatorId,"fleet_name")); }
+            case "aircraft" -> { fields.put("msnNumber",raw.get("msn_number")); fields.put("tailNumber",raw.get("registration")); fields.put("aircraftType",raw.get("aircraft_type")); fields.put("fleetId",activeId("fleets_mst","name",raw.get("fleet_name"),operatorId,"fleet_name")); }
             case "defect-categories" -> { fields.put("code",raw.get("category_code")); fields.put("name",raw.get("category_name")); fields.put("description",raw.get("description")); }
             case "defect-conditions" -> { fields.put("code",raw.get("condition_code")); fields.put("name",raw.get("condition_name")); fields.put("description",raw.get("description")); fields.put("componentIds",activeComponentIds(operatorId,raw.get("applicable_component_codes"))); }
             case "maintenance-teams" -> fields.put("name",raw.get("team_name"));
@@ -244,7 +243,7 @@ public class ConfigurationImportService {
     private String safeMessage(RuntimeException ex) { String message=ex.getMessage(); return message==null?"Row validation failed.":message.substring(0,Math.min(500,message.length())); }
     private void setAuditActor(String actorId) { jdbc.queryForObject("SELECT set_config('ecabin.actor_id', ?, true)", String.class, actorId); }
 
-    private String decode(MultipartFile file) {
+    String decode(MultipartFile file) {
         try {
             var decoder=StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT);
             String text=decoder.decode(ByteBuffer.wrap(file.getBytes())).toString();
@@ -253,19 +252,26 @@ public class ConfigurationImportService {
         catch(java.io.IOException ex) { throw new IllegalArgumentException("Could not read the uploaded CSV file."); }
     }
 
-    List<List<String>> parse(String text) {
+    List<List<String>> parse(String text) { return parse(text, Integer.MAX_VALUE); }
+
+    List<List<String>> parse(String text, int maximumDataRows) {
+        if (maximumDataRows < 0) throw new IllegalArgumentException("The CSV row limit is invalid.");
         List<List<String>> rows=new ArrayList<>(); List<String> row=new ArrayList<>(); StringBuilder field=new StringBuilder(); boolean quoted=false,closed=false,fieldStarted=false;
         for(int i=0;i<text.length();i++) { char c=text.charAt(i);
             if(quoted) { if(c=='"') { if(i+1<text.length()&&text.charAt(i+1)=='"'){field.append('"');i++;} else {quoted=false;closed=true;} } else field.append(c); continue; }
             if(closed && c!=',' && c!='\r' && c!='\n' && !Character.isWhitespace(c)) throw new IllegalArgumentException("Unexpected character after a quoted CSV field.");
             if(c=='"') { if(fieldStarted||field.length()>0) throw new IllegalArgumentException("A quote appeared inside an unquoted CSV field."); quoted=true;fieldStarted=true; }
             else if(c==',') { row.add(field.toString());field.setLength(0);closed=false;fieldStarted=false; }
-            else if(c=='\r'||c=='\n') { if(c=='\r'&&i+1<text.length()&&text.charAt(i+1)=='\n')i++; row.add(field.toString()); if(row.stream().anyMatch(v->!v.isBlank())) rows.add(List.copyOf(row)); row.clear();field.setLength(0);closed=false;fieldStarted=false; }
+            else if(c=='\r'||c=='\n') { if(c=='\r'&&i+1<text.length()&&text.charAt(i+1)=='\n')i++; row.add(field.toString()); if(row.stream().anyMatch(v->!v.isBlank())) addBoundedRow(rows,row,maximumDataRows); row.clear();field.setLength(0);closed=false;fieldStarted=false; }
             else { field.append(c); if(!Character.isWhitespace(c))fieldStarted=true; }
         }
         if(quoted) throw new IllegalArgumentException("CSV contains an unterminated quoted field.");
-        if(field.length()>0||!row.isEmpty()||closed) { row.add(field.toString()); if(row.stream().anyMatch(v->!v.isBlank()))rows.add(List.copyOf(row)); }
+        if(field.length()>0||!row.isEmpty()||closed) { row.add(field.toString()); if(row.stream().anyMatch(v->!v.isBlank()))addBoundedRow(rows,row,maximumDataRows); }
         return rows;
+    }
+    private void addBoundedRow(List<List<String>> rows, List<String> row, int maximumDataRows) {
+        if (rows.size() >= maximumDataRows + 1L) throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE, "CSV files may contain at most 5,000 data rows.");
+        rows.add(List.copyOf(row));
     }
     private String csv(List<List<String>> rows) { StringBuilder out=new StringBuilder(); for(List<String> row:rows){for(int i=0;i<row.size();i++){if(i>0)out.append(',');String value=row.get(i)==null?"":row.get(i);out.append('"').append(value.replace("\"","\"\"")).append('"');}out.append("\r\n");}return out.toString(); }
 

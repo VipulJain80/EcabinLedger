@@ -3,8 +3,11 @@ package com.ecabin.ledger.service;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import org.junit.jupiter.api.Test;
+import org.springframework.mock.web.MockMultipartFile;
+import org.springframework.web.server.ResponseStatusException;
 
 class ConfigurationImportServiceTest {
     private final ConfigurationImportService imports = new ConfigurationImportService(null, new ObjectMapper(), null);
@@ -26,6 +29,29 @@ class ConfigurationImportServiceTest {
         assertThrows(IllegalArgumentException.class, () -> imports.parse("name,description\nOven,\"unfinished"));
         assertThrows(IllegalArgumentException.class, () -> imports.parse("name,description\nOv\"en,test"));
         assertThrows(IllegalArgumentException.class, () -> imports.parse("name,description\n\"closed\"x,test"));
+    }
+
+    @Test
+    void configurationCsvRequiresStrictUtf8AndRejectsExecutableBinaryBytes() {
+        MockMultipartFile valid = new MockMultipartFile("file", "areas.csv", "application/octet-stream",
+            "area_code,area_name,shortcode,description\nCABIN,Cabin,CAB,Main cabin\n".getBytes(StandardCharsets.UTF_8));
+        assertTrue(imports.decode(valid).startsWith("area_code"));
+
+        MockMultipartFile executable = new MockMultipartFile("file", "renamed.exe.csv", "text/csv",
+            new byte[]{'M', 'Z', 0, 0, (byte) 0xff, 1, 2});
+        assertThrows(IllegalArgumentException.class, () -> imports.decode(executable));
+
+        MockMultipartFile invalidUtf8 = new MockMultipartFile("file", "areas.csv", "text/csv",
+            new byte[]{'a', ',', (byte) 0xc3, 0x28});
+        assertThrows(IllegalArgumentException.class, () -> imports.decode(invalidUtf8));
+    }
+
+    @Test
+    void importCsvRowLimitIsAppliedWhileParsing() {
+        var error = assertThrows(ResponseStatusException.class,
+            () -> imports.parse("header\none\ntwo\nthree\n", 2));
+        assertEquals(413, error.getStatusCode().value());
+        assertEquals(3, imports.parse("header\none\ntwo\n", 2).size());
     }
 
     @Test

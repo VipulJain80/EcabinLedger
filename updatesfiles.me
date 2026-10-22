@@ -2193,3 +2193,15 @@ Verification:
 - The supplied logs show SQL state 22001 on both global and event setting updates.
 - git diff --check — passed.
 - Migration and save behavior have not been rerun.
+
+2026-10-22 — Fix aircraft bulk-upload fleet reference lookup
+
+Corrected the aircraft CSV resolver to pass the actual allowlisted table name, fleets_mst, when resolving fleet_name. This removes the erroneous “Invalid reference lookup” response while preserving the tenant-scoped active-fleet lookup.
+
+Files modified:
+- backend/src/main/java/com/ecabin/ledger/service/ConfigurationImportService.java — use fleets_mst for aircraft fleet reference resolution.
+- updatesfiles.me — append this implementation record.
+
+Verification:
+- Source inspection confirmed the lookup helper allowlist contains fleets_mst but the aircraft resolver passed fleets.
+- Tests were not run.
