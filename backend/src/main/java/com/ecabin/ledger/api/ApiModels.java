@@ -66,8 +66,12 @@ public final class ApiModels {
         Instant dueAt
     ) {}
 
+    public record MaintenanceTeamOption(UUID id, String name) {}
+
+    public record MaintenanceTeamMemberOption(String externalUserId, String displayName) {}
+
     public record CorrectiveActionReassignmentRequest(
-        @NotBlank @Size(max = 120) String assignedTeam,
+        @NotNull UUID assignedTeamId,
         @Size(max = 200) String assignedUserId,
         @NotBlank @Size(max = 2000) String reason
     ) {}

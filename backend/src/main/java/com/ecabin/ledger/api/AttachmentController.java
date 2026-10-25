@@ -12,6 +12,7 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.UUID;
 import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpHeaders;
@@ -33,7 +34,7 @@ public class AttachmentController {
 
     @PostMapping(value="/defects/{defectId}/forms/{formId}/versions/{versionId}/fields/{fieldKey}/attachments",consumes=MediaType.MULTIPART_FORM_DATA_VALUE)
     @ResponseStatus(HttpStatus.CREATED)
-    public com.ecabin.ledger.api.FormModels.AttachmentView upload(JwtAuthenticationToken auth,@PathVariable UUID defectId,@PathVariable UUID formId,@PathVariable UUID versionId,@PathVariable String fieldKey,@RequestPart("file") MultipartFile file){AuthenticatedUser u=users.require(auth);permissions.require(u,attachments.permissionForUpload(u.organizationId(),defectId,formId,versionId));visibleDefect(u,defectId);return attachments.upload(u,permissions.isMaintenanceTeamScoped(u.organizationId(),u.role()),permissions.isReporterScoped(u.organizationId(),u.role()),defectId,formId,versionId,fieldKey,file);}
+    public com.ecabin.ledger.api.FormModels.AttachmentView upload(JwtAuthenticationToken auth,@PathVariable UUID defectId,@PathVariable UUID formId,@PathVariable UUID versionId,@PathVariable String fieldKey,@RequestPart("file") List<MultipartFile> files){if(files==null||files.size()!=1)throw new IllegalArgumentException("Upload one file per request; the server checks combined field limits across repeated uploads.");AuthenticatedUser u=users.require(auth);permissions.require(u,attachments.permissionForUpload(u.organizationId(),defectId,formId,versionId));visibleDefect(u,defectId);return attachments.upload(u,permissions.isMaintenanceTeamScoped(u.organizationId(),u.role()),permissions.isReporterScoped(u.organizationId(),u.role()),defectId,formId,versionId,fieldKey,files.get(0));}
 
     @GetMapping("/defects/{defectId}/attachments")
     public java.util.List<com.ecabin.ledger.api.FormModels.AttachmentView> listForDefect(JwtAuthenticationToken auth,@PathVariable UUID defectId){AuthenticatedUser u=users.require(auth);var grants=permissions.permissionsFor(u.organizationId(),u.role());if(!grants.contains(Permission.REPORT)&&!grants.contains(Permission.PERFORM_ACTION)&&!grants.contains(Permission.REVIEW)&&!grants.contains(Permission.APPROVE)&&!grants.contains(Permission.DEFECT_VIEW_ALL))throw new org.springframework.security.access.AccessDeniedException("The case reporter, assigned Maintenance member, Reviewer, closure-approval, or tenant defect-view permission is required to view case evidence.");visibleDefectForRead(u,defectId,PermissionService.hasDefectViewAll(grants));return attachments.listForDefect(u.organizationId(),defectId);}

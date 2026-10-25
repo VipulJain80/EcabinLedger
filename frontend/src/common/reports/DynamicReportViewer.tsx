@@ -8,6 +8,8 @@ import { responseErrorMessage } from "@/common/alerts";
 import { formatReportValue, queryKeyFor, validateReportFilters } from "./reportViewerModel.mjs";
 import type { ReportFilterModel } from "./reportViewerModel.mjs";
 import { hasPermission } from "@/common/rbac/permissions";
+import { SearchableMultiSelect, SearchableSelect } from "@/common/selects/SearchableSelect";
+import { shouldUseSearchableSelect } from "@/common/selects/searchableDropdownModel.mjs";
 
 type Request = (path: string, init?: RequestInit) => Promise<Response>;
 type ReportSummary = { id: string; reportCode: string; definitionVersion: number; name: string; description: string | null; sortOrder: number; canExecute: boolean; canExport: boolean };
@@ -155,16 +157,28 @@ export default function DynamicReportViewer({ request, permissions = [] }: { req
       ? (Array.isArray(filter.configuration?.options) ? filter.configuration.options as Array<{ value: string; label: string }> : [])
       : lookupOptions[filter.lookupKey || ""] || [];
     let control;
+    let searchableControl = false;
     if (filter.filterType === "TEXT") control = <input {...common} type="text" maxLength={Number(filter.configuration?.maxLength ?? 4000)} placeholder={placeholder} value={typeof value === "string" ? value : ""} onChange={(event) => setFilterValue(filter.filterKey, event.target.value || undefined)} />;
     else if (filter.filterType === "NUMBER") control = <input {...common} type="number" min={filter.configuration?.min as number | undefined} max={filter.configuration?.max as number | undefined} placeholder={placeholder} value={value === undefined ? "" : String(value)} onChange={(event) => setFilterValue(filter.filterKey, event.target.value === "" ? undefined : Number(event.target.value))} />;
     else if (filter.filterType === "DATE") control = <input {...common} type="date" value={typeof value === "string" ? value : ""} onChange={(event) => setFilterValue(filter.filterKey, event.target.value || undefined)} />;
     else if (filter.filterType === "BOOLEAN") control = <select {...common} value={typeof value === "boolean" ? String(value) : ""} onChange={(event) => setFilterValue(filter.filterKey, event.target.value === "" ? undefined : event.target.value === "true")}><option value="">Choose…</option><option value="true">Yes</option><option value="false">No</option></select>;
-    else if (["SINGLE_SELECT", "LOOKUP_SINGLE"].includes(filter.filterType)) control = <select {...common} value={typeof value === "string" ? value : ""} disabled={filter.filterType === "LOOKUP_SINGLE" && lookupQueries[lookupKeys.indexOf(filter.lookupKey || "")]?.isPending} onChange={(event) => setFilterValue(filter.filterKey, event.target.value || undefined)}><option value="">{filter.filterType === "LOOKUP_SINGLE" && lookupQueries[lookupKeys.indexOf(filter.lookupKey || "")]?.isPending ? "Loading options…" : placeholder}</option>{options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select>;
-    else if (["MULTI_SELECT", "LOOKUP_MULTI"].includes(filter.filterType)) control = <select {...common} multiple value={Array.isArray(value) ? value as string[] : []} aria-label={`${filter.label}${filter.required ? ", required" : ""}`} onChange={(event) => setFilterValue(filter.filterKey, Array.from(event.target.selectedOptions, (option) => option.value))}>{options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select>;
+    else if (["SINGLE_SELECT", "LOOKUP_SINGLE"].includes(filter.filterType)) {
+      const lookupPending = filter.filterType === "LOOKUP_SINGLE" && lookupQueries[lookupKeys.indexOf(filter.lookupKey || "")]?.isPending;
+      if (shouldUseSearchableSelect(options.length)) {
+        searchableControl = true;
+        control = <SearchableSelect id={`report-filter-${filter.filterKey}`} label={filter.label} required={filter.required} options={options} value={typeof value === "string" ? value : ""} placeholder={lookupPending ? "Loading options…" : placeholder} disabled={Boolean(lookupPending)} onChange={(next) => setFilterValue(filter.filterKey, next || undefined)} />;
+      } else control = <select {...common} value={typeof value === "string" ? value : ""} disabled={Boolean(lookupPending)} onChange={(event) => setFilterValue(filter.filterKey, event.target.value || undefined)}><option value="">{lookupPending ? "Loading options…" : placeholder}</option>{options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select>;
+    }
+    else if (["MULTI_SELECT", "LOOKUP_MULTI"].includes(filter.filterType)) {
+      if (shouldUseSearchableSelect(options.length)) {
+        searchableControl = true;
+        control = <SearchableMultiSelect id={`report-filter-${filter.filterKey}`} label={filter.label} required={filter.required} options={options} value={Array.isArray(value) ? value as string[] : []} onChange={(next) => setFilterValue(filter.filterKey, next)} />;
+      } else control = <select {...common} multiple value={Array.isArray(value) ? value as string[] : []} aria-label={`${filter.label}${filter.required ? ", required" : ""}`} onChange={(event) => setFilterValue(filter.filterKey, Array.from(event.target.selectedOptions, (option) => option.value))}>{options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select>;
+    }
     else control = <p className="text-sm text-red-700">Unsupported filter type: {filter.filterType}</p>;
     const lookupError = filter.lookupKey ? lookupQueries[lookupKeys.indexOf(filter.lookupKey)]?.error : null;
     return <div key={filter.filterKey} className="dynamic-report-filter">
-      <label htmlFor={`report-filter-${filter.filterKey}`}>{filter.label}{filter.required && <span aria-label="required">*</span>}</label>
+      {!searchableControl && <label htmlFor={`report-filter-${filter.filterKey}`}>{filter.label}{filter.required && <span aria-label="required">*</span>}</label>}
       {control}
       {filter.filterType.endsWith("MULTI") && <span className="dynamic-report-help">Use Ctrl or Command to select multiple options.</span>}
       {lookupError && <div className="dynamic-report-lookup-error" role="alert"><span>{lookupError instanceof Error ? lookupError.message : "Could not load options."}</span><button type="button" className="button-secondary" onClick={() => void lookupQueries[lookupKeys.indexOf(filter.lookupKey || "")]?.refetch()}>Retry options</button></div>}
@@ -176,12 +190,14 @@ export default function DynamicReportViewer({ request, permissions = [] }: { req
     <div className="dynamic-report-card">
       <div className="dynamic-report-header">
         <div className="dynamic-report-title"><div className="eyebrow">REPORTING</div><h2 id="dynamic-report-heading">Dynamic reports</h2></div>
-        <label className="dynamic-report-selector">Report
-          <select aria-label="Report" value={reportId} onChange={(event) => changeReport(event.target.value)} disabled={reports.isPending || reports.isError || !reports.data?.length}>
-            <option value="">{reports.isPending ? "Loading reports…" : "Select a report"}</option>
-            {(reports.data || []).map((report) => <option key={report.id} value={report.id}>{report.name}</option>)}
-          </select>
-        </label>
+        {shouldUseSearchableSelect(reports.data?.length || 0)
+          ? <div className="dynamic-report-selector"><SearchableSelect id="report-selector" label="Report" value={reportId} onChange={changeReport} options={(reports.data || []).map(report => ({ value: report.id, label: report.name }))} placeholder={reports.isPending ? "Loading reports…" : "Select a report"} disabled={reports.isPending || reports.isError || !reports.data?.length} /></div>
+          : <label className="dynamic-report-selector">Report
+              <select aria-label="Report" value={reportId} onChange={(event) => changeReport(event.target.value)} disabled={reports.isPending || reports.isError || !reports.data?.length}>
+                <option value="">{reports.isPending ? "Loading reports…" : "Select a report"}</option>
+                {(reports.data || []).map((report) => <option key={report.id} value={report.id}>{report.name}</option>)}
+              </select>
+            </label>}
       </div>
       {reports.isError && <div className="dynamic-report-alert" role="alert"><span>{reports.error instanceof Error ? reports.error.message : "Could not load available reports."}</span><button type="button" className="button-secondary" onClick={() => void reports.refetch()}>Retry</button></div>}
       {!reports.isPending && !reports.isError && reports.data?.length === 0 && <p className="dynamic-report-empty">No reports are available to your account.</p>}

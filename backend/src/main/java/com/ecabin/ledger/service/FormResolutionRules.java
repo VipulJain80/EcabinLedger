@@ -26,7 +26,7 @@ final class FormResolutionRules {
 
     static WorkflowStage stageForDefect(FormPurpose purpose, String status) {
         if (purpose == FormPurpose.DEFECT_REPORT) {
-            if (!"REPORTED".equals(status)) throw new ResponseStatusException(HttpStatus.CONFLICT, "The defect report form is no longer applicable to this workflow stage.");
+            if (!Set.of("REPORTED", "REWORK").contains(status)) throw new ResponseStatusException(HttpStatus.CONFLICT, "The defect report form is no longer applicable to this workflow stage.");
             return WorkflowStage.INITIAL_REPORT;
         }
         if (purpose == FormPurpose.REVIEW_DECISION && !Set.of("REPORTED", "UNDER_REVIEW").contains(status))

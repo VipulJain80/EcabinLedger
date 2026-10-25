@@ -72,7 +72,7 @@ public class DefectController {
     public FleetStatusRow aircraft(JwtAuthenticationToken auth, @PathVariable UUID aircraftId) {
         AuthenticatedUser user = users.require(auth); Set<Permission> grants = permissions.requireDefectRead(user); boolean viewAll = PermissionService.hasDefectViewAll(grants);
         return service.aircraft(user.organizationId(), user.externalUserId(), aircraftId,
-            !viewAll && permissions.isMaintenanceTeamScoped(user.organizationId(), user.role()), !viewAll && permissions.isReporterScoped(user.organizationId(), user.role()), !viewAll && permissions.isReviewerTeamScoped(user.organizationId(),user.role()));
+            !viewAll && permissions.isMaintenanceTeamScoped(user.organizationId(), user.role()), !viewAll && permissions.isReporterScoped(user.organizationId(), user.role()), false);
     }
 
     @GetMapping("/aircraft/{aircraftId}/defects")
@@ -80,9 +80,13 @@ public class DefectController {
             @RequestParam(defaultValue = "0") int page, @RequestParam(defaultValue = "25") int size,
             @RequestParam(required = false) String status, @RequestParam(required = false) String search,
             @RequestParam(defaultValue = "reportedAt") String sortBy, @RequestParam(defaultValue = "DESC") String sortDirection) {
-        AuthenticatedUser user = users.require(auth); Set<Permission> grants = permissions.requireDefectRead(user); boolean viewAll = PermissionService.hasDefectViewAll(grants);
+        AuthenticatedUser user = users.require(auth); permissions.requireDefectRead(user);
+        // This aircraft-specific list has a deliberately different read policy from
+        // /defects (Defect Log Book): auditors are limited to their own cases, while
+        // reviewer, maintenance, and organization-admin roles see tenant cases.
+        boolean auditorScoped = permissions.isReporterScoped(user.organizationId(), user.role());
         return service.aircraftDefects(user.organizationId(), user.externalUserId(), aircraftId,
-            !viewAll && permissions.isMaintenanceTeamScoped(user.organizationId(), user.role()), !viewAll && permissions.isReporterScoped(user.organizationId(), user.role()), !viewAll && permissions.isReviewerTeamScoped(user.organizationId(),user.role()), page, size, status, search, sortBy, sortDirection);
+            false, auditorScoped, false, page, size, status, search, sortBy, sortDirection);
     }
 
     @GetMapping("/dashboard/summary")
@@ -120,7 +124,26 @@ public class DefectController {
     }
 
     @GetMapping("/defects/{id}")
-    public DefectView get(JwtAuthenticationToken auth, @PathVariable UUID id) { AuthenticatedUser user=users.require(auth); Set<Permission> grants=permissions.requireDefectRead(user); return visibleDefectForRead(user, id, PermissionService.hasDefectViewAll(grants)); }
+    public DefectView get(JwtAuthenticationToken auth, @PathVariable UUID id) {
+        AuthenticatedUser user=users.require(auth);
+        Set<Permission> grants=permissions.requireDefectRead(user);
+        // Match the aircraft Defect List read policy: report-only users see their own
+        // reports, while other defect readers may open tenant records. Workflow
+        // mutations continue to use the stricter team, assignment, and action checks.
+        boolean reporterScoped=!PermissionService.hasDefectViewAll(grants)
+            && permissions.isReporterScoped(user.organizationId(),user.role());
+        return reporterScoped
+            ? service.getForReporter(user.organizationId(),user.externalUserId(),id)
+            : service.get(user.organizationId(),id);
+    }
+
+    @GetMapping("/aircraft/{aircraftId}/defects/{id}")
+    public DefectView aircraftListDefect(JwtAuthenticationToken auth, @PathVariable UUID aircraftId, @PathVariable UUID id) {
+        AuthenticatedUser user=users.require(auth);
+        permissions.requireDefectRead(user);
+        return service.getForAircraftList(user.organizationId(), user.externalUserId(), aircraftId, id,
+            permissions.isReporterScoped(user.organizationId(), user.role()));
+    }
 
     @PostMapping("/defects/{id}/transitions")
     public DefectView transition(JwtAuthenticationToken auth, @PathVariable UUID id, @Valid @RequestBody TransitionRequest request) {
@@ -144,13 +167,17 @@ public class DefectController {
     }
 
     @GetMapping("/defects/{id}/events")
-    public List<DefectEventView> events(JwtAuthenticationToken auth, @PathVariable UUID id) { AuthenticatedUser user=users.require(auth); Set<Permission> grants=permissions.permissionsFor(user.organizationId(),user.role()); if(!grants.contains(Permission.AUDIT)&&!grants.contains(Permission.PERFORM_ACTION)&&!grants.contains(Permission.REVIEW)&&!grants.contains(Permission.DEFECT_VIEW_ALL))throw new org.springframework.security.access.AccessDeniedException("Audit history, assigned Maintenance, Reviewer, or tenant defect-view permission is required."); visibleDefectForRead(user, id, PermissionService.hasDefectViewAll(grants)); return service.events(user.organizationId(), id); }
+    public List<DefectEventView> events(JwtAuthenticationToken auth, @PathVariable UUID id) { AuthenticatedUser user=users.require(auth); Set<Permission> grants=permissions.permissionsFor(user.organizationId(),user.role()); if(!grants.contains(Permission.AUDIT)&&!grants.contains(Permission.PERFORM_ACTION)&&!grants.contains(Permission.REVIEW)&&!grants.contains(Permission.REPORT)&&!grants.contains(Permission.DEFECT_VIEW_ALL))throw new org.springframework.security.access.AccessDeniedException("Audit history, the reporting Auditor, assigned Maintenance, Reviewer, or tenant defect-view permission is required."); visibleDefectForRead(user, id, PermissionService.hasDefectViewAll(grants)); return service.events(user.organizationId(), id); }
 
     private DefectView visibleDefectForRead(AuthenticatedUser user, UUID id, boolean viewAll) {
         return viewAll ? service.get(user.organizationId(), id) : visibleDefect(user, id);
     }
 
     private DefectView visibleDefect(AuthenticatedUser user, UUID id) {
+        if (permissions.permissionsFor(user.organizationId(),user.role()).contains(Permission.REPORT)) {
+            try { return service.getForReporter(user.organizationId(),user.externalUserId(),id); }
+            catch (org.springframework.web.server.ResponseStatusException notOwned) { if(notOwned.getStatusCode()!=HttpStatus.NOT_FOUND)throw notOwned; }
+        }
         if(closureAccess!=null&&permissions.permissionsFor(user.organizationId(),user.role()).contains(Permission.APPROVE)){
             try{DefectView candidate=service.get(user.organizationId(),id);if(closureAccess.mayViewClosureCase(user.organizationId(),user.externalUserId(),id,candidate.status()))return candidate;}
             catch(org.springframework.web.server.ResponseStatusException ignored){}

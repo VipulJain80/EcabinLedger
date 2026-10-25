@@ -10,8 +10,12 @@ class DefectWorkflowTest {
         assertTrue(DefectWorkflow.permits("REPORTED", "UNDER_REVIEW"));
         assertTrue(DefectWorkflow.permits("REPORTED", "ACTION_ASSIGNED"), "Reviewer approval routes directly to Maintenance.");
         assertTrue(DefectWorkflow.permits("UNDER_REVIEW", "ACTION_ASSIGNED"), "A pending review can route directly to Maintenance.");
-        assertTrue(DefectWorkflow.permits("UNDER_REVIEW", "REJECTED"), "Reviewer rejection is terminal for this report.");
-        assertFalse(DefectWorkflow.permits("UNDER_REVIEW", "REPORTED"), "Reviewer rejection does not return the report to the Auditor.");
+        assertTrue(DefectWorkflow.permits("UNDER_REVIEW", "REWORK"), "Reviewer rejection returns the report to its original Auditor.");
+        assertTrue(DefectWorkflow.permits("REPORTED", "REWORK"));
+        assertTrue(DefectWorkflow.permits("REWORK", "UNDER_REVIEW"), "The Auditor resubmits the same corrected case for review.");
+        assertFalse(DefectWorkflow.permits("UNDER_REVIEW", "REJECTED"), "New rejections use the dedicated return-for-correction workflow.");
+        assertFalse(DefectWorkflow.permits("REWORK", "ACTION_ASSIGNED"));
+        assertFalse(DefectWorkflow.permits("UNDER_REVIEW", "REPORTED"));
         assertTrue(DefectWorkflow.permits("INSPECTION_COMPLETE", "ACTION_ASSIGNED"));
         assertTrue(DefectWorkflow.permits("AWAITING_VERIFICATION", "VERIFIED"));
         assertTrue(DefectWorkflow.permits("VERIFIED", "APPROVAL_REQUIRED"));

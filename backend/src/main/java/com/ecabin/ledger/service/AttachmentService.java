@@ -10,6 +10,7 @@ import com.ecabin.ledger.storage.EvidenceFileValidator;
 import java.security.MessageDigest;
 import java.time.Instant;
 import java.util.HexFormat;
+import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
 import org.springframework.http.HttpStatus;
@@ -58,8 +59,12 @@ public class AttachmentService {
         try{bytes=file.getBytes();}catch(Exception ex){throw new IllegalArgumentException("The evidence file could not be read.");}
         EvidenceFileValidator.validateSize(field,extension,bytes.length);
         String detected=EvidenceFileValidator.validateContent(field,extension,bytes);
-        Integer count=jdbc.queryForObject("SELECT count(*) FROM attachments_dtl WHERE operator_id=? AND defect_id=? AND form_id=? AND form_version_id=? AND field_key=? AND isactive=1 AND scan_status<>'REJECTED'",Integer.class,user.organizationId(),defectId,formId,versionId,fieldKey);
-        if(count!=null&&count>=rules.maxCount())throw new IllegalArgumentException("The maximum number of files for this field has been reached.");
+        List<UploadAggregate> staged=jdbc.query("SELECT count(*) AS file_count,COALESCE(sum(size_bytes),0) AS total_bytes FROM attachments_dtl WHERE operator_id=? AND defect_id=? AND form_id=? AND form_version_id=? AND field_key=? AND form_submission_id IS NULL AND isactive=1 AND scan_status<>'REJECTED'",(rs,n)->new UploadAggregate(rs.getLong("file_count"),rs.getBigDecimal("total_bytes").longValueExact()),user.organizationId(),defectId,formId,versionId,fieldKey);
+        UploadAggregate current=staged.isEmpty()?new UploadAggregate(0,0):staged.get(0);
+        if(current.count()>=rules.maxCount())throw new IllegalArgumentException("The maximum number of files for this field has been reached.");
+        long combined;
+        try{combined=Math.addExact(current.totalBytes(),bytes.length);}catch(ArithmeticException ex){throw totalSizeExceeded(field);}
+        EvidenceFileValidator.validateTotalSize(field,combined);
         UUID id=UUID.randomUUID();String key="evidence/"+user.organizationId()+"/"+defectId+"/"+id;String status="NOT_SCANNED";boolean stored=false;
         try {
             storage.put(key,bytes,detected);stored=true;
@@ -72,7 +77,10 @@ public class AttachmentService {
     }
 
     public Download download(AuthenticatedUser user,boolean teamScoped,boolean reporterScoped,UUID attachmentId){
-        var rows=jdbc.query("SELECT a.defect_id,a.object_key,a.original_filename,a.detected_mime_type,a.scan_status,a.size_bytes FROM attachments_dtl a JOIN defects_dtl d ON d.operator_id=a.operator_id AND d.id=a.defect_id WHERE a.operator_id=? AND a.id=? AND a.isactive=1 AND d.isactive=1 AND (?=false OR (d.status IN ('ACTION_ASSIGNED','IN_PROGRESS') AND ((d.assigned_team IS NULL AND d.assigned_user_id=?) OR "+teamMembershipPredicate("d.assigned_team")+"))) AND (?=false OR d.reported_by=?)",(rs,n)->new DownloadMeta(rs.getObject("defect_id",UUID.class),rs.getString("object_key"),rs.getString("original_filename"),rs.getString("detected_mime_type"),rs.getString("scan_status"),rs.getLong("size_bytes")),user.organizationId(),attachmentId,teamScoped,user.externalUserId(),user.organizationId(),user.externalUserId(),reporterScoped,user.externalUserId());
+        // Read access follows the same current assignment/membership rule as case details.
+        // Workflow advancement (including closure review and CLOSED) must not make attached
+        // evidence disappear while the case remains assigned to this active tenant team.
+        var rows=jdbc.query("SELECT a.defect_id,a.object_key,a.original_filename,a.detected_mime_type,a.scan_status,a.size_bytes FROM attachments_dtl a JOIN defects_dtl d ON d.operator_id=a.operator_id AND d.id=a.defect_id WHERE a.operator_id=? AND a.id=? AND a.isactive=1 AND d.isactive=1 AND (?=false OR ((d.assigned_team IS NULL AND d.assigned_user_id=?) OR "+teamMembershipPredicate("d.assigned_team")+")) AND (?=false OR d.reported_by=?)",(rs,n)->new DownloadMeta(rs.getObject("defect_id",UUID.class),rs.getString("object_key"),rs.getString("original_filename"),rs.getString("detected_mime_type"),rs.getString("scan_status"),rs.getLong("size_bytes")),user.organizationId(),attachmentId,teamScoped,user.externalUserId(),user.organizationId(),user.externalUserId(),reporterScoped,user.externalUserId());
         if(rows.isEmpty())throw new ResponseStatusException(HttpStatus.NOT_FOUND,"Evidence was not found for this organization.");var meta=rows.get(0);
         if("REJECTED".equals(meta.scanStatus()))throw new ResponseStatusException(HttpStatus.CONFLICT,"This evidence is unavailable.");
         return new Download(attachmentId,meta.filename(),meta.mimeType(),storage.get(meta.objectKey()));
@@ -92,6 +100,8 @@ public class AttachmentService {
     private String safeFilename(String raw){if(raw==null||raw.isBlank())throw new IllegalArgumentException("A filename is required.");String leaf=raw.replace('\\','/');leaf=leaf.substring(leaf.lastIndexOf('/')+1).replaceAll("[^A-Za-z0-9._-]","_");if(leaf.length()>120)leaf=leaf.substring(leaf.length()-120);if(leaf.isBlank()||leaf.startsWith("."))throw new IllegalArgumentException("The filename is invalid.");return leaf;}
     private String teamMembershipPredicate(String teamColumn){return "EXISTS (SELECT 1 FROM operator_membership_teams_mst omt JOIN operator_memberships_mst m ON m.operator_id=omt.operator_id AND m.external_user_id=omt.external_user_id AND m.isactive=1 JOIN maintenance_teams_mst t ON t.operator_id=omt.operator_id AND t.name=omt.team_name AND t.isactive=1 WHERE omt.operator_id=? AND omt.external_user_id=? AND omt.team_name="+teamColumn+" AND omt.isactive=1)";}
     private String extension(String name){int dot=name.lastIndexOf('.');return dot<1?null:name.substring(dot+1).toLowerCase(Locale.ROOT);}
+    private IllegalArgumentException totalSizeExceeded(FieldDefinition field){try{EvidenceFileValidator.validateTotalSize(field,Long.MAX_VALUE);}catch(IllegalArgumentException ex){return ex;}return new IllegalArgumentException("Combined upload size exceeds the configured total limit.");}
+    private record UploadAggregate(long count,long totalBytes){}
     private record DownloadMeta(UUID defectId,String objectKey,String filename,String mimeType,String scanStatus,long sizeBytes){}
     public record Download(UUID id,String filename,String mimeType,byte[] content){}
 }

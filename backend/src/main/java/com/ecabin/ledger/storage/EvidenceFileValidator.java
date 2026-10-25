@@ -22,8 +22,10 @@ import org.springframework.web.server.ResponseStatusException;
 
 /** Server-side evidence limits and full format parsing for supported evidence types. */
 public final class EvidenceFileValidator {
-    public static final long MAX_IMAGE_BYTES = 5L * 1024 * 1024;
-    public static final long MAX_NON_IMAGE_BYTES = 15L * 1024 * 1024;
+    public static final long BYTES_PER_MEGABYTE = 1024L * 1024;
+    public static final long MAX_IMAGE_BYTES = 20L * BYTES_PER_MEGABYTE;
+    public static final long MAX_NON_IMAGE_BYTES = 20L * BYTES_PER_MEGABYTE;
+    public static final long MAX_TOTAL_BYTES = 200L * BYTES_PER_MEGABYTE;
     private static final long MAX_IMAGE_PIXELS = 12_000_000L;
     private static final int MAX_IMAGE_DIMENSION = 12_000;
     private static final long MAX_ANIMATED_IMAGE_PIXELS = 40_000_000L;
@@ -42,13 +44,30 @@ public final class EvidenceFileValidator {
         return isImageUpload(field, extension) ? Math.min(configured, MAX_IMAGE_BYTES) : Math.min(configured, MAX_NON_IMAGE_BYTES);
     }
 
+    /** Missing totals in existing version JSON inherit the former per-file × count ceiling. */
+    public static long maxTotalBytes(FieldDefinition field) {
+        var rules=field.fileRules();
+        if(rules.maxTotalSizeBytes()!=null)return rules.maxTotalSizeBytes();
+        try{return Math.multiplyExact(rules.maxFileSizeBytes(),rules.maxCount().longValue());}
+        catch(ArithmeticException ex){return Long.MAX_VALUE;}
+    }
+
+    public static String megabytes(long bytes) {
+        if(bytes % BYTES_PER_MEGABYTE == 0)return Long.toString(bytes / BYTES_PER_MEGABYTE);
+        return java.math.BigDecimal.valueOf(bytes).divide(java.math.BigDecimal.valueOf(BYTES_PER_MEGABYTE),2,java.math.RoundingMode.HALF_UP).stripTrailingZeros().toPlainString();
+    }
+
+    public static void validateTotalSize(FieldDefinition field,long totalBytes) {
+        long maximum=maxTotalBytes(field);
+        if(totalBytes<0||totalBytes>maximum)throw new IllegalArgumentException("Combined upload size exceeds the configured total limit of "+megabytes(maximum)+" MB.");
+    }
+
     public static void validateSize(FieldDefinition field, String extension, long size) {
         boolean image = isImageUpload(field, extension);
         if (size == 0) throw new IllegalArgumentException("Choose a non-empty evidence file.");
         if (size > maxBytes(field, extension)) {
-            throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE, image
-                ? "This image exceeds the 5 MB per-file limit. Please choose a smaller image."
-                : "The file exceeds the configured per-file limit.");
+            throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE,
+                "The file exceeds the configured per-file limit of " + megabytes(maxBytes(field,extension)) + " MB.");
         }
     }
 
@@ -71,8 +90,8 @@ public final class EvidenceFileValidator {
         } catch (Exception ex) {
             throw invalidContent();
         }
-        if (expectedMime.startsWith("image/") && bytes.length > MAX_IMAGE_BYTES)
-            throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE, "This image exceeds the 5 MB per-file limit. Please choose a smaller image.");
+        if (expectedMime.startsWith("image/") && bytes.length > maxBytes(field,extension))
+            throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE, "The file exceeds the configured per-file limit of " + megabytes(maxBytes(field,extension)) + " MB.");
         return expectedMime;
     }
 

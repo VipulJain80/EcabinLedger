@@ -11,6 +11,9 @@ import MaintenanceWorkQueuePage from "@/common/fleet/MaintenanceWorkQueuePage";
 import ReviewerWorkQueuePage from "@/common/fleet/ReviewerWorkQueuePage";
 import GalleyReviewerDecisionForm from "@/common/fleet/GalleyReviewerDecisionForm";
 import DefectDetailsPage from "@/common/fleet/DefectDetailsPage";
+import MaintenanceTeamReassignmentDialog, { ReassignTeamButton } from "@/common/fleet/MaintenanceTeamReassignmentDialog";
+import { canReassignMaintenance } from "@/common/fleet/defectDetailsModel";
+import AccessStatePage, { accessFailureMessage } from "@/common/auth/AccessStatePage";
 import DialogPortal from "@/common/dialogs/DialogPortal";
 import OperationalFormRenderer from "@/common/forms/OperationalFormRenderer";
 import { formPurposeForStatus } from "@/common/forms/formResolution";
@@ -86,7 +89,9 @@ export default function Home() {
   const [saving, setSaving] = useState(false);
   const reportIdempotencyKey = useRef<string | null>(null);
   const [selected, setSelected] = useState<Defect | null>(null);
+  const [reassignmentTarget, setReassignmentTarget] = useState<Defect | null>(null);
   const [openDefectId, setOpenDefectId] = useState<string | null>(null);
+  const [openDefectAircraftListId, setOpenDefectAircraftListId] = useState<string | null>(null);
   const defectReturnScrollY = useRef(0);
   const [selectedAircraftId, setSelectedAircraftId] = useState("");
   const [selectedAircraft, setSelectedAircraft] = useState<FleetAircraft | null>(null);
@@ -103,6 +108,8 @@ export default function Home() {
   const [summary, setSummary] = useState<Summary>({ openDefects: 0, criticalDefects: 0, reportedToday: 0, closedThisMonth: 0 });
   const [summaryAvailable, setSummaryAvailable] = useState(false);
   const [identity, setIdentity] = useState<Identity | null>(null);
+  const [applicationName, setApplicationName] = useState("");
+  const identityAvailable = useRef(false);
   const [authorizationError, setAuthorizationError] = useState("");
   const routeAccessChecked = useRef(false);
   const [navigation, setNavigation] = useState<NavigationItem[]>([]);
@@ -120,7 +127,7 @@ export default function Home() {
   const [selectedAreaId, setSelectedAreaId] = useState("");
   const [localSessionEmail, setLocalSessionEmail] = useState<string | null>(() => getLocalSession()?.email || null);
   const [activeSection, setActiveSection] = useState("defects");
-  const currentPageLabel = navigation.flatMap((item) => [item, ...item.children]).find((item) => item.key === currentNavKey)?.label || (currentNavKey === "home" ? "Defect Summary" : "Defect register");
+  const currentPageLabel = navigation.flatMap((item) => [item, ...item.children]).find((item) => item.key === currentNavKey)?.label || (currentNavKey === "home" ? "Defect Summary" : "Defect LOG Book");
 
   useEffect(() => { const title = selectedAircraftId ? "Aircraft Defect List" : currentPageLabel; document.title = `${title} | ${identity?.applicationName?.trim() || "eCabin Ledger"}`; }, [currentPageLabel, selectedAircraftId, identity?.applicationName]);
 
@@ -173,6 +180,7 @@ export default function Home() {
       if (rejectedResponse) {
         const expired = rejectedResponse.status === 401;
         setIdentity(null);
+        identityAvailable.current = false;
         setNavigation([]);
         setItems([]);
         setSummary({ openDefects: 0, criticalDefects: 0, reportedToday: 0, closedThisMonth: 0 });
@@ -194,9 +202,14 @@ export default function Home() {
         { label: "Account identity", response: identityResponse },
         { label: "Navigation", response: navigationResponse },
       ].find((item) => !item.response.ok);
-      if (failedRequest) throw new Error(await responseErrorMessage(failedRequest.response, `Could not load ${failedRequest.label} (HTTP ${failedRequest.response.status}).`));
+      if (failedRequest) {
+        if (failedRequest.response.status >= 500) throw new Error("Access unavailable");
+        throw new Error(await responseErrorMessage(failedRequest.response, `Could not load ${failedRequest.label} (HTTP ${failedRequest.response.status}).`));
+      }
       const [identityData, navigationData]: [Identity, NavigationItem[]] = await Promise.all([identityResponse.json(), navigationResponse.json()]);
       setIdentity(identityData);
+      setApplicationName(identityData.applicationName || "");
+      identityAvailable.current = true;
       setNavigation(navigationData);
       setAuthorizationError("");
       const hasDefectRead = identityData.permissions.includes("VIEW") || identityData.permissions.includes("DEFECT_VIEW_ALL");
@@ -214,7 +227,7 @@ export default function Home() {
           : canOpenReports && accessibleKeys.has("reports") ? "reports"
           : accessibleItems.find((item) => item.children.length === 0)?.key;
         if (fallback) { setActiveSection("defects"); setCurrentNavKey(fallback); }
-        else setAuthorizationError("Your account does not have access to an application page. Contact your organization administrator.");
+        else setAuthorizationError("Access denied");
         routeAccessChecked.current = true;
       }
       if (hasDefectRead) {
@@ -248,7 +261,11 @@ export default function Home() {
         setAreaMasterOptions(referenceData.areas);
         }
       }
-    } catch (error) { const message = error instanceof Error ? error.message : "The service is unavailable."; setAuthorizationError(message); await alert.error(message); }
+    } catch (error) {
+      const message = accessFailureMessage(error);
+      setAuthorizationError(message);
+      if (identityAvailable.current) await alert.error(message);
+    }
     finally { setLoading(false); }
   }, [area, filter, searchFilters, setSelected]);
 
@@ -408,25 +425,10 @@ export default function Home() {
     } catch { /* Keep the defect details available if audit history is temporarily unavailable. */ }
   }
 
-  async function openQueueDefect(defectId: string) {
+  async function openQueueDefect(defectId: string, aircraftListId?: string) {
     defectReturnScrollY.current = window.scrollY;
+    setOpenDefectAircraftListId(aircraftListId || null);
     setOpenDefectId(defectId);
-  }
-
-  async function reassignDefect(defect: Defect) {
-    if (!defect.activeActionId) return;
-    try {
-      const assignedTeam = await alert.prompt({ title: "Reassign maintenance team", text: `Current assignment: ${defect.assignedTo || "Unassigned"}. Enter the exact active team name.`, placeholder: "Maintenance team", required: true });
-      if (!assignedTeam) return;
-      const assignedUserId = await alert.prompt({ title: "Optional individual owner", text: "Leave blank to keep the action shared with active members of the team.", placeholder: "Enterprise user ID", required: false });
-      const reason = await alert.prompt({ title: "Reassignment reason", required: true });
-      if (!reason) return;
-      const response = await apiFetch(`${API}/defects/${defect.id}/actions/${defect.activeActionId}/reassign`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ assignedTeam, assignedUserId, reason }) });
-      if (!response.ok) throw new Error(await responseErrorMessage(response, "Could not reassign this corrective action."));
-      setSelected(null);
-      await load();
-      await alert.success("Corrective action reassigned. The former team no longer has current-work access.");
-    } catch (error) { await alert.error(error instanceof Error ? error.message : "Could not reassign this corrective action."); }
   }
 
   async function refreshAfterReviewerDecision(defect:Defect,status:string){
@@ -445,9 +447,7 @@ export default function Home() {
     await alert.success(status==="CLOSED"?"Closure accepted. The defect is now closed.":"Closure declined. The defect has returned to its assigned Maintenance Team.");
   }
 
-  if (!identity) return <main className="grid min-h-[100svh] place-items-center bg-[#eaf1ff] p-6 font-[var(--sans)] text-[#000000]" role={loading ? "status" : "alert"} aria-live="polite">
-    <section className="w-[min(520px,100%)] rounded-2xl border border-[#e1e8f2] bg-white p-8 text-center shadow-[0_14px_32px_#263d5a1c]"><span className="eyebrow">ECABIN LEDGER ACCESS</span><h1 className="my-[10px] text-2xl text-[#000000]">{loading ? "Verifying access…" : "Access unavailable"}</h1><p className="mb-5 mt-0 leading-[1.6] text-[#000000]">{loading ? "Checking your enterprise identity and organization permissions." : authorizationError || "We could not verify your application access."}</p>{!loading && <button type="button" className="button-primary" onClick={() => void load()}>Try again</button>}</section>
-  </main>;
+  if (!identity) return <AccessStatePage applicationName={applicationName} loading={loading} message={authorizationError || "Access unavailable"} actionLabel={!loading ? "Try again" : undefined} onAction={!loading ? () => void load() : undefined} />;
 
   return <main className="shell app-shell block min-h-screen w-full max-w-full overflow-x-clip bg-[#eaf1ff]">
     <div className="app-shell-header">
@@ -467,7 +467,7 @@ export default function Home() {
       </nav>
     </div>
     <section className="workspace m-0 min-h-[calc(100vh-70px)] w-full min-w-0" id="home">
-      {openDefectId ? <DefectDetailsPage defectId={openDefectId} onBack={()=>{setOpenDefectId(null);requestAnimationFrame(()=>window.scrollTo({top:defectReturnScrollY.current,behavior:"instant"}));}} /> : currentNavKey === "user-login-monitoring" && hasPermission(identity?.permissions, "ADMINISTER_ORGANIZATION") ? <UserLoginMonitoringPage request={configurationFetch} /> : currentNavKey === "api-rate-limits" && hasPermission(identity?.permissions, "ADMINISTER_ORGANIZATION") ? <ApiRateLimitsPage request={configurationFetch} /> : activeSection === "configuration" && hasPermission(identity?.permissions, "ADMINISTER_ORGANIZATION") ? <ConfigurationPage request={configurationFetch} initialKey={configurationKey} /> : currentNavKey === "report-defect" && hasPermission(identity?.permissions,"REPORT") ? <ReportDefectPage request={operationalFormFetch} organizationCacheKey={identity?.organizationName||""} onCreated={()=>{void load();}} onOpenDefect={id=>{void openQueueDefect(id);}} /> : currentNavKey === "home" && selectedAircraftId ? <AircraftDefectListPage request={fleetStatusFetch} aircraftId={selectedAircraftId} organizationCacheKey={identity.organizationName} onBack={leaveAircraft} onLogDefect={startAircraftDefect} onOpenDefect={id => { void openQueueDefect(id); }} canReport={hasPermission(identity?.permissions, "REPORT")} /> : currentNavKey === "home" ? <FleetStatusPage request={fleetStatusFetch} onSelectAircraft={selectAircraft} /> : currentNavKey === "corrective-actions" && hasPermission(identity?.permissions, "PERFORM_ACTION") ? <MaintenanceWorkQueuePage request={fleetStatusFetch} onOpen={(defectId) => { void openQueueDefect(defectId); }} /> : currentNavKey === "review-queue" && (hasPermission(identity?.permissions, "REVIEW") || hasPermission(identity?.permissions, "APPROVE") || hasPermission(identity?.permissions, "ADMINISTER_ORGANIZATION")) ? <ReviewerWorkQueuePage request={fleetStatusFetch} onOpen={(defectId) => { void openQueueDefect(defectId); }} /> : <div className={`content max-w-none min-h-[calc(100vh-70px)] px-[clamp(20px,2.5vw,52px)] py-[clamp(24px,3vw,56px)]${currentNavKey === "reports" ? " reports-page-shell" : ""}`} id="defects">
+      {openDefectId ? <DefectDetailsPage defectId={openDefectId} aircraftListId={openDefectAircraftListId} onBack={()=>{setOpenDefectId(null);setOpenDefectAircraftListId(null);requestAnimationFrame(()=>window.scrollTo({top:defectReturnScrollY.current,behavior:"instant"}));}} /> : currentNavKey === "user-login-monitoring" && hasPermission(identity?.permissions, "ADMINISTER_ORGANIZATION") ? <UserLoginMonitoringPage request={configurationFetch} /> : currentNavKey === "api-rate-limits" && hasPermission(identity?.permissions, "ADMINISTER_ORGANIZATION") ? <ApiRateLimitsPage request={configurationFetch} /> : activeSection === "configuration" && hasPermission(identity?.permissions, "ADMINISTER_ORGANIZATION") ? <ConfigurationPage request={configurationFetch} initialKey={configurationKey} /> : currentNavKey === "report-defect" && hasPermission(identity?.permissions,"REPORT") ? <ReportDefectPage request={operationalFormFetch} organizationCacheKey={identity?.organizationName||""} onCreated={()=>{void load();}} onOpenDefect={id=>{void openQueueDefect(id);}} /> : currentNavKey === "home" && selectedAircraftId ? <AircraftDefectListPage request={fleetStatusFetch} aircraftId={selectedAircraftId} organizationCacheKey={identity.organizationName} onBack={leaveAircraft} onLogDefect={startAircraftDefect} onOpenDefect={id => { void openQueueDefect(id, selectedAircraftId); }} canReport={hasPermission(identity?.permissions, "REPORT")} /> : currentNavKey === "home" ? <FleetStatusPage request={fleetStatusFetch} onSelectAircraft={selectAircraft} /> : currentNavKey === "corrective-actions" && hasPermission(identity?.permissions, "PERFORM_ACTION") ? <MaintenanceWorkQueuePage request={fleetStatusFetch} onOpen={(defectId) => { void openQueueDefect(defectId); }} /> : currentNavKey === "review-queue" && (hasPermission(identity?.permissions, "REVIEW") || hasPermission(identity?.permissions, "APPROVE") || hasPermission(identity?.permissions, "ADMINISTER_ORGANIZATION")) ? <ReviewerWorkQueuePage request={fleetStatusFetch} onOpen={(defectId) => { void openQueueDefect(defectId); }} /> : <div className={`content max-w-none min-h-[calc(100vh-70px)] px-[clamp(20px,2.5vw,52px)] py-[clamp(24px,3vw,56px)]${currentNavKey === "reports" ? " reports-page-shell" : ""}`} id="defects">
         <div className="heading"><div><h1>{currentPageLabel}</h1></div></div>
         {currentNavKey === "reports" && !hasPermission(identity?.permissions, "REPORT_VIEW") && (hasPermission(identity?.permissions, "ADMINISTER_ORGANIZATION")
           ? <section className="report-access-restricted" role="status"><h2>Report data access is not granted</h2><p>Your organization administrator access does not automatically include report data access. In Report Master, grant this role View access for the report; running reports also requires Execute access. The matching report permissions must be assigned to this role as well.</p></section>
@@ -504,6 +504,6 @@ export default function Home() {
       {selectedFormForReport && selectedAreaId ? <><OperationalFormRenderer key={`${selectedAreaId}:${selectedFormForReport.id}:${selectedFormForReport.versionId}`} request={operationalFormFetch} areaId={selectedAreaId} areaName={areaMasterOptions.find(item => item.id === selectedAreaId)?.name} areaCode={areaMasterOptions.find(item=>item.id===selectedAreaId)?.code} initialFormId={selectedFormForReport.id} initialVersionId={selectedFormForReport.versionId} preparationMode initialAnswers={reportFormAnswers} onAnswersChange={updateReportFormAnswers} onFilesChange={updateReportFormFiles} onAircraftSelected={option=>{setSelectedAircraft(option?{...option,openDefects:0}:null);setSelectedAircraftId(option?.id||"");}} onPreparationReady={updateReportFormReady} /></> : <p role="alert">Choose a cabin area and published form before reporting.</p>}
       <div className="modal-actions flex justify-end gap-2 border-t border-[#edf0ec] pt-[14px] mt-[13px]"><button type="button" className="button-secondary" onClick={closeReportDialog}>Cancel</button><button className="button-primary" disabled={saving || !selectedFormForReport || !reportFormReady}>{saving ? "Saving…" : "Save defect →"}</button></div>
     </form></DialogPortal>}
-    {selected && <DialogPortal onClose={() => setSelected(null)} labelledBy="defect-detail-title" className="modal detail-modal"><div className="modal-heading flex items-start justify-between mb-[18px]"><div><div className="eyebrow">{selected.reference} · {selected.tailNumber}</div><h2 id="defect-detail-title">{selected.title}</h2></div><button className="close" onClick={() => setSelected(null)} aria-label="Close">×</button></div><p className="detail-description">{selected.description}</p><div className="detail-grid"><span>Location<b>{human(selected.location)} · {selected.zone}</b></span><span>Condition<b>{selected.conditionName || "Not recorded"}</b></span><span>Severity<SeverityBadge request={fleetStatusFetch} severityCode={selected.severity} severityName={selected.severityName} /></span><span>Status<WorkflowStatusBadge statusCode={selected.status} statuses={workflowStatuses} /></span><span>Reported by<b>{selected.reportedBy}</b></span><span>Assigned to<b>{selected.assignedTo || selected.assignedTeam || "Unassigned"}</b></span></div>{selected.routingAttention&&<p className="configuration-field-error" role="status">{selected.routingAttention}</p>}{hasPermission(identity?.permissions,"REVIEW")&&["REPORTED","UNDER_REVIEW"].includes(selected.status)&&areaMasterOptions.find(item=>item.id===selected.areaId)?.code==="GALLEY"&&<GalleyReviewerDecisionForm key={`${selected.id}:${selected.status}`} request={fleetStatusFetch} defect={selected} onComplete={status=>{void refreshAfterReviewerDecision(selected,status).catch(error=>alert.error(error instanceof Error?error.message:"Decision saved, but the case could not be refreshed."));}}/>}{formPurposeForStatus(selected.status,identity?.permissions) && <OperationalFormRenderer key={`${selected.id}:${formPurposeForStatus(selected.status,identity?.permissions)}:${initialFormForDefect?.formId || ""}:${initialFormForDefect?.versionId || ""}`} request={operationalFormFetch} defectId={selected.id} actionId={selected.activeActionId||undefined} areaId={selected.areaId} areaName={areaMasterOptions.find(item => item.id === selected.areaId)?.name} areaCode={areaMasterOptions.find(item => item.id === selected.areaId)?.code} purpose={formPurposeForStatus(selected.status,identity?.permissions)!} initialFormId={initialFormForDefect?.defectId === selected.id ? initialFormForDefect.formId : undefined} initialVersionId={initialFormForDefect?.defectId === selected.id ? initialFormForDefect.versionId : undefined} initialAnswers={initialFormForDefect?.defectId === selected.id ? initialFormForDefect.answers : undefined} initialFiles={initialFormForDefect?.defectId===selected.id?initialFormForDefect.files:undefined} onWorkflowComplete={status=>{void refreshAfterClosureDecision(selected,status).catch(error=>alert.error(error instanceof Error?error.message:"Decision saved, but the case could not be refreshed."));}}/>}<h3 className="timeline-heading">Audit history</h3><div className="timeline">{events.map((item) => <div className="timeline-item relative flex pb-[13px]" key={item.id}><span className="timeline-dot"></span><div><b>{human(item.eventType)}{item.toStatus ? <> · <WorkflowStatusBadge statusCode={item.toStatus} statuses={workflowStatuses}/></> : ""}{item.inspectionOutcome ? ` · Inspection ${human(item.inspectionOutcome)}` : ""}</b><p>{item.note}{item.evidenceReference ? `\nEvidence: ${item.evidenceReference}` : ""}</p><small>{item.actorId} · {formatDateTime(item.occurredAt)}</small></div></div>)}{!events.length && <span className="timeline-empty">Loading history or no recorded events.</span>}</div><p className="modal-note"><span>✓</span> Form submissions and evidence are retained against the exact published version.</p><div className="modal-actions flex justify-end gap-2 border-t border-[#edf0ec] pt-[14px] mt-[13px]"><button className="button-secondary" onClick={() => setSelected(null)}>Close</button>{hasPermission(identity?.permissions, "ASSIGN_ACTION") && selected.activeActionId && ["ACTION_ASSIGNED", "IN_PROGRESS"].includes(selected.status) && <button className="button-secondary" onClick={() => void reassignDefect(selected)}>Reassign maintenance team</button>}</div></DialogPortal>}
+    {selected && reassignmentTarget?.activeActionId ? <MaintenanceTeamReassignmentDialog defectId={reassignmentTarget.id} actionId={reassignmentTarget.activeActionId} currentTeam={reassignmentTarget.assignedTeam || null} request={fleetStatusFetch} onClose={() => setReassignmentTarget(null)} onComplete={async () => { setSelected(null); setReassignmentTarget(null); await load(); }} /> : selected && <DialogPortal onClose={() => setSelected(null)} labelledBy="defect-detail-title" className="modal detail-modal"><div className="modal-heading flex items-start justify-between mb-[18px]"><div><div className="eyebrow">{selected.reference} · {selected.tailNumber}</div><h2 id="defect-detail-title">{selected.title}</h2></div><button className="close" onClick={() => setSelected(null)} aria-label="Close">×</button></div><p className="detail-description">{selected.description}</p><div className="detail-grid"><span>Location<b>{human(selected.location)} · {selected.zone}</b></span><span>Condition<b>{selected.conditionName || "Not recorded"}</b></span><span>Severity<SeverityBadge request={fleetStatusFetch} severityCode={selected.severity} severityName={selected.severityName} /></span><span>Status<WorkflowStatusBadge statusCode={selected.status} statuses={workflowStatuses} /></span><span>Reported by<b>{selected.reportedBy}</b></span><span>Assigned to<b>{selected.assignedTo || selected.assignedTeam || "Unassigned"}</b></span></div>{selected.routingAttention&&<p className="configuration-field-error" role="status">{selected.routingAttention}</p>}{hasPermission(identity?.permissions,"REVIEW")&&["REPORTED","UNDER_REVIEW"].includes(selected.status)&&areaMasterOptions.find(item=>item.id===selected.areaId)?.code==="GALLEY"&&<GalleyReviewerDecisionForm key={`${selected.id}:${selected.status}`} request={fleetStatusFetch} defect={selected} onComplete={status=>{void refreshAfterReviewerDecision(selected,status).catch(error=>alert.error(error instanceof Error?error.message:"Decision saved, but the case could not be refreshed."));}}/>}{formPurposeForStatus(selected.status,identity?.permissions) && <OperationalFormRenderer key={`${selected.id}:${formPurposeForStatus(selected.status,identity?.permissions)}:${initialFormForDefect?.formId || ""}:${initialFormForDefect?.versionId || ""}`} request={operationalFormFetch} defectId={selected.id} actionId={selected.activeActionId||undefined} areaId={selected.areaId} areaName={areaMasterOptions.find(item => item.id === selected.areaId)?.name} areaCode={areaMasterOptions.find(item => item.id === selected.areaId)?.code} purpose={formPurposeForStatus(selected.status,identity?.permissions)!} initialFormId={initialFormForDefect?.defectId === selected.id ? initialFormForDefect.formId : undefined} initialVersionId={initialFormForDefect?.defectId === selected.id ? initialFormForDefect.versionId : undefined} initialAnswers={initialFormForDefect?.defectId === selected.id ? initialFormForDefect.answers : undefined} initialFiles={initialFormForDefect?.defectId===selected.id?initialFormForDefect.files:undefined} onWorkflowComplete={status=>{void refreshAfterClosureDecision(selected,status).catch(error=>alert.error(error instanceof Error?error.message:"Decision saved, but the case could not be refreshed."));}}/>}<h3 className="timeline-heading">Audit history</h3><div className="timeline">{events.map((item) => <div className="timeline-item relative flex pb-[13px]" key={item.id}><span className="timeline-dot"></span><div><b>{human(item.eventType)}{item.toStatus ? <> · <WorkflowStatusBadge statusCode={item.toStatus} statuses={workflowStatuses}/></> : ""}{item.inspectionOutcome ? ` · Inspection ${human(item.inspectionOutcome)}` : ""}</b><p>{item.note}{item.evidenceReference ? `\nEvidence: ${item.evidenceReference}` : ""}</p><small>{item.actorId} · {formatDateTime(item.occurredAt)}</small></div></div>)}{!events.length && <span className="timeline-empty">Loading history or no recorded events.</span>}</div><p className="modal-note"><span>✓</span> Form submissions and evidence are retained against the exact published version.</p><div className="modal-actions flex justify-end gap-2 border-t border-[#edf0ec] pt-[14px] mt-[13px]"><button className="button-secondary" onClick={() => setSelected(null)}>Close</button>{canReassignMaintenance(identity?.permissions || [], selected.activeActionId, selected.status) && <ReassignTeamButton onClick={() => setReassignmentTarget(selected)} />}</div></DialogPortal>}
   </main>;
 }

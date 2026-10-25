@@ -22,16 +22,28 @@ class EvidenceFileValidatorTest {
         List.of("jpg", "jpeg", "png", "webp", "pdf"), List.of("image/jpeg", "image/png", "image/webp", "application/pdf"));
     private static final byte[] EXE = {'M', 'Z', 0, 0, 1, 2, 3, 4, 5};
 
-    @Test void imageBelowAndExactlyFiveMebibytesAreAcceptedBySizePolicy() {
-        assertDoesNotThrow(() -> EvidenceFileValidator.validateSize(IMAGE, "png", 5L * 1024 * 1024 - 1));
-        assertDoesNotThrow(() -> EvidenceFileValidator.validateSize(IMAGE, "png", 5L * 1024 * 1024));
+    @Test void imageAndGeneralFileFieldsAcceptTheConfiguredTwentyMebibytePerFileBoundary() {
+        for(FieldDefinition field:List.of(IMAGE,FILE)) {
+            assertDoesNotThrow(() -> EvidenceFileValidator.validateSize(field, "png", 20L * 1024 * 1024 - 1));
+            assertDoesNotThrow(() -> EvidenceFileValidator.validateSize(field, "png", 20L * 1024 * 1024));
+        }
     }
 
-    @Test void imageAboveFiveMebibytesReturns413WithActionableMessage() {
+    @Test void imageAndGeneralFileFieldsRejectOneByteAboveThePerFileLimit() {
         ResponseStatusException error = assertThrows(ResponseStatusException.class,
-            () -> EvidenceFileValidator.validateSize(IMAGE, "png", 5L * 1024 * 1024 + 1));
+            () -> EvidenceFileValidator.validateSize(IMAGE, "png", 20L * 1024 * 1024 + 1));
         assertEquals(413, error.getStatusCode().value());
-        assertTrue(error.getReason().contains("5 MB per-file limit"));
+        assertTrue(error.getReason().contains("configured per-file limit of 20 MB"));
+        assertThrows(ResponseStatusException.class,()->EvidenceFileValidator.validateSize(FILE,"pdf",20L*1024*1024+1));
+    }
+
+    @Test void combinedLimitUsesExactBytesAndLegacyFormsDeriveACompatibleDefault() {
+        FieldDefinition withThirtyMbTotal=new FieldDefinition("evidence","Evidence",FieldType.FILE_UPLOAD,null,true,0,null,null,null,null,null,
+            new FileRules(List.of("pdf"),List.of("application/pdf"),20L*1024*1024,1,3,30L*1024*1024));
+        assertDoesNotThrow(()->EvidenceFileValidator.validateTotalSize(withThirtyMbTotal,30L*1024*1024));
+        IllegalArgumentException over=assertThrows(IllegalArgumentException.class,()->EvidenceFileValidator.validateTotalSize(withThirtyMbTotal,30L*1024*1024+1));
+        assertTrue(over.getMessage().contains("30 MB"));
+        assertEquals(60L*1024*1024,EvidenceFileValidator.maxTotalBytes(field(FieldType.FILE_UPLOAD,List.of("pdf"),List.of("application/pdf"))));
     }
 
     @Test void decodesEverySupportedEvidenceFormatAsItsClaimedFormat() throws Exception {
@@ -81,7 +93,7 @@ class EvidenceFileValidatorTest {
 
     private static FieldDefinition field(FieldType type, List<String> extensions, List<String> mimes) {
         return new FieldDefinition("evidence", "Evidence", type, null, true, 1, null, null, null, null, null,
-            new FileRules(extensions, mimes, 15L * 1024 * 1024, 0, 5));
+            new FileRules(extensions, mimes, 20L * 1024 * 1024, 0, 3));
     }
 
     private static byte[] image(String format) throws Exception {

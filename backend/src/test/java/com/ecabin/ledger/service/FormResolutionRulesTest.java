@@ -24,8 +24,9 @@ class FormResolutionRulesTest {
     }
 
     @Test
-    void defectReportResolvesThroughInitialContextThenOnlyAtReportedStatus() {
+    void defectReportResolvesForInitialSubmissionAndReturnedRework() {
         assertEquals(WorkflowStage.INITIAL_REPORT, FormResolutionRules.stageForDefect(FormPurpose.DEFECT_REPORT, "REPORTED"));
+        assertEquals(WorkflowStage.INITIAL_REPORT, FormResolutionRules.stageForDefect(FormPurpose.DEFECT_REPORT, "REWORK"));
         assertThrows(ResponseStatusException.class, () -> FormResolutionRules.stageForDefect(FormPurpose.DEFECT_REPORT, "UNDER_REVIEW"));
         assertEquals(WorkflowStage.REPORTED, FormResolutionRules.stageForDefect(FormPurpose.REVIEW_DECISION, "REPORTED"));
         assertEquals(WorkflowStage.UNDER_REVIEW, FormResolutionRules.stageForDefect(FormPurpose.REVIEW_DECISION, "UNDER_REVIEW"));

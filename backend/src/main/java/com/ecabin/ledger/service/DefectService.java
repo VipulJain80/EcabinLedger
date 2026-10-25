@@ -72,7 +72,7 @@ public class DefectService {
 
     public DefectPage list(UUID operatorId, String externalUserId, String status, String location, String query, String searchBy, String aircraftType,
             Instant fromDate, Instant toDate, boolean mine, boolean teamScoped, boolean reviewerScoped, String cursor, int limit) {
-        if (status != null && !Set.of("REPORTED", "UNDER_REVIEW", "INSPECTION_REQUIRED", "INSPECTION_IN_PROGRESS", "INSPECTION_COMPLETE", "ACTION_ASSIGNED", "IN_PROGRESS", "AWAITING_VERIFICATION", "VERIFIED", "APPROVAL_REQUIRED", "CLOSED", "REJECTED", "CANCELLED", "REOPENED").contains(status)) throw new IllegalArgumentException("Unsupported status filter.");
+        if (status != null && !Set.of("REPORTED", "UNDER_REVIEW", "REWORK", "INSPECTION_REQUIRED", "INSPECTION_IN_PROGRESS", "INSPECTION_COMPLETE", "ACTION_ASSIGNED", "IN_PROGRESS", "AWAITING_VERIFICATION", "VERIFIED", "APPROVAL_REQUIRED", "CLOSED", "REJECTED", "CANCELLED", "REOPENED").contains(status)) throw new IllegalArgumentException("Unsupported status filter.");
         if (location != null && !LOCATIONS.contains(location)) throw new IllegalArgumentException("Unsupported location filter.");
         String searchColumn = switch (searchBy == null ? "ALL" : searchBy.toUpperCase(java.util.Locale.ROOT)) {
             case "DEFECT_ID" -> "d.reference";
@@ -278,7 +278,7 @@ public class DefectService {
         if (page < 0 || size < 1 || size > 100) throw new IllegalArgumentException("Choose a page and page size between 1 and 100.");
         aircraft(operatorId,externalUserId,aircraftId,teamScoped,reporterScoped,reviewerScoped);
         String normalizedStatus = blankToNull(status);
-        if (normalizedStatus != null && !Set.of("REPORTED", "UNDER_REVIEW", "INSPECTION_REQUIRED", "INSPECTION_IN_PROGRESS", "INSPECTION_COMPLETE", "ACTION_ASSIGNED", "IN_PROGRESS", "AWAITING_VERIFICATION", "VERIFIED", "APPROVAL_REQUIRED", "CLOSED", "REJECTED", "CANCELLED", "REOPENED").contains(normalizedStatus)) throw new IllegalArgumentException("Unsupported status filter.");
+        if (normalizedStatus != null && !Set.of("REPORTED", "UNDER_REVIEW", "REWORK", "INSPECTION_REQUIRED", "INSPECTION_IN_PROGRESS", "INSPECTION_COMPLETE", "ACTION_ASSIGNED", "IN_PROGRESS", "AWAITING_VERIFICATION", "VERIFIED", "APPROVAL_REQUIRED", "CLOSED", "REJECTED", "CANCELLED", "REOPENED").contains(normalizedStatus)) throw new IllegalArgumentException("Unsupported status filter.");
         String term = search == null ? "" : search.trim();
         if (term.length() > 200) throw new IllegalArgumentException("Search is limited to 200 characters.");
         String scope = " AND (?=false OR d.reported_by=?) AND (?=false OR ((d.assigned_team IS NULL AND d.assigned_user_id=?) OR " + teamMembershipExists("d.assigned_team") + ")) AND (?=false OR (d.reviewer_team_id IS NOT NULL AND d.status IN ('REPORTED','UNDER_REVIEW','INSPECTION_REQUIRED','IN_PROGRESS','AWAITING_VERIFICATION','VERIFIED','APPROVAL_REQUIRED','REOPENED','REJECTED') AND "+reviewerMembershipExists("d.reviewer_team_id")+"))";
@@ -369,6 +369,16 @@ public class DefectService {
     public DefectView get(UUID operatorId, UUID id) {
         return jdbc.query("SELECT d.*, " + closedAtProjection() + ", " + severityNameProjection() + ", a.tail_number, a.aircraft_type, current_action.id AS active_action_id FROM defects_dtl d JOIN aircraft_mst a ON a.id=d.aircraft_id AND a.operator_id=d.operator_id LEFT JOIN LATERAL (SELECT ca.id FROM corrective_actions_dtl ca WHERE ca.operator_id=d.operator_id AND ca.defect_id=d.id AND ca.isactive=1 AND ca.status IN ('ASSIGNED','IN_PROGRESS','ON_HOLD') ORDER BY ca.created_at DESC LIMIT 1) current_action ON TRUE WHERE d.operator_id=? AND d.id=? AND d.isactive=1 AND a.isactive=1", DEFECT, operatorId, id)
             .stream().findFirst().orElseThrow(() -> new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.NOT_FOUND, "Defect not found."));
+    }
+
+    /** Detail access matching the aircraft-specific Defect List policy, without broadening general detail access. */
+    public DefectView getForAircraftList(UUID operatorId, String externalUserId, UUID aircraftId, UUID id, boolean reporterScoped) {
+        return jdbc.query("SELECT d.*, " + closedAtProjection() + ", " + severityNameProjection() + ", a.tail_number, a.aircraft_type, current_action.id AS active_action_id FROM defects_dtl d " +
+                "JOIN aircraft_mst a ON a.id=d.aircraft_id AND a.operator_id=d.operator_id " +
+                "LEFT JOIN LATERAL (SELECT ca.id FROM corrective_actions_dtl ca WHERE ca.operator_id=d.operator_id AND ca.defect_id=d.id AND ca.isactive=1 AND ca.status IN ('ASSIGNED','IN_PROGRESS','ON_HOLD') ORDER BY ca.created_at DESC,ca.id DESC LIMIT 1) current_action ON TRUE " +
+                "WHERE d.operator_id=? AND d.aircraft_id=? AND d.id=? AND d.isactive=1 AND a.isactive=1 AND (?=false OR d.reported_by=?)",
+            DEFECT, operatorId, aircraftId, id, reporterScoped, externalUserId).stream().findFirst()
+            .orElseThrow(() -> new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.NOT_FOUND, "Defect not found."));
     }
 
     public DefectView getForReporter(UUID operatorId, String externalUserId, UUID id) {
@@ -510,6 +520,8 @@ public class DefectService {
     public DefectView transition(UUID operatorId, UUID id, String actorId, TransitionRequest input) {
         jdbc.queryForObject("SELECT set_config('ecabin.actor_id', ?, true)", String.class, actorId);
         String target = input.status().toUpperCase();
+        if (target.equals("REJECTED") || target.equals("REWORK"))
+            throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.CONFLICT, "Reviewer rejection and return-for-correction must use the authorized Reviewer decision operation.");
         DefectView current = jdbc.query("SELECT d.*, " + closedAtProjection() + ", " + severityNameProjection() + ", a.tail_number, a.aircraft_type, current_action.id AS active_action_id FROM defects_dtl d JOIN aircraft_mst a ON a.id=d.aircraft_id AND a.operator_id=d.operator_id LEFT JOIN LATERAL (SELECT ca.id FROM corrective_actions_dtl ca WHERE ca.operator_id=d.operator_id AND ca.defect_id=d.id AND ca.isactive=1 AND ca.status IN ('ASSIGNED','IN_PROGRESS','ON_HOLD') ORDER BY ca.created_at DESC LIMIT 1) current_action ON TRUE WHERE d.operator_id=? AND d.id=? AND d.isactive=1 AND a.isactive=1 FOR UPDATE OF d", DEFECT, operatorId, id)
             .stream().findFirst().orElseThrow(() -> new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.NOT_FOUND, "Defect not found."));
         DefectWorkflow.requireTransition(current.status(), target, input.note());

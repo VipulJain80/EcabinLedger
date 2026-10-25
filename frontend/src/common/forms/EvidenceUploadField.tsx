@@ -2,16 +2,16 @@
 
 import { ChangeEvent, DragEvent, useEffect, useRef, useState } from "react";
 import Image from "next/image";
-import { formatFileSize } from "./evidenceFileRules";
+import { formatFileSize, formatMegabytes } from "./evidenceFileRules";
 
 type UploadedFile = { id: string; filename: string; sizeBytes?: number; scanStatus: string };
 
 export default function EvidenceUploadField({
-  fieldKey, label, type, required, disabled, accept, multiple, maxCount, minCount, pendingFiles, errors, uploaded, uploading, form,
+  fieldKey, label, type, required, disabled, accept, multiple, maxCount, minCount, maxFileSizeBytes, maxTotalSizeBytes, pendingFiles, errors, uploaded, uploading, form,
   onSelect, onRemovePending, onRetry, onRemoveUploaded, onDismissError,
 }: {
   fieldKey: string; label: string; type: string; required: boolean; disabled: boolean; accept: string; multiple: boolean;
-  maxCount: number; minCount: number; pendingFiles: File[]; errors: Record<string,string>; uploaded: UploadedFile[]; uploading: boolean; form?: string;
+  maxCount: number; minCount: number; maxFileSizeBytes: number; maxTotalSizeBytes: number; pendingFiles: File[]; errors: Record<string,string>; uploaded: UploadedFile[]; uploading: boolean; form?: string;
   onSelect: (files: File[]) => void; onRemovePending: (file: File) => void; onRetry: (file: File) => void;
   onRemoveUploaded: (file: UploadedFile) => void; onDismissError: (errorKey: string) => void;
 }) {
@@ -34,16 +34,20 @@ export default function EvidenceUploadField({
   function onChange(event: ChangeEvent<HTMLInputElement>) { select(Array.from(event.target.files || [])); event.target.value = ""; }
   function onDrop(event: DragEvent<HTMLDivElement>) { event.preventDefault(); setDragging(false); if (!disabled) select(Array.from(event.dataTransfer.files || [])); }
 
+  const usableUploaded=uploaded.filter(file=>file.scanStatus!=="REJECTED");
+  const selectedCount=pendingFiles.length+usableUploaded.length;
+  const selectedBytes=pendingFiles.reduce((total,file)=>total+file.size,0)+usableUploaded.reduce((total,file)=>total+(file.sizeBytes||0),0);
+
   return <div className="evidence-upload-field grid min-w-0 gap-[10px]" data-field-key={fieldKey}>
     <div className={`evidence-dropzone flex min-h-28 items-center gap-[15px] p-[17px]${dragging ? " is-dragging" : ""}${disabled ? " is-disabled" : ""}`}
       onDragOver={event => { event.preventDefault(); if (!disabled) setDragging(true); }}
       onDragLeave={() => setDragging(false)} onDrop={onDrop}>
       <div className="evidence-upload-icon grid flex-none place-items-center" aria-hidden="true">⇧</div>
       <div className="evidence-dropzone-copy grid min-w-0 flex-1 gap-[3px]"><strong>Drag {type === "IMAGE_UPLOAD" ? "images" : "files"} here or browse files</strong>
-        <span>{type === "IMAGE_UPLOAD" ? "Upload evidence images. Maximum 5 MB per image." : "Upload evidence files. Images are limited to 5 MB per file."}</span>
-        <small>Each image is validated individually. Supported formats: {accept.split(",").map(value => value.trim().replace(/^image\//, "")).filter(Boolean).join(", ").toUpperCase()}.</small>
-        {required && <small className="evidence-required-note">Required · add at least {minCount} image{minCount === 1 ? "" : "s"}.</small>}
-        <small>{pendingFiles.length + uploaded.length} of {maxCount} file{maxCount === 1 ? "" : "s"} selected</small>
+        <span>Maximum {formatMegabytes(maxFileSizeBytes)} MB per file · {formatMegabytes(maxTotalSizeBytes)} MB combined.</span>
+        <small>Each file is validated individually. Supported formats: {accept.split(",").map(value => value.trim().replace(/^image\//, "")).filter(Boolean).join(", ").toUpperCase()}.</small>
+        {required && <small className="evidence-required-note">Required · add at least {minCount} file{minCount === 1 ? "" : "s"}.</small>}
+        <small>{selectedCount} of {maxCount} file{maxCount === 1 ? "" : "s"} selected · {formatMegabytes(selectedBytes)} MB of {formatMegabytes(maxTotalSizeBytes)} MB combined</small>
       </div>
       <button type="button" className="button-secondary" onClick={() => input.current?.click()} disabled={disabled || uploading}>Browse files</button>
       <input ref={input} id={`evidence-${fieldKey}`} form={form} type="file" className="evidence-file-input" accept={accept} multiple={multiple}
@@ -68,7 +72,7 @@ export default function EvidenceUploadField({
         <button type="button" className="evidence-remove-button" onClick={() => onRemoveUploaded(file)} disabled={uploading} aria-label={`Remove uploaded file ${file.filename}`}>Remove</button>
       </li>)}
     </ul>}
-    <span className="visually-hidden" aria-live="polite">{`${pendingFiles.length + uploaded.length} ${type === "IMAGE_UPLOAD" ? "image" : "file"}${pendingFiles.length + uploaded.length === 1 ? "" : "s"} selected.`}</span>
+    <span className="visually-hidden" aria-live="polite">{`${selectedCount} ${type === "IMAGE_UPLOAD" ? "image" : "file"}${selectedCount === 1 ? "" : "s"} selected. Combined size ${formatMegabytes(selectedBytes)} MB of ${formatMegabytes(maxTotalSizeBytes)} MB.`}</span>
   </div>;
 }
 

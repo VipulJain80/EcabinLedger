@@ -505,7 +505,7 @@ public class OperationalFormService {
         String status=String.valueOf(defect.get("status"));
         UUID areaId=(UUID)defect.get("area_id");
         if(purpose==FormPurpose.CORRECTIVE_ACTION&&!Set.of("ACTION_ASSIGNED","IN_PROGRESS").contains(status))return List.of();
-        if(purpose==FormPurpose.DEFECT_REPORT&&!isReturnedGalleyReport(operatorId,defectId,areaId))return List.of();
+        if(purpose==FormPurpose.DEFECT_REPORT&&(!"REWORK".equals(status)||!isReturnedGalleyReport(operatorId,defectId,areaId)))return List.of();
         if(purpose==FormPurpose.REVIEW_DECISION){
             String areaCode=jdbc.queryForObject("SELECT code FROM cabin_areas_mst WHERE operator_id=? AND id=? AND isactive=1",String.class,operatorId,areaId);
             if(!"GALLEY".equals(areaCode)||!Set.of("REPORTED","UNDER_REVIEW").contains(status)||reviewDecisionAwaitingCorrection(operatorId,defectId))return List.of();
@@ -527,7 +527,7 @@ public class OperationalFormService {
         List<FormForArea> eligible;
         if(form.purpose()==FormPurpose.DEFECT_REPORT){
             Map<String,Object> defect=jdbc.query("SELECT area_id,status FROM defects_dtl WHERE operator_id=? AND id=? AND isactive=1",new ColumnMapRowMapper(),operatorId,defectId).stream().findFirst().orElseThrow(()->new ResponseStatusException(HttpStatus.NOT_FOUND,"Defect not found for this organization."));
-            if(!"REPORTED".equals(String.valueOf(defect.get("status")))||!defectReportSubmissionAllowed(operatorId,defectId,(UUID)defect.get("area_id")))throw new ResponseStatusException(HttpStatus.CONFLICT,"This form is not eligible for the defect's current workflow stage.");
+            if(!Set.of("REPORTED","REWORK").contains(String.valueOf(defect.get("status")))||!defectReportSubmissionAllowed(operatorId,defectId,(UUID)defect.get("area_id")))throw new ResponseStatusException(HttpStatus.CONFLICT,"This form is not eligible for the defect's current workflow stage.");
             eligible=publishedForArea(operatorId,(UUID)defect.get("area_id"),FormPurpose.DEFECT_REPORT,WorkflowStage.INITIAL_REPORT);
         }else eligible=publishedForDefect(operatorId,defectId,form.purpose());
         return eligible.stream()
@@ -547,7 +547,7 @@ public class OperationalFormService {
     @Transactional
     public FormSubmission submit(UUID operatorId,String actor,UUID defectId,SubmitFormRequest request) {
         auditActor(actor);
-        Map<String,Object> defect=jdbc.query("SELECT area_id,status FROM defects_dtl WHERE operator_id=? AND id=? AND isactive=1 FOR UPDATE",new ColumnMapRowMapper(),operatorId,defectId).stream().findFirst().orElseThrow(()->new ResponseStatusException(HttpStatus.NOT_FOUND,"Defect was not found for this organization."));
+        Map<String,Object> defect=jdbc.query("SELECT area_id,status,reported_by,assigned_user_id FROM defects_dtl WHERE operator_id=? AND id=? AND isactive=1 FOR UPDATE",new ColumnMapRowMapper(),operatorId,defectId).stream().findFirst().orElseThrow(()->new ResponseStatusException(HttpStatus.NOT_FOUND,"Defect was not found for this organization."));
         FormForArea form=published(operatorId,request.formId(),request.versionId(),(UUID)defect.get("area_id"));
         if(form.purpose()==FormPurpose.REVIEW_DECISION)throw new ResponseStatusException(HttpStatus.CONFLICT,"Reviewer decisions must use the authorized case decision endpoint.");
         if(!form.areaId().equals(defect.get("area_id"))) throw new IllegalArgumentException("The selected form version is not assigned to the defect's area.");
@@ -555,12 +555,16 @@ public class OperationalFormService {
         if(purpose==FormPurpose.CORRECTIVE_ACTION)throw new ResponseStatusException(HttpStatus.CONFLICT,"Corrective-action forms must be submitted through the assigned maintenance workflow endpoint.");
         if(purpose!=form.purpose())throw new IllegalArgumentException("The selected form is not configured for the requested purpose.");
         String status=String.valueOf(defect.get("status"));
+        boolean rework="REWORK".equals(status);
+        if(rework&&(!actor.equals(String.valueOf(defect.get("reported_by")))||!actor.equals(String.valueOf(defect.get("assigned_user_id")))))
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND,"This returned report is not assigned to the authenticated original reporter.");
         WorkflowStage current=FormResolutionRules.stageForDefect(purpose,status);
         if(form.workflowStage()!=current)throw new ResponseStatusException(HttpStatus.CONFLICT,"The published form version is not configured for the defect's current workflow stage.");
         if(purpose==FormPurpose.DEFECT_REPORT&&!defectReportSubmissionAllowed(operatorId,defectId,form.areaId()))throw new ResponseStatusException(HttpStatus.CONFLICT,"A defect report has already been submitted for this case. A new report is accepted only after the Reviewer returns it for correction.");
         Map<String,Object> answers=request.answers()==null?Map.of():request.answers();
         validateAnswers(operatorId,defectId,form,answers);
-        boolean galleyCorrection=purpose==FormPurpose.DEFECT_REPORT&&"REPORTED".equals(status)&&isReturnedGalleyReport(operatorId,defectId,form.areaId());
+        boolean galleyCorrection=purpose==FormPurpose.DEFECT_REPORT&&rework&&isReturnedGalleyReport(operatorId,defectId,form.areaId());
+        if(rework&&!galleyCorrection)throw new ResponseStatusException(HttpStatus.CONFLICT,"Only a returned Galley defect report can be resubmitted through this correction workflow.");
         if(galleyCorrection){
             Map<String,Object> mapped=resolveDefectReport(operatorId,form.areaId(),form.id(),form.versionId(),answers);
             persistCorrectedGalleyReport(operatorId,defectId,mapped);
@@ -579,9 +583,9 @@ public class OperationalFormService {
         }
         audit(operatorId,actor,defectId,"FORM_SUBMITTED","FORM_SUBMISSION",submissionId,"Operational form submitted.",null,Map.of("formId",form.id(),"versionId",form.versionId()));
         if(galleyCorrection){
-            int changed=jdbc.update("UPDATE defects_dtl SET status='UNDER_REVIEW',updated_at=now(),version=version+1 WHERE operator_id=? AND id=? AND status='REPORTED' AND isactive=1",operatorId,defectId);
+            int changed=jdbc.update("UPDATE defects_dtl SET status='UNDER_REVIEW',assigned_to=NULL,assigned_user_id=NULL,assigned_team=NULL,due_at=NULL,updated_at=now(),version=version+1 WHERE operator_id=? AND id=? AND status='REWORK' AND reported_by=? AND assigned_user_id=? AND isactive=1",operatorId,defectId,actor,actor);
             if(changed!=1)throw new ResponseStatusException(HttpStatus.CONFLICT,"The defect changed while the corrected report was being submitted. Reload and try again.");
-            jdbc.update("INSERT INTO defect_events_dtl(operator_id,defect_id,event_type,from_status,to_status,note,actor_id,entity_type,entity_id,previous_state,new_state) VALUES(?,?,'REPORT_CORRECTED','REPORTED','UNDER_REVIEW','Corrected Galley report submitted for Reviewer decision.',?,'DEFECT',?,jsonb_build_object('status','REPORTED'),jsonb_build_object('status','UNDER_REVIEW','formId',CAST(? AS text),'versionId',CAST(? AS text),'submissionId',CAST(? AS text)))",operatorId,defectId,actor,defectId,form.id(),form.versionId(),submissionId);
+            jdbc.update("INSERT INTO defect_events_dtl(operator_id,defect_id,event_type,from_status,to_status,note,actor_id,entity_type,entity_id,previous_state,new_state) VALUES(?,?,'REPORT_CORRECTED','REWORK','UNDER_REVIEW','Corrected Galley report submitted for Reviewer decision.',?,'DEFECT',?,jsonb_build_object('status','REWORK','assignedUserId',CAST(? AS text)),jsonb_build_object('status','UNDER_REVIEW','assignedUserId',NULL,'formId',CAST(? AS text),'versionId',CAST(? AS text),'submissionId',CAST(? AS text)))",operatorId,defectId,actor,defectId,actor,form.id(),form.versionId(),submissionId);
         }
         return submission(operatorId,submissionId);
     }
@@ -789,7 +793,7 @@ public class OperationalFormService {
             int maximum=field.fileRules()==null||field.fileRules().maxCount()==null?0:field.fileRules().maxCount();
             if(ids.size()<minimum)throw new IllegalArgumentException("Attach at least "+minimum+" image file(s) for "+field.label()+" before submitting Close Submitted.");
             if(ids.size()>maximum)throw new IllegalArgumentException("Attach no more than "+maximum+" file(s) for "+field.label()+".");
-            for(UUID id:ids)validateAttachments(operatorId,defectId,form,field,List.of(id));
+            validateAttachments(operatorId,defectId,form,field,ids);
         }
     }
 
@@ -819,7 +823,16 @@ public class OperationalFormService {
     }
     private void validateAttachments(UUID operatorId,UUID defectId,FormForArea form,FieldDefinition f,Object value) {
         if(!(value instanceof List<?> ids))return;
-        for(Object raw:ids){UUID id=parseUuid(raw,f.key()); Integer count=jdbc.queryForObject("SELECT count(*) FROM attachments_dtl WHERE operator_id=? AND id=? AND defect_id=? AND form_id=? AND form_version_id=? AND field_key=? AND size_bytes<=? AND lower(split_part(original_filename,'.',array_length(string_to_array(original_filename,'.'),1)))=ANY(?) AND lower(detected_mime_type)=ANY(?) AND scan_status IN ('CLEAN','NOT_SCANNED') AND isactive=1",Integer.class,operatorId,id,defectId,form.id(),form.versionId(),f.key(),f.fileRules().maxFileSizeBytes(),f.fileRules().extensions().stream().map(x->x.toLowerCase(java.util.Locale.ROOT)).toArray(String[]::new),f.fileRules().mimeTypes().stream().map(x->x.toLowerCase(java.util.Locale.ROOT)).toArray(String[]::new)); if(count==null||count!=1)throw new IllegalArgumentException("Each file must satisfy this field's restrictions and belong to this form version.");}
+        Set<UUID> unique=new HashSet<>();
+        long total=0;
+        for(Object raw:ids){
+            UUID id=parseUuid(raw,f.key());
+            if(!unique.add(id))throw new IllegalArgumentException("The same evidence file cannot be attached more than once.");
+            List<Long> sizes=jdbc.query("SELECT size_bytes FROM attachments_dtl WHERE operator_id=? AND id=? AND defect_id=? AND form_id=? AND form_version_id=? AND field_key=? AND size_bytes<=? AND lower(split_part(original_filename,'.',array_length(string_to_array(original_filename,'.'),1)))=ANY(?) AND lower(detected_mime_type)=ANY(?) AND scan_status IN ('CLEAN','NOT_SCANNED') AND isactive=1",(rs,n)->rs.getLong(1),operatorId,id,defectId,form.id(),form.versionId(),f.key(),f.fileRules().maxFileSizeBytes(),f.fileRules().extensions().stream().map(x->x.toLowerCase(java.util.Locale.ROOT)).toArray(String[]::new),f.fileRules().mimeTypes().stream().map(x->x.toLowerCase(java.util.Locale.ROOT)).toArray(String[]::new));
+            if(sizes.size()!=1)throw new IllegalArgumentException("Each file must satisfy this field's restrictions and belong to this form version.");
+            try{total=Math.addExact(total,sizes.get(0));}catch(ArithmeticException ex){com.ecabin.ledger.storage.EvidenceFileValidator.validateTotalSize(f,Long.MAX_VALUE);throw new IllegalArgumentException("Combined upload size exceeds the configured total limit.");}
+        }
+        com.ecabin.ledger.storage.EvidenceFileValidator.validateTotalSize(f,total);
     }
 
     private void validateFieldShape(FieldDefinition f) {
@@ -830,7 +843,16 @@ public class OperationalFormService {
             case DATE -> { if(t!=null||n!=null||files!=null||f.optionSource()!=null)throw new IllegalArgumentException("Date fields cannot use text, numeric, option or file settings.");if(d!=null){LocalDate min=parseDateRule(d.minDate()),max=parseDateRule(d.maxDate());if(min!=null&&max!=null&&min.isAfter(max))throw new IllegalArgumentException("Minimum date cannot be after maximum date.");} }
             case DROPDOWN,MULTI_SELECT -> { if(f.optionSource()==null||t!=null||n!=null||d!=null||files!=null)throw new IllegalArgumentException("Selection fields require one authorized master-data source only."); }
             case AIRCRAFT_SELECT -> {if(f.optionSource()!=OptionSource.AIRCRAFT||t!=null||n!=null||d!=null||files!=null)throw new IllegalArgumentException("Aircraft selectors require the approved Aircraft Master source only.");}
-            case FILE_UPLOAD,IMAGE_UPLOAD -> {if(files==null||t!=null||n!=null||d!=null||f.optionSource()!=null)throw new IllegalArgumentException("Evidence fields require file restrictions only.");if(files.maxFileSizeBytes()==null||files.maxFileSizeBytes()<1||files.maxFileSizeBytes()>15728640||files.minCount()==null||files.maxCount()==null||files.minCount()<0||files.maxCount()<1||files.maxCount()>10||files.minCount()>files.maxCount())throw new IllegalArgumentException("Configure valid file size and count limits (maximum 15 MB and 10 files per field).");if(files.extensions()==null||files.extensions().isEmpty()||files.mimeTypes()==null||files.mimeTypes().isEmpty())throw new IllegalArgumentException("Evidence fields must list allowed extensions and MIME types.");for(String ext:files.extensions())if(!EXTENSIONS.contains(ext.toLowerCase(java.util.Locale.ROOT)))throw new IllegalArgumentException("Unsupported file extension: "+ext);for(String mime:files.mimeTypes())if(!MIME_TYPES.contains(mime.toLowerCase(java.util.Locale.ROOT)))throw new IllegalArgumentException("Unsupported MIME type: "+mime);if(f.type()==FieldType.IMAGE_UPLOAD&&files.extensions().stream().anyMatch(ext->!Set.of("png","jpg","jpeg","webp").contains(ext.toLowerCase(java.util.Locale.ROOT))))throw new IllegalArgumentException("Image uploads may use PNG, JPEG or WEBP only."); }
+            case FILE_UPLOAD,IMAGE_UPLOAD -> {
+                if(files==null||t!=null||n!=null||d!=null||f.optionSource()!=null)throw new IllegalArgumentException("Evidence fields require file restrictions only.");
+                if(files.maxFileSizeBytes()==null||files.maxFileSizeBytes()<1||files.maxFileSizeBytes()>20L*1024*1024||files.minCount()==null||files.maxCount()==null||files.minCount()<0||files.maxCount()<1||files.maxCount()>10||files.minCount()>files.maxCount())throw new IllegalArgumentException("Configure valid file size and count limits (maximum 20 MB per file and 10 files per field).");
+                long maxTotal=files.maxTotalSizeBytes()==null?com.ecabin.ledger.storage.EvidenceFileValidator.maxTotalBytes(f):files.maxTotalSizeBytes();
+                if(maxTotal<files.maxFileSizeBytes()||maxTotal>com.ecabin.ledger.storage.EvidenceFileValidator.MAX_TOTAL_BYTES||(files.maxTotalSizeBytes()!=null&&maxTotal%com.ecabin.ledger.storage.EvidenceFileValidator.BYTES_PER_MEGABYTE!=0))throw new IllegalArgumentException("Total upload size must be a whole MB value from the per-file limit through 200 MB.");
+                if(files.extensions()==null||files.extensions().isEmpty()||files.mimeTypes()==null||files.mimeTypes().isEmpty())throw new IllegalArgumentException("Evidence fields must list allowed extensions and MIME types.");
+                for(String ext:files.extensions())if(!EXTENSIONS.contains(ext.toLowerCase(java.util.Locale.ROOT)))throw new IllegalArgumentException("Unsupported file extension: "+ext);
+                for(String mime:files.mimeTypes())if(!MIME_TYPES.contains(mime.toLowerCase(java.util.Locale.ROOT)))throw new IllegalArgumentException("Unsupported MIME type: "+mime);
+                if(f.type()==FieldType.IMAGE_UPLOAD&&files.extensions().stream().anyMatch(ext->!Set.of("png","jpg","jpeg","webp").contains(ext.toLowerCase(java.util.Locale.ROOT))))throw new IllegalArgumentException("Image uploads may use PNG, JPEG or WEBP only.");
+            }
             case CHECKBOX -> {if(t!=null||n!=null||d!=null||files!=null||f.optionSource()!=null)throw new IllegalArgumentException("Checkbox fields do not accept extra validation settings.");}
             case SECTION -> {if(f.required()||t!=null||n!=null||d!=null||files!=null||f.optionSource()!=null)throw new IllegalArgumentException("Section fields are headings and cannot be required or validated.");}
         }

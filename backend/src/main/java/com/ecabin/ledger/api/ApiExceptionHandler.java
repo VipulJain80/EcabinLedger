@@ -58,6 +58,6 @@ public class ApiExceptionHandler {
 
     @ExceptionHandler(MaxUploadSizeExceededException.class)
     ResponseEntity<ErrorBody> uploadTooLarge() {
-        return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE).body(new ErrorBody(new ErrorDetail("upload_too_large", "The upload exceeds the request or per-file size limit. Images must be 5 MB or smaller per file.")));
+        return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE).body(new ErrorBody(new ErrorDetail("upload_too_large", "The upload exceeds the configured request or per-file size limit.")));
     }
 }

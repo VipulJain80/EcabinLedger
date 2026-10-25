@@ -7,9 +7,12 @@ import { formatDateTime } from "@/common/dateTime";
 import { isPublishedFormForArea, orderedOperationalFields, unsupportedPublishedField } from "./publishedFormDefinition";
 import { defectReportBindingIssue } from "./defectReportMapping";
 import EvidenceUploadField from "./EvidenceUploadField";
-import { partitionEvidenceFiles, validateEvidenceFile } from "./evidenceFileRules";
+import { maxTotalBytesForField, partitionEvidenceSelection, validateEvidenceFile } from "./evidenceFileRules";
 import { isFieldRequired, isFieldVisible } from "./conditionalFieldVisibility";
 import AttachmentPreviewDialog from "@/common/dialogs/AttachmentPreviewDialog";
+import AircraftRegistrationSelect from "./AircraftRegistrationSelect";
+import { SearchableMultiSelect, SearchableSelect } from "@/common/selects/SearchableSelect";
+import { shouldUseSearchableSelect } from "@/common/selects/searchableDropdownModel.mjs";
 
 type Request = (path: string, init?: RequestInit) => Promise<Response>;
 type Field = {
@@ -25,7 +28,7 @@ type Field = {
   readOnly?: boolean | null;
   optionSource?: string | null;
   optionFilter?: { areaFieldKey?: string | null; componentFieldKey?: string | null } | null;
-  fileRules?: { extensions: string[]; mimeTypes: string[]; maxFileSizeBytes: number; minCount: number; maxCount: number } | null;
+  fileRules?: { extensions: string[]; mimeTypes: string[]; maxFileSizeBytes: number; minCount: number; maxCount: number; maxTotalSizeBytes?: number | null } | null;
   textRules?: { minLength?: number | null; maxLength?: number | null; alphaOnly?: boolean; alphanumeric?: boolean; pattern?: string | null } | null;
   numericRules?: { min?: number | null; max?: number | null; precision?: number | null } | null;
   dateRules?: { minDate?: string | null; maxDate?: string | null } | null;
@@ -35,7 +38,6 @@ type Purpose = "DEFECT_REPORT" | "INSPECTION" | "CORRECTIVE_ACTION" | "VERIFICAT
 type Definition = { id: string; name: string; areaId: string; purpose: Purpose; workflowStage: string; versionId: string; versionNumber: number; configuration: { fields: Field[] } };
 type Choice = { id: string; label: string; code: string };
 type AircraftOption = { id:string; tailNumber:string; msnNumber:string|null; aircraftType:string };
-type AircraftOptionPage = { items:AircraftOption[]; page:number; size:number; totalElements:number; totalPages:number };
 type Uploaded = { id: string; filename: string; sizeBytes?: number; scanStatus: string };
 type CaseEvidence = { id:string;formSubmissionId:string|null;fieldKey:string;filename:string;mimeType:string;sizeBytes:number;scanStatus:string;uploadedAt:string;source?:string|null;uploadedBy?:string|null };
 type EvidencePreview = { file:CaseEvidence; url?:string; error?:string };
@@ -83,10 +85,6 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
   const [evidencePreview, setEvidencePreview] = useState<EvidencePreview|null>(null);
   const [reportSubmitted, setReportSubmitted] = useState(false);
   const [options, setOptions] = useState<Record<string, Choice[]>>({});
-  const [aircraftSearch,setAircraftSearch]=useState("");
-  const [debouncedAircraftSearch,setDebouncedAircraftSearch]=useState("");
-  const [aircraftPage,setAircraftPage]=useState(0);
-  const [selectedAircraftId,setSelectedAircraftId]=useState("");
   const [selectedAircraft,setSelectedAircraft]=useState<AircraftOption|null>(null);
   const submissionGuard = useRef(false);
   const initialUploadsStarted = useRef(false);
@@ -118,13 +116,6 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
   const selectionContext = `${areaId}:${defectId || "new"}:${purpose}:${workflowStage}:${selectedFormId}:${selected?.versionId || ""}`;
   const selectedFields = useMemo(() => orderedOperationalFields(selected?.configuration.fields || []).filter(field => isFieldVisible(field, values)), [selected, values]);
   const unsupportedField = unsupportedPublishedField(selectedFields);
-  const hasAircraftSelector=selectedFields.some(field=>field.type==="AIRCRAFT_SELECT"&&field.binding==="AIRCRAFT_ID");
-  const aircraftOptionsQuery=useQuery<AircraftOptionPage>({
-    queryKey:["reporting-aircraft-options",aircraftOptionsCacheKey,areaId,selected?.id,selected?.versionId,debouncedAircraftSearch,aircraftPage],
-    enabled:preparationMode&&hasAircraftSelector&&!previewOnly,
-    queryFn:async({signal})=>{const params=new URLSearchParams({search:debouncedAircraftSearch,page:String(aircraftPage),size:"20"});const response=await request(`/aircraft/options?${params}`,{signal});if(!response.ok)throw new Error(await responseErrorMessage(response,"Could not load active aircraft for this organization."));return response.json();},
-    staleTime:30_000,
-  });
   const maintenanceStatusField=selectedFields.find(field=>field.binding==="MAINTENANCE_STATUS");
   const maintenanceStatusChoices=maintenanceStatusField?options[`${selected?.versionId}:${maintenanceStatusField.key}:${areaId}:` ]||[]:[];
   const selectedMaintenanceStatus=maintenanceStatusChoices.find(choice=>choice.id===String(values[maintenanceStatusField?.key||""]||""))?.code||"";
@@ -134,7 +125,6 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
     queryFn:async({signal})=>{const response=await request(`/defects/${encodeURIComponent(defectId!)}/maintenance-sla-policy?status=${encodeURIComponent(selectedMaintenanceStatus)}`,{signal});if(!response.ok)throw new Error(await responseErrorMessage(response,"Could not load the effective SLA date policy."));return response.json();},
     retry:false,
   });
-  useEffect(()=>{const timer=window.setTimeout(()=>setDebouncedAircraftSearch(aircraftSearch),250);return()=>window.clearTimeout(timer);},[aircraftSearch]);
   const reportBindingIssue = preparationMode && selected ? defectReportBindingIssue(selectedFields, areaCode) : "";
   const definitionIssue = selected && !isPublishedFormForArea(selected, areaId)
     ? "The published form does not belong to the selected cabin area. Contact your administrator."
@@ -192,7 +182,7 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
     if (!selected) return;
     if (previousSelectionContext.current !== null && previousSelectionContext.current !== selectionContext) {
       setValues(initialAnswers || {}); setFiles({}); setPendingFiles(initialFiles || {}); setUploadErrors({}); setOptions({}); setMessage("");
-      setAircraftSearch("");setAircraftPage(0);setSelectedAircraftId("");setSelectedAircraft(null);onAircraftSelected?.(null);
+      setSelectedAircraft(null);onAircraftSelected?.(null);
       submissionGuard.current = false; initialUploadsStarted.current = false;
     }
     previousSelectionContext.current = selectionContext;
@@ -207,11 +197,16 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
     if (preparationMode) onAnswersChange?.(next);
   }
 
-  const upload = useCallback(async (field: Field, file: File): Promise<boolean> => {
+  const upload = useCallback(async (field: Field, file: File, selectionAlreadyValidated = false): Promise<boolean> => {
     if (!selected || !defectId) return false;
     const validationIssue = validateEvidenceFile(file, field);
-    if (validationIssue) {
-      setMessage(validationIssue); void alert.error(validationIssue);
+    const existingUploaded=(files[field.key]||[]).filter(item=>item.scanStatus!=="REJECTED");
+    const otherPending=(pendingFiles[field.key]||[]).filter(item=>item!==file);
+    const selectionIssue=!selectionAlreadyValidated?partitionEvidenceSelection([...existingUploaded,...otherPending], [file], field).rejected[0]?.message:null;
+    if (validationIssue||selectionIssue) {
+      const failure=validationIssue||selectionIssue!;
+      setMessage(failure); void alert.error(failure);
+      setUploadErrors(old=>({...old,[field.key]:{...(old[field.key]||{}),[fileIdentity(file)]:failure}}));
       return false;
     }
     setUploading(field.key); setMessage("");
@@ -233,7 +228,7 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
       return false;
     }
     finally { setUploading(null); }
-  }, [defectId, request, selected]);
+  }, [defectId, files, pendingFiles, request, selected]);
 
   useEffect(() => {
     if (!defectId || !selected || !initialFiles || initialUploadsStarted.current) return;
@@ -249,17 +244,12 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
     const rules = field.fileRules;
     if (!rules) return;
     const existing=pendingFiles[field.key]||[];
-    const alreadyCounted=(files[field.key]||[]).length+existing.length;
-    let remaining=Math.max(0,rules.maxCount-alreadyCounted);
-    const partition=partitionEvidenceFiles(incoming,field);const valid:File[]=[];const errors=partition.rejected.map(item=>item.message);
-    for(const file of partition.accepted){
-      if(remaining<=0){errors.push(`Select no more than ${rules.maxCount} file(s) for ${field.label}.`);continue;}
-      valid.push(file);remaining--;
-    }
+    const selectedUploaded=(files[field.key]||[]).filter(file=>file.scanStatus!=="REJECTED");
+    const partition=partitionEvidenceSelection([...selectedUploaded,...existing],incoming,field);
+    const valid=partition.accepted;
+    const errors=partition.rejected.map(item=>item.message);
     if(errors.length){
       const rejectedErrors = Object.fromEntries(partition.rejected.map(item => [fileIdentity(item.file), item.message]));
-      const countError = errors.slice(partition.rejected.length);
-      if (countError.length) rejectedErrors["__count"] = countError.join(" ");
       setUploadErrors(old => {
         const previous = old[field.key] || {};
         const retryable = Object.fromEntries(Object.entries(previous).filter(([key]) => existing.some(file => fileIdentity(file) === key)));
@@ -274,7 +264,8 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
       if(!errors.length)setMessage("");return;
     }
     if(!defectId)return;
-    for (const file of valid) await upload(field, file);
+    setPendingFiles(old=>({...old,[field.key]:[...(old[field.key]||[]),...valid]}));
+    for (const file of valid) await upload(field, file, true);
   }
 
   function removePendingFile(field:Field,file:File){
@@ -374,7 +365,9 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
     {requestFailed && <p role="alert">{requestError instanceof Error ? requestError.message : "Could not load the selected published form."}</p>}
     {noForms && !(defectId && purpose === "DEFECT_REPORT") && <p role="status">{purpose === "DEFECT_REPORT" ? "No published operational form is configured for this cabin area. Please contact your administrator." : `No published ${purpose.replaceAll("_", " ").toLowerCase()} form is configured for this workflow stage. Please contact your administrator.`}</p>}
     {defectId&&purpose==="CLOSURE_APPROVAL"&&!previewOnly&&<section className="closure-review-evidence my-[14px] grid min-w-0 gap-[9px] rounded-[10px] border border-[#dce6df] bg-[#f8fbf9] p-[13px_15px]" aria-labelledby="closure-review-evidence-title"><h4 id="closure-review-evidence-title" className="m-0">Case evidence</h4>{closureEvidence.isPending?<p className="m-0" role="status">Loading authorized evidence…</p>:closureEvidence.isError?<p className="m-0" role="alert">{closureEvidence.error.message} <button type="button" className="button-secondary" onClick={()=>void closureEvidence.refetch()}>Retry</button></p>:!closureEvidence.data?.length?<p className="m-0">No evidence is attached to this case.</p>:<ul className="m-0 grid list-none gap-2 p-0">{closureEvidence.data.map(item=><li className="flex min-w-0 flex-wrap items-center justify-between gap-3 rounded-lg border border-[#e2e9e4] bg-white px-[10px] py-2" key={item.id}><span className="grid min-w-0 gap-[3px]"><strong className="break-all text-[12px] text-[#000000]">{item.filename}</strong><small className="text-[11px] font-semibold text-[#315b43]">{evidenceSourceLabel(item.source)}</small><small className="text-[11px] text-[#000000]">Uploaded by {item.uploadedBy||"uploader unavailable"} · {formatDateTime(item.uploadedAt)}</small><small className="text-[11px] text-[#000000]">{item.fieldKey} · {(item.sizeBytes/1024/1024).toFixed(1)} MB</small></span><button type="button" className="button-secondary" disabled={item.scanStatus==="REJECTED"} onClick={()=>void viewCaseEvidence(item)}>{item.scanStatus==="REJECTED"?"Unavailable":"View evidence"}</button></li>)}</ul>}</section>}
-    {!initialFormId && !requestPending && !requestFailed && availableForms.length > 1 && <label className="flex flex-col gap-[7px] my-[10px]">Published form<select value={formId} onChange={event => { setFormId(event.target.value); setValues({}); setFiles({}); setPendingFiles({}); setUploadErrors({}); setOptions({}); setMessage(""); initialUploadsStarted.current=false; }}><option value="">Choose a form…</option>{availableForms.map(form => <option key={`${form.id}:${form.versionId}`} value={form.id}>{form.name}{defectId ? "" : ` · v${form.versionNumber}`}</option>)}</select></label>}
+    {!initialFormId && !requestPending && !requestFailed && availableForms.length > 1 && (shouldUseSearchableSelect(availableForms.length)
+      ? <SearchableSelect id="operational-form-selector" label="Published form" options={availableForms.map(form=>({value:form.id,label:`${form.name}${defectId?"":` · v${form.versionNumber}`}`}))} value={formId} placeholder="Choose a form…" onChange={value=>{setFormId(value);setValues({});setFiles({});setPendingFiles({});setUploadErrors({});setOptions({});setMessage("");initialUploadsStarted.current=false;}} className="my-[10px]"/>
+      : <label className="flex flex-col gap-[7px] my-[10px]">Published form<select value={formId} onChange={event => { setFormId(event.target.value); setValues({}); setFiles({}); setPendingFiles({}); setUploadErrors({}); setOptions({}); setMessage(""); initialUploadsStarted.current=false; }}><option value="">Choose a form…</option>{availableForms.map(form => <option key={`${form.id}:${form.versionId}`} value={form.id}>{form.name}{defectId ? "" : ` · v${form.versionNumber}`}</option>)}</select></label>)}
     {selected && <>
       {definitionIssue ? <p role="alert">{definitionIssue}</p> : <>
         {reportBindingIssue && !previewOnly && <p className="configuration-field-error" role="alert">This form is unavailable for new defect reports right now. Please contact your organization administrator.</p>}
@@ -401,22 +394,10 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
     const fieldRequired=isSlaDate&&purpose==="CORRECTIVE_ACTION"?Boolean(datePolicy?.policy.dateRequired):evidenceRequired||isFieldRequired(field,values);
     if (field.type === "SECTION") return <div className="operational-form-section" key={field.key}><h4>{field.label}</h4>{field.helpText && <p>{field.helpText}</p>}</div>;
     if(field.type==="AIRCRAFT_SELECT"){
-      const aircraft=aircraftOptionsQuery.data?.items||[];
-      const page=aircraftOptionsQuery.data;
-      return <div className="dynamic-aircraft-select grid min-w-0 gap-[7px]" key={field.key}>
-        <label className="grid gap-[6px]" htmlFor={`${id}-search`}><span className="dynamic-form-field-label">{field.label}{field.required&&<span className="dynamic-form-required" aria-hidden="true">*</span>}</span>{field.helpText&&<small>{field.helpText}</small>}</label>
-        {preparationMode&&!readOnly? <>
-          <input id={`${id}-search`} type="search" value={aircraftSearch} aria-label="Search aircraft registration or MSN" placeholder="Search registration or MSN" onChange={event=>{setAircraftSearch(event.target.value);setAircraftPage(0);setSelectedAircraftId("");setSelectedAircraft(null);onAircraftSelected?.(null);}} />
-          <select id={id} form="defect-report-form" required={field.required} value={selectedAircraftId} disabled={aircraftOptionsQuery.isPending||aircraftOptionsQuery.isError||!aircraft.length} onChange={event=>{const option=aircraft.find(item=>item.id===event.target.value)||null;setSelectedAircraftId(option?.id||"");setSelectedAircraft(option);onAircraftSelected?.(option);}}>
-            <option value="">{aircraftOptionsQuery.isPending?"Loading aircraft…":aircraftOptionsQuery.isError?"Aircraft unavailable":aircraft.length?"Choose an aircraft…":"No active aircraft found"}</option>
-            {aircraft.map(item=><option key={item.id} value={item.id}>{item.tailNumber} — MSN {item.msnNumber||"—"}</option>)}
-          </select>
-          {aircraftOptionsQuery.isPending&&<p role="status">Loading active aircraft…</p>}
-          {aircraftOptionsQuery.isError&&<p className="flex flex-wrap justify-between gap-[10px]" role="alert">{aircraftOptionsQuery.error.message}<button type="button" className="button-secondary" onClick={()=>void aircraftOptionsQuery.refetch()}>Retry</button></p>}
-          {aircraftOptionsQuery.isSuccess&&!aircraft.length&&<p role="status">No active aircraft match this search.</p>}
-          {page&&page.totalPages>1&&<div className="aircraft-option-pagination flex items-center justify-between gap-2"><button type="button" className="button-secondary" disabled={aircraftPage<=0} onClick={()=>setAircraftPage(value=>Math.max(0,value-1))}>Previous</button><span>Page {page.page+1} of {page.totalPages}</span><button type="button" className="button-secondary" disabled={aircraftPage+1>=page.totalPages} onClick={()=>setAircraftPage(value=>value+1)}>Next</button></div>}
-          {selectedAircraft&&<p className="selected-aircraft-context" role="status">Selected aircraft: <strong>{selectedAircraft.tailNumber}</strong> · MSN <strong>{selectedAircraft.msnNumber||"—"}</strong> · {selectedAircraft.aircraftType}</p>}
-        </>:<p className="selected-aircraft-context" role="status">Aircraft identity is controlled by the defect record and cannot be changed here.</p>}
+      return <div className="dynamic-aircraft-select grid min-w-0 content-start gap-[7px] self-start" key={field.key}>
+        {preparationMode&&!readOnly
+          ? <AircraftRegistrationSelect request={request} cacheKey={`${aircraftOptionsCacheKey}:${selected?.id}:${selected?.versionId}`} areaId={areaId} formId="defect-report-form" id={id} label={field.label} helpText={field.helpText} required={field.required} selected={selectedAircraft} onSelect={option=>{setSelectedAircraft(option);onAircraftSelected?.(option);}} />
+          : <><span className="dynamic-form-field-label">{field.label}</span><p className="selected-aircraft-context" role="status">Aircraft identity is controlled by the defect record and cannot be changed here.</p></>}
       </div>;
     }
     if(field.type.includes("UPLOAD")){
@@ -429,6 +410,7 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
         {field.helpText&&<small>{field.helpText}</small>}
         <EvidenceUploadField fieldKey={field.key} label={field.label} type={field.type} required={fieldRequired} disabled={disabled||(!defectId&&!preparationMode)}
           accept={accept} multiple={(fileRules?.maxCount||1)>1} maxCount={fileRules?.maxCount||1} minCount={minCount} pendingFiles={pending} errors={uploadErrors[field.key]||{}} uploaded={uploaded}
+          maxFileSizeBytes={fileRules?.maxFileSizeBytes||20*1024*1024} maxTotalSizeBytes={maxTotalBytesForField(field)}
           uploading={uploading===field.key} form={preparationMode?"defect-report-form":undefined} onSelect={chosen=>void uploadMany(field,chosen)}
           onRemovePending={file=>removePendingFile(field,file)} onRetry={file=>void upload(field,file)} onRemoveUploaded={file=>void removeFile(field,file)}
           onDismissError={errorKey=>setUploadErrors(old=>{const next={...old,[field.key]:{...(old[field.key]||{})}};delete next[field.key][errorKey];return next;})} />
@@ -442,6 +424,18 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
         <div role="group" aria-label={field.label} className="closure-decision-buttons flex flex-wrap gap-[10px]">{choices.map(choice=><button key={choice.id} type="button" className={selectedDecision===choice.code?"button-primary":"button-secondary"} aria-pressed={selectedDecision===choice.code} onClick={()=>changeValue(field,choice.code)}>{choice.label}</button>)}</div>
         {!choices.length&&<p role="status">Loading closure decision options…</p>}
       </fieldset>;
+    }
+    if ((field.type === "DROPDOWN" || field.type === "MULTI_SELECT") && shouldUseSearchableSelect(choices.length, 500)) {
+      const searchableOptions = choices.map(option => ({ value: option.id, label: option.label }));
+      if (field.type === "MULTI_SELECT") {
+        return <SearchableMultiSelect key={field.key} id={id} label={field.label} helpText={field.helpText} options={searchableOptions}
+          form={preparationMode ? "defect-report-form" : undefined} required={fieldRequired && !readOnly} disabled={disabled}
+          value={Array.isArray(values[field.key]) ? values[field.key] as string[] : []}
+          onChange={next => changeValue(field, next)} />;
+      }
+      return <SearchableSelect key={field.key} id={id} label={field.label} helpText={field.helpText} options={searchableOptions}
+        form={preparationMode ? "defect-report-form" : undefined} required={fieldRequired && !readOnly} disabled={disabled}
+        value={String(values[field.key] || "")} onChange={next => changeValue(field, next)} />;
     }
     return <label className="flex flex-col gap-[7px] my-[10px]" key={field.key} htmlFor={id}><span className="dynamic-form-field-label">{field.label}{fieldRequired && <span className="dynamic-form-required" aria-hidden="true">*</span>}</span>{field.helpText && <small>{field.helpText}</small>}
       {isSlaDate&&purpose==="CORRECTIVE_ACTION"&&slaPolicyQuery.isError&&<button type="button" className="button-secondary" onClick={()=>void slaPolicyQuery.refetch()}>Retry policy</button>}

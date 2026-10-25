@@ -6,8 +6,9 @@ import java.util.Set;
 /** Pure lifecycle rules, kept separate from persistence so invalid paths are easy to test. */
 public final class DefectWorkflow {
     private static final Map<String, Set<String>> TRANSITIONS = Map.ofEntries(
-        Map.entry("REPORTED", Set.of("UNDER_REVIEW", "ACTION_ASSIGNED", "REJECTED", "CANCELLED")),
-        Map.entry("UNDER_REVIEW", Set.of("INSPECTION_REQUIRED", "ACTION_ASSIGNED", "REJECTED", "CANCELLED")),
+        Map.entry("REPORTED", Set.of("UNDER_REVIEW", "ACTION_ASSIGNED", "REWORK", "CANCELLED")),
+        Map.entry("UNDER_REVIEW", Set.of("INSPECTION_REQUIRED", "ACTION_ASSIGNED", "REWORK", "CANCELLED")),
+        Map.entry("REWORK", Set.of("UNDER_REVIEW")),
         Map.entry("INSPECTION_REQUIRED", Set.of("INSPECTION_IN_PROGRESS")),
         Map.entry("INSPECTION_IN_PROGRESS", Set.of("INSPECTION_COMPLETE", "INSPECTION_REQUIRED")),
         Map.entry("INSPECTION_COMPLETE", Set.of("ACTION_ASSIGNED", "CANCELLED")),

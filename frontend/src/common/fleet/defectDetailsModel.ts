@@ -11,6 +11,10 @@ export type DefectActivity = {
   details?: DefectEventDetails | null;
 };
 
+export function canReassignMaintenance(permissions: string[], activeActionId: string | null | undefined, status: string): boolean {
+  return permissions.includes("ASSIGN_ACTION") && Boolean(activeActionId) && ["ACTION_ASSIGNED", "IN_PROGRESS"].includes(status);
+}
+
 export type DefectEventDetails = {
   formId: string | null;
   formName: string | null;
@@ -87,4 +91,11 @@ export function safeReturnPath(candidate: string | null, basePath: string): stri
   if (candidate === basePath) return "/";
   if (!candidate.startsWith(`${basePath}/`)) return fallback;
   return candidate.slice(basePath.length);
+}
+
+export function defectDetailsRequestPath(defectId: string, aircraftListId?: string | null): string {
+  const encodedDefectId = encodeURIComponent(defectId);
+  return aircraftListId
+    ? `/aircraft/${encodeURIComponent(aircraftListId)}/defects/${encodedDefectId}`
+    : `/defects/${encodedDefectId}`;
 }

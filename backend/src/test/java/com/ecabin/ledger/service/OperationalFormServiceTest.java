@@ -42,6 +42,40 @@ class OperationalFormServiceTest {
         assertThrows(IllegalArgumentException.class,()->service.validateConfiguration(operator,area,new FormConfiguration(List.of(invalidFile))));
     }
 
+    @Test void acceptsAndSerializesIndependentUploadRulesForBothFieldTypes(){
+        for(FieldType type:List.of(FieldType.IMAGE_UPLOAD,FieldType.FILE_UPLOAD)){
+            List<String> extensions=type==FieldType.IMAGE_UPLOAD?List.of("png"):List.of("png","pdf");
+            List<String> mimes=type==FieldType.IMAGE_UPLOAD?List.of("image/png"):List.of("image/png","application/pdf");
+            var field=new FieldDefinition("evidence","Evidence",type,null,false,0,null,null,null,null,null,
+                new FileRules(extensions,mimes,20L*1024*1024,1,3,30L*1024*1024));
+            var configuration=service.validateConfiguration(operator,area,new FormConfiguration(List.of(field)));
+            assertEquals(30L*1024*1024,configuration.fields().get(0).fileRules().maxTotalSizeBytes());
+            String json;
+            try{json=new ObjectMapper().writeValueAsString(configuration);}catch(Exception ex){throw new AssertionError(ex);}
+            assertTrue(json.contains("\"maxTotalSizeBytes\":31457280"));
+            try{
+                var reloaded=new ObjectMapper().readValue(json,FormConfiguration.class);
+                assertEquals(30L*1024*1024,reloaded.fields().get(0).fileRules().maxTotalSizeBytes());
+            }catch(Exception ex){throw new AssertionError(ex);}
+        }
+    }
+
+    @Test void existingUploadConfigurationsWithoutTotalLimitRemainValidAndKeepAbsentProperty(){
+        var legacy=new FieldDefinition("evidence","Evidence",FieldType.IMAGE_UPLOAD,null,true,0,null,null,null,null,null,
+            new FileRules(List.of("png"),List.of("image/png"),5L*1024*1024,1,3));
+        var validated=service.validateConfiguration(operator,area,new FormConfiguration(List.of(legacy)));
+        assertNull(validated.fields().get(0).fileRules().maxTotalSizeBytes());
+        assertEquals(15L*1024*1024,com.ecabin.ledger.storage.EvidenceFileValidator.maxTotalBytes(validated.fields().get(0)));
+    }
+
+    @Test void rejectsUnsupportedCombinedUploadLimits(){
+        for(Long limit:List.of(0L,-1L,19L*1024*1024,201L*1024*1024,30L*1024*1024+1)){
+            var invalid=new FieldDefinition("evidence","Evidence",FieldType.FILE_UPLOAD,null,false,0,null,null,null,null,null,
+                new FileRules(List.of("pdf"),List.of("application/pdf"),20L*1024*1024,0,3,limit));
+            assertThrows(IllegalArgumentException.class,()->service.validateConfiguration(operator,area,new FormConfiguration(List.of(invalid))),String.valueOf(limit));
+        }
+    }
+
     @Test void requiresConditionDropdownToDependOnComponentMaster(){
         var condition=new FieldDefinition("condition","Condition",FieldType.DROPDOWN,null,false,1,null,null,null,OptionSource.DEFECT_CONDITIONS,new OptionFilter(null,"component"),null);
         assertThrows(IllegalArgumentException.class,()->service.validateConfiguration(operator,area,new FormConfiguration(List.of(field("component",FieldType.TEXT),condition))));

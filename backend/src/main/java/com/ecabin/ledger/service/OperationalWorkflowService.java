@@ -105,11 +105,11 @@ public class OperationalWorkflowService {
         ActionAssignment previous = jdbc.query("SELECT id,assigned_team,assigned_user_id,description,priority,due_at FROM corrective_actions_dtl WHERE operator_id=? AND defect_id=? AND id=? AND isactive=1 AND status IN ('ASSIGNED','IN_PROGRESS','ON_HOLD') FOR UPDATE",
             (rs, row) -> new ActionAssignment(rs.getObject("id", UUID.class), rs.getString("assigned_team"), rs.getString("assigned_user_id"), rs.getString("description"), rs.getString("priority"), rs.getTimestamp("due_at")), organizationId, defectId, actionId)
             .stream().findFirst().orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Active corrective action was not found."));
-        String newTeam = request.assignedTeam().trim();
+        String newTeam = jdbc.query("SELECT name FROM maintenance_teams_mst WHERE operator_id=? AND id=? AND team_type='MAINTENANCE' AND isactive=1",rs->rs.next()?rs.getString(1):null,organizationId,request.assignedTeamId());
+        if(newTeam==null)throw new IllegalArgumentException("Choose an active maintenance team in this organization.");
         String newUser = request.assignedUserId() == null || request.assignedUserId().isBlank() ? null : request.assignedUserId().trim();
-        if (!activeTeam(organizationId, newTeam)) throw new IllegalArgumentException("Choose an active maintenance team in this organization.");
         if (newUser != null && !activeTeamMember(organizationId, newTeam, newUser)) throw new IllegalArgumentException("The individual assignee must be an active member of the selected maintenance team.");
-        if (newTeam.equals(previous.team()) && java.util.Objects.equals(newUser, previous.assignedUser())) throw new IllegalArgumentException("Choose a different team or individual assignee.");
+        if (newTeam.equals(previous.team())) throw new IllegalArgumentException("Choose a different maintenance team.");
 
         int cancelled = jdbc.update("UPDATE corrective_actions_dtl SET status='CANCELLED',updated_at=now() WHERE operator_id=? AND defect_id=? AND id=? AND isactive=1 AND status IN ('ASSIGNED','IN_PROGRESS','ON_HOLD')",
             organizationId, defectId, actionId);
@@ -126,6 +126,26 @@ public class OperationalWorkflowService {
         notifyAssignedTeam(organizationId, defectId, newTeam, newUser,eventId,actorId);
         if(emailOutbox!=null)emailOutbox.enqueue(organizationId,defectId,eventId,actorId,"ACTION_ASSIGNED",newTeam,newUser);
         return new WorkflowRecord(replacementId, "ASSIGNED");
+    }
+
+    @Transactional(readOnly=true)
+    public java.util.List<MaintenanceTeamOption> reassignmentOptions(UUID organizationId,UUID defectId,UUID actionId) {
+        boolean eligible=Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM defects_dtl d JOIN corrective_actions_dtl ca ON ca.operator_id=d.operator_id AND ca.defect_id=d.id WHERE d.operator_id=? AND d.id=? AND d.isactive=1 AND d.status IN ('ACTION_ASSIGNED','IN_PROGRESS') AND ca.id=? AND ca.isactive=1 AND ca.status IN ('ASSIGNED','IN_PROGRESS','ON_HOLD'))",Boolean.class,organizationId,defectId,actionId));
+        if(!eligible)throw new ResponseStatusException(HttpStatus.NOT_FOUND,"Active corrective action was not found.");
+        return jdbc.query("SELECT id,name FROM maintenance_teams_mst WHERE operator_id=? AND team_type='MAINTENANCE' AND isactive=1 ORDER BY name LIMIT 200",(rs,row)->new MaintenanceTeamOption(rs.getObject("id",UUID.class),rs.getString("name")),organizationId);
+    }
+
+    @Transactional(readOnly=true)
+    public java.util.List<MaintenanceTeamMemberOption> reassignmentMembers(UUID organizationId,UUID defectId,UUID actionId,UUID teamId) {
+        boolean eligible=Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM defects_dtl d JOIN corrective_actions_dtl ca ON ca.operator_id=d.operator_id AND ca.defect_id=d.id WHERE d.operator_id=? AND d.id=? AND d.isactive=1 AND d.status IN ('ACTION_ASSIGNED','IN_PROGRESS') AND ca.id=? AND ca.isactive=1 AND ca.status IN ('ASSIGNED','IN_PROGRESS','ON_HOLD'))",Boolean.class,organizationId,defectId,actionId));
+        if(!eligible)throw new ResponseStatusException(HttpStatus.NOT_FOUND,"Active corrective action was not found.");
+        return jdbc.query("SELECT DISTINCT m.external_user_id,COALESCE(NULLIF(btrim(m.display_name),''),m.external_user_id) AS display_name " +
+            "FROM maintenance_teams_mst t JOIN operator_membership_teams_mst mt ON mt.operator_id=t.operator_id AND mt.team_name=t.name AND mt.isactive=1 " +
+            "JOIN operator_memberships_mst m ON m.operator_id=mt.operator_id AND m.external_user_id=mt.external_user_id AND m.isactive=1 " +
+            "JOIN operator_roles_mst r ON r.operator_id=m.operator_id AND r.role_key=m.role AND r.isactive=1 " +
+            "WHERE t.operator_id=? AND t.id=? AND t.team_type='MAINTENANCE' AND t.isactive=1 AND ('|'||r.permissions||'|') LIKE '%|PERFORM_ACTION|%' " +
+            "ORDER BY display_name,m.external_user_id LIMIT 200",
+            (rs,row)->new MaintenanceTeamMemberOption(rs.getString("external_user_id"),rs.getString("display_name")),organizationId,teamId);
     }
 
     @Transactional

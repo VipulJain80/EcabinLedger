@@ -51,6 +51,18 @@ public class OperationalWorkflowController {
         return workflow.reassignAction(user.organizationId(), defectId, actionId, user.externalUserId(), request);
     }
 
+    @org.springframework.web.bind.annotation.GetMapping("/actions/{actionId}/reassignment-options")
+    public java.util.List<MaintenanceTeamOption> reassignmentOptions(JwtAuthenticationToken auth, @PathVariable UUID defectId, @PathVariable UUID actionId) {
+        AuthenticatedUser user=users.require(auth); permissions.require(user, Permission.ASSIGN_ACTION); visibleDefect(user,defectId);
+        return workflow.reassignmentOptions(user.organizationId(), defectId, actionId);
+    }
+
+    @org.springframework.web.bind.annotation.GetMapping("/actions/{actionId}/reassignment-options/{teamId}/members")
+    public java.util.List<MaintenanceTeamMemberOption> reassignmentMembers(JwtAuthenticationToken auth, @PathVariable UUID defectId, @PathVariable UUID actionId, @PathVariable UUID teamId) {
+        AuthenticatedUser user=users.require(auth); permissions.require(user, Permission.ASSIGN_ACTION); visibleDefect(user,defectId);
+        return workflow.reassignmentMembers(user.organizationId(), defectId, actionId, teamId);
+    }
+
     @PostMapping("/actions/{actionId}/start")
     public WorkflowRecord startAction(JwtAuthenticationToken auth, @PathVariable UUID defectId, @PathVariable UUID actionId) {
         AuthenticatedUser user=users.require(auth); permissions.require(user, Permission.PERFORM_ACTION); visibleDefect(user,defectId);

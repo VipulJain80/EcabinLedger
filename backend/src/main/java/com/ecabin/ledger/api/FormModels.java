@@ -24,7 +24,12 @@ public final class FormModels {
     /** Narrow, data-only conditional visibility rule; not an expression or executable predicate. */
     public record VisibilityRule(String fieldKey, @JsonProperty("equals") String expectedValue) {}
     public record RequiredRule(String fieldKey, @JsonProperty("equals") String expectedValue) {}
-    public record FileRules(List<String> extensions, List<String> mimeTypes, Long maxFileSizeBytes, Integer minCount, Integer maxCount) {}
+    public record FileRules(List<String> extensions, List<String> mimeTypes, Long maxFileSizeBytes, Integer minCount, Integer maxCount, Long maxTotalSizeBytes) {
+        /** Keeps JSON and Java callers using the pre-total-limit contract source compatible. */
+        public FileRules(List<String> extensions,List<String> mimeTypes,Long maxFileSizeBytes,Integer minCount,Integer maxCount) {
+            this(extensions,mimeTypes,maxFileSizeBytes,minCount,maxCount,null);
+        }
+    }
     public record FieldDefinition(@NotBlank @Size(max=80) String key, @NotBlank @Size(max=120) String label,
         @NotNull FieldType type, @Size(max=500) String helpText, boolean required, int order,
         TextRules textRules, NumericRules numericRules, DateRules dateRules, OptionSource optionSource,

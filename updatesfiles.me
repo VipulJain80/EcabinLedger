@@ -94,6 +94,22 @@ Verification executed:
 - `cd frontend && node --experimental-strip-types --test src/common/forms/*.test.mjs src/common/fleet/*.test.mjs src/common/dialogs/*.test.mjs` — passed: 22 tests, 0 failures.
 - `git diff --check` — passed.
 
+2026-10-24 — Isolate role visibility on the aircraft-specific Defect List
+
+The Defect List opened after selecting an aircraft now shows only the authenticated Auditor's own reported defects, while Reviewer, Maintenance, organization-administrator, and explicit tenant-wide defect readers see all defects for that aircraft in their own tenant. The aircraft context request also no longer requires a Reviewer-team routed defect, so it does not prevent the target list from loading. The existing `/api/v1/defects` Log Book route keeps its prior scope flags. Defect Summary fleet endpoints and report-query/Register APIs were not changed. No frontend file was needed because the page already calls the dedicated aircraft-specific endpoints.
+
+Files changed:
+- `backend/src/main/java/com/ecabin/ledger/api/DefectController.java` — apply the page-specific policy only to aircraft context and aircraft defect-list endpoints.
+- `backend/src/test/java/com/ecabin/ledger/api/DefectControllerAircraftListPolicyTest.java` — verify Auditor, Reviewer, Maintenance, Admin, and explicit all-defect scope selection, including reviewer aircraft context.
+- `backend/src/test/java/com/ecabin/ledger/service/LocalPostgresOperationalIntegrationTest.java` — add PostgreSQL-backed route regression coverage for same-tenant visibility, cross-tenant denial, and unchanged Log Book scope behavior.
+- `updatesfiles.me` — append this implementation record.
+
+Verification:
+- `mvn -f backend/pom.xml '-Dtest=DefectControllerAircraftListPolicyTest,ReportQueryServiceTest' test` — 7 passed, 0 failures, 0 errors, 0 skipped.
+- `mvn -f backend/pom.xml '-Dtest=LocalPostgresOperationalIntegrationTest' test` — 20 skipped because `ECABIN_DB_VERIFY=true` was not set; PostgreSQL-backed assertions were not executed.
+- `mvn -f backend/pom.xml '-Dtest=DefectRegisterReportPostgresTest' test` — 6 skipped because Docker/Testcontainers was unavailable; PostgreSQL report tests did not run.
+- `git diff --check` — passed.
+
 2026-10-17 — Add tenant-wide, read-only defect visibility permission
 
 Added the assignable `DEFECT_VIEW_ALL` permission. It lets a role read defect records across their active tenant regardless of reporter or assigned Maintenance team; it does not imply `VIEW` for unrelated routes or any write permission. The existing paginated SQL queries remain tenant-scoped and receive unrestricted-in-tenant read scope only when the new permission is present. Direct reads of details, timelines, submissions, published form data where its existing purpose rules permit it, aircraft-specific defect views, dashboard/fleet summaries, and authorized evidence metadata/download now pass both the route-level Spring Security gate and controller checks. Tenant IDs still come from the validated principal, and cross-tenant IDs remain not-found. Reviewer/Maintenance queues and purpose-specific actions retain their existing permissions and eligibility checks.
@@ -1331,7 +1347,7 @@ Verification:
 - Focused PostgreSQL test was attempted with the configured local connection, but the sandbox rejected the localhost socket with `Operation not permitted`; the close-date integration assertion therefore remains unverified against PostgreSQL here.
 - `cd frontend && pnpm lint` — passed.
 - `cd frontend && pnpm exec next build --webpack` — passed, including TypeScript and static generation.
-- `git diff --check` — pending final check.
+- `git diff --check` — passed.
 
 2026-10-17 — Add a moving light accent to defect detail tabs
 
@@ -2268,3 +2284,328 @@ Files modified:
 Verification:
 - `git diff --check` — passed.
 - Deployment steps are documentation only; no IIS server or UAT/production environment was accessed and no deployment was performed.
+
+2026-10-24 — Rename Defect Register navigation to Defect LOG Book
+
+Renamed the standard Operations navigation item to “Defect LOG Book”. The authenticated shell uses the backend navigation label as the page heading and browser title, so those update from the tenant navigation response; the existing table card’s “Defect Register” domain heading remains unchanged. V68 updates existing standard-labeled menu rows and updates the existing provisioning trigger for future organizations. Existing tenant custom labels, permissions, route keys, and ordering are preserved.
+
+Files created:
+- `backend/src/main/resources/db/migration/V68__rename_defect_register_navigation.sql` — rename default existing menu rows and provision the same label for new Operations menus.
+
+Files modified:
+- `frontend/src/app/loginhome/page.tsx` — use “Defect LOG Book” as the fallback page label.
+- `backend/src/test/java/com/ecabin/ledger/service/PostgresMigrationSmokeTest.java` — advance the expected Flyway migration head to V68.
+- `updatesfiles.me` — append this implementation record.
+
+Verification:
+- `git diff --check` — passed.
+- Tests and migration execution were not run. Flyway will apply V68 on backend startup under the configured migration credentials.
+
+2026-10-24 — Return rejected Galley defects to the original Reporter for rework
+
+Reviewer rejection now returns the existing defect to its original `reported_by` user, stores that user in the current assignment fields, and moves the case to `REWORK`. The same transaction appends a `REVIEW_REJECTED` event with previous/new status and assignment, rejection reason, reviewer/form/request context, then creates the existing event-linked in-app notification and email outbox item. The original reporter must still have an active tenant membership and `REPORT` permission. Only the original reporter can submit a correction; the same Galley defect returns to `UNDER_REVIEW` for another Reviewer decision. Historical `REJECTED` records remain supported. No NBR tables, status, or behavior were changed.
+
+Files modified or added:
+- `backend/src/main/resources/db/migration/V69__return_rejected_defects_for_rework.sql` — permit `REWORK` and register it in the existing defect workflow status catalog.
+- `backend/src/main/java/com/ecabin/ledger/service/ReviewerQueueService.java` — implement transactional reassignment, rejection event, and notification through the dedicated Reviewer decision path.
+- `backend/src/main/java/com/ecabin/ledger/service/DefectWorkflow.java` — define the allowed transitions into and out of `REWORK`.
+- `backend/src/main/java/com/ecabin/ledger/service/DefectService.java` — include `REWORK` in defect status filtering and block generic status changes to `REWORK` or legacy `REJECTED`.
+- `backend/src/main/java/com/ecabin/ledger/service/OperationalFormService.java` — permit only the assigned original reporter to correct/resubmit a returned Galley report on the same defect.
+- `backend/src/main/java/com/ecabin/ledger/service/FormResolutionRules.java` — resolve the defect report form for the `REWORK` stage.
+- `backend/src/main/java/com/ecabin/ledger/api/DefectController.java` — allow a Reporter to access their own case and its activity history for correction.
+- `backend/src/main/java/com/ecabin/ledger/api/OperationalFormsController.java` — allow the authenticated original Reporter to reach their returned case form.
+- `backend/src/main/java/com/ecabin/ledger/config/SecurityConfig.java` — permit the authenticated Reporter application permission to reach the existing defect activity endpoint; controller ownership checks remain enforced.
+- `backend/src/test/java/com/ecabin/ledger/service/DefectWorkflowTest.java` — cover `REWORK` transitions and legacy status behavior.
+- `backend/src/test/java/com/ecabin/ledger/service/FormResolutionRulesTest.java` — cover returned-report form resolution.
+- `backend/src/test/java/com/ecabin/ledger/service/LocalPostgresOperationalIntegrationTest.java` — cover assignment, append-only event and notification behavior, generic-transition bypass attempts, correction, and repeat rejection against PostgreSQL when enabled.
+- `backend/src/test/java/com/ecabin/ledger/service/PostgresMigrationSmokeTest.java` — update migration-head/status expectations to V69.
+- `frontend/src/common/forms/formResolution.ts` and `frontend/src/common/forms/formResolution.test.mjs` — show the correction form for a returned `REWORK` case and test the mapping.
+- `frontend/src/common/fleet/DefectDetailsPage.tsx` — expose the existing activity history and correction form to the authorized original Reporter.
+- `updatesfiles.me` — append this implementation record.
+
+Verification:
+- Focused backend tests: 22 passed, 0 failures/errors/skips.
+- Full backend suite: 182 passed, 0 failures/errors, 54 skipped. Docker-backed and opt-in PostgreSQL tests were skipped; Docker is unavailable.
+- Frontend tests excluding the local-server CSP smoke test: 62 passed. The CSP smoke test could not bind a local port in this sandbox.
+- `pnpm lint`: passed with 3 warnings. Type generation and `tsc --noEmit`: passed.
+- `pnpm build` was blocked by sandbox `EPERM` in Turbopack. `pnpm exec next build --webpack` passed.
+- `git diff --check`: passed.
+
+Database limitation: V69 was not applied or verified against PostgreSQL. No shared or production database was accessed. The migration-backed and workflow-parity integration tests still need to run against the disposable PostgreSQL setup.
+
+2026-10-24 — Match Attachment tab details to Closure Review
+
+Updated the defect Attachment tab to show the same descriptive evidence details as Closure Review: a Case evidence section label, filename, document description derived from the attachment source, uploader and formatted timestamp, and evidence field/type with file size. The component uses the `source` and `uploadedBy` values already returned by the authorized attachment API and existing unavailable-metadata fallbacks. Existing authenticated preview and download actions are unchanged; no API, authorization, or schema changes were made.
+
+Files modified:
+- `frontend/src/common/fleet/DefectDetailsPage.tsx` — include optional attachment source/uploader metadata and render the descriptive details in the Attachments tab.
+- `updatesfiles.me` — append this implementation record.
+
+Verification: not run for this focused presentation change.
+
+2026-10-24 — Keep the Maintenance reassignment action visible on Defect Details
+
+The “Reassign maintenance team” action is now consistently shown on Defect Details to users whose tenant role has `ASSIGN_ACTION`. It is disabled with an explanation when there is no active corrective action or the defect is not in `ACTION_ASSIGNED` or `IN_PROGRESS`. The authenticated backend route and its permission, tenant, team, and workflow checks are unchanged.
+
+Files modified:
+- `frontend/src/common/fleet/DefectDetailsPage.tsx` — render the authorized reassignment action consistently and explain when it is unavailable.
+- `updatesfiles.me` — append this implementation record.
+
+Verification: not run for this focused UI visibility change.
+
+2026-10-24 — Replace free-text maintenance reassignment with tenant-scoped team selection
+
+Replaced the maintenance-team name prompts in Defect Details and the defect-summary detail modal with a shared accessible reassignment dialog. When opened, it fetches up to 200 active MAINTENANCE teams for the current tenant through the authenticated API, shows loading/error/retry/empty states, displays the current assignment, excludes the current team, and requires a different selected team and reason before submission. The POST request sends the selected database team ID. The backend independently resolves that ID within the authenticated tenant, requires an active MAINTENANCE team, validates the active defect/action workflow state, rejects reassignment to the current team, and retains the existing transactional action replacement, status behavior, audit event, and notifications.
+
+Files added:
+- `frontend/src/common/fleet/MaintenanceTeamReassignmentDialog.tsx` — shared selector dialog and authenticated option/reassignment requests.
+
+Files modified:
+- `backend/src/main/java/com/ecabin/ledger/api/ApiModels.java` — add the team option response and change the reassignment request to accept a team UUID.
+- `backend/src/main/java/com/ecabin/ledger/api/OperationalWorkflowController.java` — add the permission-checked, tenant-resolved option route and maintain existing permission/visibility checks for reassignment.
+- `backend/src/main/java/com/ecabin/ledger/config/SecurityConfig.java` — protect the option GET route with ASSIGN_ACTION; controller membership and defect visibility checks remain in force.
+- `backend/src/main/java/com/ecabin/ledger/service/OperationalWorkflowService.java` — list only active tenant maintenance teams and validate the selected team ID server-side.
+- `backend/src/test/java/com/ecabin/ledger/service/LocalPostgresOperationalIntegrationTest.java` — cover tenant-scoped active-team options and rejection of current, cross-tenant, and inactive team IDs.
+- `frontend/src/common/fleet/DefectDetailsPage.tsx` — open the shared dropdown dialog from Defect Details.
+- `frontend/src/app/loginhome/page.tsx` — replace the other free-text reassignment flow with the same shared dialog.
+- `updatesfiles.me` — append this implementation record.
+
+Verification:
+- Backend focused unit tests (`DefectWorkflowTest`, `OperationalFormServiceTest`): 14 passed, 0 failed, 0 skipped; all test sources compiled.
+- PostgreSQL reassignment integration test was not run because it is opt-in (`ECABIN_DB_VERIFY=true`) and the configured local database was not used. Its assertions compile but require a disposable PostgreSQL target for execution.
+- Frontend Node regression suite: 52 passed, 0 failed, 0 skipped. Node emitted existing module-type warnings for TypeScript ES module files.
+- `pnpm lint`: passed with 2 existing warnings (`reportFormFiles` unused in `loginhome/page.tsx`; `<img>` use in `AttachmentPreviewDialog.tsx`).
+- `NEXT_PUBLIC_API_BASE_URL=https://localhost:8080/api/v1 pnpm exec next typegen` and `pnpm exec tsc --noEmit`: passed.
+- `NEXT_PUBLIC_API_BASE_URL=https://localhost:8080/api/v1 pnpm exec next build --webpack`: passed.
+- `git diff --check`: passed before final log append; rechecked after edits.
+
+No migration was added and no database was modified. No reassignment status/audit/notification behavior was intentionally changed.
+
+2026-10-24 — Show the maintenance reassignment action only when available
+
+The Defect Details page now renders “Reassign Team” only when the resolved identity has `ASSIGN_ACTION`, the backend supplied an active corrective-action ID, and the defect status is `ACTION_ASSIGNED` or `IN_PROGRESS`. The prior disabled-button state and explanatory availability message have been removed. The button is a compact responsive action with an inline arrow-switch icon, visible keyboard focus, and matching hover styling; the same control is used in the defect-summary detail modal. The database-backed team selector and existing assignment confirmation remain unchanged.
+
+Backend authorization was verified and remains unchanged: the reassign and team-options controller methods resolve the authenticated membership, require `ASSIGN_ACTION`, and apply the existing defect-visibility check. The service independently validates the active defect/action workflow, active same-tenant MAINTENANCE destination team, and disallows the current team. The transactional assignment update, status handling, audit event, and notification flow remain unchanged.
+
+Files added:
+- `backend/src/test/java/com/ecabin.ledger/api/OperationalWorkflowControllerTest.java` — verify both reassignment operations are denied before workflow or defect services are called when assignment permission is missing.
+
+Files modified:
+- `frontend/src/common/fleet/defectDetailsModel.ts` — add a shared eligibility predicate matching the existing permission/action/status conditions.
+- `frontend/src/common/fleet/defectDetailsModel.test.mjs` — cover permitted and hidden button conditions.
+- `frontend/src/common/fleet/MaintenanceTeamReassignmentDialog.tsx` — add the shared responsive icon button presentation.
+- `frontend/src/common/fleet/DefectDetailsPage.tsx` — conditionally render the action and use the shared button.
+- `frontend/src/app/loginhome/page.tsx` — use the same eligibility rule and button in the existing detail modal.
+- `updatesfiles.me` — append this implementation record.
+
+Verification:
+- Backend controller permission test: 1 passed, 0 failures/errors/skips; all test sources compiled.
+- Focused frontend eligibility tests: 5 passed, 0 failures/skips. Node emitted the repository's existing module-type warning.
+- `pnpm lint`: passed with 2 pre-existing warnings in `loginhome/page.tsx` and `AttachmentPreviewDialog.tsx`.
+- Next route type generation and `tsc --noEmit`: passed.
+- `next build --webpack`: passed.
+- `git diff --check`: passed.
+
+No database, migration, or backend workflow implementation was changed. PostgreSQL integration was not run for this UI visibility adjustment.
+
+2026-10-24 — Use database-backed maintenance assignee choices
+
+The reassignment dialog now loads eligible active members after a destination maintenance team is selected. It submits the selected member's stored external user ID; users no longer type IDs manually. The individual assignee stays optional and starts blank, so leaving it blank assigns the action to the team and allows active team members with maintenance-work permission to take it.
+
+The backend adds a tenant-scoped, authenticated member-options endpoint. It returns only active members of the selected active maintenance team whose active tenant role includes PERFORM_ACTION, and it verifies the defect/action is still eligible before returning results. Existing POST-side validation remains authoritative. No schema or migration changes were needed.
+
+Files changed:
+- `backend/src/main/java/com/ecabin/ledger/api/ApiModels.java` — add the assignee-option response DTO.
+- `backend/src/main/java/com/ecabin/ledger/api/OperationalWorkflowController.java` — expose the protected member-options GET route using authenticated membership and ASSIGN_ACTION.
+- `backend/src/main/java/com/ecabin/ledger/config/SecurityConfig.java` — protect the new route with ASSIGN_ACTION.
+- `backend/src/main/java/com/ecabin/ledger/service/OperationalWorkflowService.java` — query active, eligible members for the selected tenant-owned maintenance team and current active corrective action.
+- `frontend/src/common/fleet/MaintenanceTeamReassignmentDialog.tsx` — replace free-text ID entry with a dynamic optional dropdown, including loading, retry, empty, and duplicate-name handling.
+- `updatesfiles.me` — record this change.
+
+Verification: Not run in this update. No database or permissions were modified.
+
+2026-10-24 — Keep the access-screen heading fixed
+
+The login shell and Defect Details identity-failure state now use one shared full-page access screen. Its heading uses the tenant's backend-provided application name followed by “ACCESS” when known; if branding cannot be fetched, it uses the neutral “APPLICATION ACCESS” heading. State-specific text appears below it: verification, access denied/unavailable, session expired, network failure, or a generic retry message. Browser/network exception strings are mapped to safe user-facing copy. Access-bootstrap failures remain on the page without opening a SweetAlert; existing alert behavior remains for failures after identity has loaded. Authentication redirects and backend authorization are unchanged. The separate Defect unavailable state is unchanged.
+
+Files changed:
+- `frontend/src/common/auth/AccessStatePage.tsx` — add the shared application-branded access screen and safe error-message mapping.
+- `frontend/src/app/loginhome/page.tsx` — use backend application branding where available, normalize error messages, and avoid modal alerts for full-page access failures.
+- `frontend/src/common/fleet/DefectDetailsPage.tsx` — reuse the branded access screen for identity failures and preserve its sign-in action.
+- `updatesfiles.me` — record this change.
+
+Verification:
+- `pnpm lint` — passed with 2 existing warnings: unused `reportFormFiles` in `loginhome/page.tsx`, and `<img>` use in `AttachmentPreviewDialog.tsx`.
+- `NEXT_PUBLIC_API_BASE_URL=https://localhost:8080/api/v1 pnpm exec next typegen && pnpm exec tsc --noEmit` — passed.
+- `git diff --check` — passed.
+
+2026-10-24 — Preserve Maintenance evidence access after workflow advancement
+
+Maintenance users assigned to an active tenant team can now download evidence for an active defect after it moves from action work into closure review or CLOSED. The previous download query imposed an extra `ACTION_ASSIGNED`/`IN_PROGRESS` status check that the existing Defect Details access rule does not impose. The fix removes only that stage restriction; it retains tenant-scoped attachment and defect joins, active records, current team assignment and membership, reporter scoping, and rejected-scan blocking. Evidence metadata is not deleted or detached by this change. A case with no evidence continues to return an empty list, while cross-tenant/missing metadata remains 404 and blob storage failures remain distinct errors.
+
+Files changed:
+- `backend/src/main/java/com/ecabin/ledger/service/AttachmentService.java` — align download-stage eligibility with the existing case-detail assignment/membership rule.
+- `backend/src/test/java/com/ecabin/ledger/service/AttachmentServiceValidationTest.java` — cover post-transition Maintenance download, empty evidence lists, tenant-scoped missing metadata, and missing blob behavior.
+- `updatesfiles.me` — append this implementation record.
+
+Verification:
+- `mvn -f backend/pom.xml '-Dtest=AttachmentServiceValidationTest' test` — 6 passed, 0 failures, 0 errors, 0 skipped.
+- `git diff --check` — passed.
+
+2026-10-24 — Keep aircraft-specific Defect List Auditor scope independent of DEFECT_VIEW_ALL
+
+Updated only the authenticated `/api/v1/aircraft/{aircraftId}/defects` request policy: report-only Auditor roles remain restricted to defects they reported even if their role also has `DEFECT_VIEW_ALL`. Reviewer, Maintenance, and organization-administrator capabilities continue to request the tenant-wide aircraft list. Tenant and selected-aircraft constraints remain applied by the existing database query. The separate `/api/v1/defects` Log Book flow and dynamic Defect Register query were not changed for this adjustment.
+
+Files changed:
+- `backend/src/main/java/com/ecabin/ledger/api/DefectController.java` — remove `DEFECT_VIEW_ALL` from the Auditor-scope decision on the aircraft-specific list endpoint only.
+- `backend/src/test/java/com/ecabin/ledger/api/DefectControllerAircraftListPolicyTest.java` — add a regression case proving an Auditor with `DEFECT_VIEW_ALL` remains reporter-scoped; retain Reviewer, Maintenance, Administrator, and explicitly broad-reader expectations.
+- `updatesfiles.me` — record this change.
+
+Verification:
+- `mvn -f backend/pom.xml '-Dtest=DefectControllerAircraftListPolicyTest' test` — 2 passed, 0 failures, 0 errors, 0 skipped.
+- `git diff --check` — passed.
+
+2026-10-24 — Replace the aircraft registration select with a searchable scroll dropdown
+
+In the published defect-report preparation form, Aircraft Registration now uses a searchable dropdown with the search input inside the open options panel. It calls the existing tenant-scoped active-aircraft endpoint in pages of 20, debounces search, uses TanStack Query cancellation for outdated requests, and loads more pages near the bottom of the scroll panel. The selected aircraft remains visible independently of the active search page. Loading, empty, error/retry, and loading-more states are provided; keyboard navigation supports arrow keys, Home/End, Enter, and Escape. The selection callback and required form validation continue to feed the existing defect-report submission flow. Other dropdowns, backend APIs, and operational report screens are unchanged.
+
+Files added:
+- `frontend/src/common/forms/AircraftRegistrationSelect.tsx` — accessible searchable dropdown and paginated request handling.
+- `frontend/src/common/forms/aircraftDropdownModel.mjs` — page merging, paging, labels, state, and keyboard navigation helpers.
+- `frontend/src/common/forms/aircraftDropdownModel.d.mts` — TypeScript types for the dropdown helpers.
+- `frontend/src/common/forms/aircraftDropdownModel.test.mjs` — focused dropdown behavior and source-contract tests.
+
+Files modified:
+- `frontend/src/common/forms/OperationalFormRenderer.tsx` — replace only the editable Aircraft Registration native select/search/pagination UI with the new component; keep the existing `onAircraftSelected` contract.
+- `updatesfiles.me` — record this implementation.
+
+Verification:
+- `cd frontend && find src -name '*.test.mjs' -print0 | xargs -0 node --test` — 59 passed, 0 failed, 0 skipped. Node printed existing module-type warnings for JavaScript modules in the project.
+- `cd frontend && pnpm lint` — passed with 2 existing warnings: unused `reportFormFiles` in `loginhome/page.tsx` and `<img>` usage in `AttachmentPreviewDialog.tsx`.
+- `NEXT_PUBLIC_API_BASE_URL=https://localhost:8080/api/v1 pnpm exec next typegen` — passed; a temporary loopback API origin was used because production-aware type generation requires HTTPS configuration.
+- `cd frontend && pnpm exec tsc --noEmit` — passed.
+- Browser-driven interaction tests were not run because the frontend repository has no DOM/component testing library configured; focused helper and source-contract tests cover the new behavior.
+
+No backend, migration, database, Defect Log Book, Defect Register, or non-aircraft dropdown behavior was changed.
+
+2026-10-24 — Refine Aircraft Registration selector sizing and label activation
+
+Follow-up from screenshot review: the selector now aligns to the same compact 42 px height as the other configured form controls and opts out of stretching to match a taller neighboring textarea. Clicking the Aircraft Registration label explicitly opens the dropdown, then moves focus into its search box. Dropdown paging and selected-aircraft behavior remain unchanged.
+
+Files modified:
+- `frontend/src/common/forms/AircraftRegistrationSelect.tsx` — compact control styling and label-triggered opening.
+- `frontend/src/common/forms/OperationalFormRenderer.tsx` — prevent the grid cell from stretching the aircraft control.
+- `frontend/src/common/forms/aircraftDropdownModel.test.mjs` — assertions for label activation and compact sizing.
+- `updatesfiles.me` — record this follow-up.
+
+Verification:
+- `cd frontend && find src -name '*.test.mjs' -print0 | xargs -0 node --test` — 59 passed, 0 failed, 0 skipped.
+- `cd frontend && pnpm lint` — passed with 2 existing warnings in `loginhome/page.tsx` and `AttachmentPreviewDialog.tsx`.
+- `cd frontend && pnpm exec tsc --noEmit --incremental false` — passed.
+- `git diff --check` — passed.
+
+2026-10-24 — Add searchable dropdowns to larger option catalogs
+
+Added a reusable searchable, scrollable selector for already-loaded option lists where the list size makes search useful. The search field is inside the open panel; selected values remain visible when closed or filtered out. The single-select supports keyboard navigation, Enter, Escape, and required-field validation through a hidden native control. Multi-select values and order remain unchanged. Small enums remain native. Dynamic operational-form choices are converted only when the returned list has 10–499 options; capped catalogs that hit their 500-item bound remain native so local search does not imply that omitted server results are available. Maintenance reassignment catalogs remain native when they hit their 200-item bound. Existing Aircraft Registration incremental search and API behavior were preserved.
+
+Files added:
+- `frontend/src/common/selects/SearchableSelect.tsx` — shared searchable single- and multi-select controls with accessible list/dialog semantics, keyboard behavior, scrollable options, and native form-value/required-field integration.
+- `frontend/src/common/selects/searchableDropdownModel.mjs` — local matching, selection toggling, and option-count policy.
+- `frontend/src/common/selects/searchableDropdownModel.d.mts` — TypeScript declarations for the selector model helpers.
+- `frontend/src/common/selects/searchableDropdownModel.test.mjs` — option thresholds, matching, multi-select preservation, and selector accessibility/source-contract checks.
+- `frontend/src/common/fleet/MaintenanceTeamReassignmentDialog.tsx` — this file was already part of the worktree; its existing team/member pickers now use the shared searchable controls when the complete returned list is below the known API cap.
+
+Files modified:
+- `frontend/src/app/configuration.tsx` — make larger role, database-backed configuration, and routing team pickers searchable while retaining existing FormData names and small native enums.
+- `frontend/src/common/configuration/AreaTeamRoutingPage.tsx` — make larger eligible-team selectors searchable without changing submitted IDs.
+- `frontend/src/common/configuration/ReportMasterPage.tsx` — make approved template, routine, and lookup-source selectors searchable.
+- `frontend/src/common/fleet/FleetStatusPage.tsx` — make larger fleet and aircraft-type filters searchable; request/export behavior is unchanged.
+- `frontend/src/common/fleet/GalleyReviewerDecisionForm.tsx` — make the larger maintenance-team selector searchable.
+- `frontend/src/common/forms/OperationalFormRenderer.tsx` — use the shared controls for sufficiently large dynamic single- and multi-select form fields and the already-loaded published-form chooser; retain dependent-field clearing and the existing field values.
+- `frontend/src/common/reports/DynamicReportViewer.tsx` — make larger report and metadata-driven option filters searchable while preserving report filter values and query behavior.
+- `updatesfiles.me` — record this implementation.
+
+No backend, API, database, authorization, tenant filtering, workflow, Defect Log Book, or Defect Register execution changes were made. Aircraft Registration remains on its dedicated paged selector. The database-backed lists continue to use existing bounded API results; controls at the known cap are not switched to local search. Remaining native selectors are chiefly small fixed enums/statuses, page-size controls, simple table filters, and deliberately specialized controls such as aircraft registration.
+
+Verification:
+- `cd frontend && find src -name '*.test.mjs' -print0 | xargs -0 node --test` — 63 passed, 0 failed, 0 skipped. Node emitted existing module-type warnings for project `.ts` modules imported by tests.
+- `cd frontend && pnpm lint` — passed with 2 warnings: existing unused `reportFormFiles` in `frontend/src/app/loginhome/page.tsx` and existing `<img>` use in `AttachmentPreviewDialog.tsx`.
+- `cd frontend && NEXT_PUBLIC_API_BASE_URL=https://localhost:8080/api/v1 pnpm exec next typegen && pnpm exec tsc --noEmit --incremental false` — passed.
+- `git diff --check` — passed.
+- No backend tests were run because no backend files or API behavior changed. DOM/browser interaction tests are not configured in the frontend repository; the new selector has helper/source-contract coverage, and the existing aircraft selector tests continue to pass.
+
+2026-10-24 — Align aircraft-list detail access with aircraft-list visibility
+
+The aircraft-specific Defect List intentionally shows all active defects for the selected tenant aircraft to non-Reporter-scoped roles, including Reviewer and Maintenance users. Its detail click previously opened the generic `GET /api/v1/defects/{id}` route. That route correctly applies narrower Reviewer-team and Maintenance-assignment access for other entry points, so a listed but not currently assigned case returned the same 404 as a missing case. The aircraft list now opens a dedicated tenant- and aircraft-bound detail route that applies the same Reporter-only scope as the list. The general detail route and Reviewer/Maintenance queue behavior remain unchanged. Back returns to the selected aircraft's Defect List and restores its scroll position.
+
+Files changed:
+- `backend/src/main/java/com/ecabin/ledger/api/DefectController.java` — add `GET /api/v1/aircraft/{aircraftId}/defects/{id}`, require authenticated defect-read permission, and derive Reporter scope from the authenticated tenant role.
+- `backend/src/main/java/com/ecabin/ledger/service/DefectService.java` — add detail lookup constrained by authenticated tenant, selected aircraft, active defect and aircraft, and Reporter ownership when applicable. Missing, cross-tenant, wrong-aircraft, and unauthorized Reporter records remain indistinguishable 404s.
+- `backend/src/test/java/com/ecabin/ledger/api/DefectControllerAircraftListPolicyTest.java` — verify Auditor/Reviewer/Maintenance/Admin scope routing and retain Reviewer-team authorization on the generic detail route.
+- `backend/src/test/java/com/ecabin/ledger/service/LocalPostgresOperationalIntegrationTest.java` — add migration-backed integration assertions for Reporter ownership, non-assigned Reviewer/Maintenance access through the aircraft-list policy, cross-tenant/wrong-aircraft IDs, nonexistent IDs, and access after reassignment/workflow advancement.
+- `frontend/src/app/loginhome/page.tsx` — carry the selected aircraft context only from the aircraft-specific Defect List; keep all other entry points on the existing generic detail route.
+- `frontend/src/common/fleet/DefectDetailsPage.tsx` — request the aircraft-specific endpoint only when opened from that list and retain the existing branded error and Back action.
+- `frontend/src/common/fleet/defectDetailsModel.ts` and `defectDetailsModel.test.mjs` — build encoded detail paths and test entry-point routing and Back behavior.
+- `updatesfiles.me` — record this fix.
+
+Verification:
+- `mvn -f backend/pom.xml '-Dtest=DefectControllerAircraftListPolicyTest' test` — 4 passed, 0 failures, 0 errors, 0 skipped.
+- `cd frontend && find src -name '*.test.mjs' -print0 | xargs -0 node --test` — 65 passed, 0 failures, 0 skipped. Existing Node module-type warnings were emitted.
+- `cd frontend && pnpm lint` — passed with 2 existing warnings: unused `reportFormFiles` and `<img>` use in `AttachmentPreviewDialog.tsx`.
+- `cd frontend && NEXT_PUBLIC_API_BASE_URL=https://localhost:8080/api/v1 pnpm exec next typegen && pnpm exec tsc --noEmit --incremental false` — passed.
+- `git diff --check` — passed.
+- PostgreSQL integration assertions were added but not executed: `LocalPostgresOperationalIntegrationTest` requires `ECABIN_DB_VERIFY=true` and a configured PostgreSQL schema. No database was modified for this task.
+
+2026-10-24 — Make defect detail reads consistent across permitted entry points
+
+The aircraft Defect List intentionally exposes active tenant cases to Reviewer, Maintenance, and organization-administrator users, while the generic detail API previously required a Reviewer-team route or active Maintenance assignment. A case visible in that list could therefore open as “Defect unavailable.” The generic detail endpoint now follows the same read-only tenant visibility as the aircraft list for non-Reporter-scoped readers; report-only users remain limited to their own cases unless they separately have `DEFECT_VIEW_ALL`. The aircraft-specific detail route remains bound to both tenant and selected aircraft and keeps its Reporter ownership check, as required by the aircraft-list policy. The Defect Log Book list query and all workflow mutation checks are unchanged; viewing a detail does not grant a Reviewer decision, Maintenance action, reassignment, verification, or closure permission.
+
+Files changed:
+- `backend/src/main/java/com/ecabin/ledger/api/DefectController.java` — align generic detail reads with the established aircraft-list read scope, keeping the authenticated tenant and Reporter ownership restriction.
+- `backend/src/test/java/com/ecabin/ledger/api/DefectControllerAircraftListPolicyTest.java` — cover generic detail access for Reviewer, Maintenance, Administrator, ordinary VIEW, Reporter-only, and explicit DEFECT_VIEW_ALL cases.
+- `backend/src/test/java/com/ecabin/ledger/service/LocalPostgresOperationalIntegrationTest.java` — compare generic and aircraft-context details for the same records, and verify cross-tenant and Reporter ownership denial while preserving Log Book list scope.
+- `updatesfiles.me` — record this change.
+
+Verification:
+- `mvn -f backend/pom.xml '-Dtest=DefectControllerAircraftListPolicyTest' test` — 4 passed, 0 failed, 0 skipped.
+- `cd frontend && node --test src/common/fleet/defectDetailsModel.test.mjs` — 7 passed, 0 failed, 0 skipped. Node emitted the existing module-type warning for the imported `.ts` module.
+- `git diff --check` — passed.
+- PostgreSQL integration assertions were added but not run because the test requires `ECABIN_DB_VERIFY=true` and an explicitly configured database. No database was modified.
+
+2026-10-24 — Add per-field combined upload limits for IMAGE_UPLOAD and FILE_UPLOAD
+
+Report Master now configures a Total upload size (MB) independently from Max file size (MB), and the Dynamic Forms renderer shows the configured total and current combined selection. New upload fields default to 20 MiB per file, 1–3 files, and 30 MiB total. Existing version JSON without a total setting retains its former maximum envelope (`maxFileSizeBytes × maxCount`); no form-definition database column was needed. Limits use binary megabytes (1 MiB = 1,048,576 bytes).
+
+Both image and general file fields validate allowed extension/MIME/content as before, the individual limit, count, and combined bytes. The browser recalculates totals when items are selected or removed; a new batch that exceeds count or combined size is rejected as a batch while the existing selection remains. The backend repeats the checks against trusted stored sizes, validates same-field attachment IDs together at submission, serializes pending uploads per defect, rejects multi-file multipart requests, and cleans up the object if metadata/audit persistence fails. The existing bounded 64 MB multipart request ceiling remains; the maximum individual multipart file size is now 20 MB. The new database check permits attachment rows up to 20 MiB.
+
+Files changed for this feature:
+- `backend/src/main/java/com/ecabin/ledger/api/ApiExceptionHandler.java` — remove the obsolete hard-coded 5 MB text from request-size errors.
+- `backend/src/main/java/com/ecabin/ledger/api/AttachmentController.java` — explicitly accept only one multipart file per request, so repeated uploads are counted by the tenant-scoped service check.
+- `backend/src/main/java/com/ecabin/ledger/api/FormModels.java` — add optional `maxTotalSizeBytes` while retaining the previous Java constructor form.
+- `backend/src/main/java/com/ecabin/ledger/service/AttachmentService.java` — enforce staged per-field file count and combined size before permanent object storage; preserve cleanup on write failure.
+- `backend/src/main/java/com/ecabin/ledger/service/OperationalFormService.java` — validate upload configuration, tenant/form/field attachment ownership, duplicates, counts, per-file bytes, and combined stored bytes for submissions.
+- `backend/src/main/java/com/ecabin/ledger/storage/EvidenceFileValidator.java` — share binary-MB, per-file, aggregate, type, and content-signature checks.
+- `backend/src/main/resources/application.properties` — raise Spring's bounded per-file multipart ceiling to 20 MB; keep the 64 MB request ceiling.
+- `backend/src/main/resources/db/migration/V70__increase_attachment_file_size_limit.sql` — forward-only migration to raise the attachment size constraint to 20 MiB. Repository migration head before this change was V69; historical migrations were not edited.
+- `backend/src/test/java/com/ecabin/ledger/api/AttachmentControllerTest.java` — reject multipart requests containing more than one file.
+- `backend/src/test/java/com/ecabin/ledger/service/AttachmentServiceValidationTest.java` — verify repeated uploads exceeding the aggregate are rejected before storage.
+- `backend/src/test/java/com/ecabin/ledger/service/OperationalFormServiceTest.java` — cover IMAGE_UPLOAD/FILE_UPLOAD config serialization, backward compatibility, and invalid totals.
+- `backend/src/test/java/com/ecabin/ledger/storage/EvidenceFileValidatorTest.java` — cover per-file boundaries, exact combined limit, overflow, and legacy total derivation.
+- `backend/src/test/java/com/ecabin/ledger/service/PostgresMigrationSmokeTest.java` — expect V70 and assert the 20 MiB storage constraint.
+- `backend/src/test/java/com/ecabin/ledger/service/LocalPostgresOperationalIntegrationTest.java` — verify total size survives save, publish, load, and clone in the PostgreSQL-backed test path.
+- `frontend/src/common/configuration/FormMasterPage.tsx` — expose defaults, total-size control, draft serialization, and publication validation for both upload types.
+- `frontend/src/common/forms/EvidenceUploadField.tsx` — display per-file/combined limits and live totals.
+- `frontend/src/common/forms/OperationalFormRenderer.tsx` — use shared selection/count/aggregate validation for both upload types.
+- `frontend/src/common/forms/evidenceFileRules.ts` — implement shared browser-side file and combined-selection validation with legacy defaults.
+- `frontend/src/common/forms/publishedFormDefinition.test.mjs` — cover both upload types, exact and exceeded totals, count/individual limits, removal/replacement, and legacy rules.
+- `updatesfiles.me` — record this implementation.
+
+Verification:
+- Backend: `mvn -f backend/pom.xml '-Dtest=EvidenceFileValidatorTest,OperationalFormServiceTest,AttachmentServiceValidationTest,AttachmentControllerTest' test` — 31 passed, 0 failed, 0 errors, 0 skipped.
+- Frontend: `cd frontend && find src -name '*.test.mjs' -print0 | xargs -0 node --test` — 71 passed, 0 failed, 0 skipped. Node emitted existing module-type warnings.
+- `cd frontend && pnpm exec tsc --noEmit --incremental false` — passed.
+- `cd frontend && pnpm lint` — passed with 2 warnings elsewhere: unused `reportFormFiles` in `loginhome/page.tsx`, and `<img>` usage in `AttachmentPreviewDialog.tsx`.
+- `NEXT_PUBLIC_API_BASE_URL=https://localhost:8080/api/v1 pnpm exec next build --webpack` — passed.
+- Default Turbopack build was attempted with the API URL configured but could not start a helper process because the sandbox denied port binding. An initial unconfigured build also correctly stopped because `NEXT_PUBLIC_API_BASE_URL` is required.
+- `git diff --check` — passed.
+- PostgreSQL migration/integration tests were not run: no disposable PostgreSQL target was configured. V70 has not been applied to any database. Reverse-proxy/gateway request limits and ClamAV deployment behavior were not verified in this code-only run.
