@@ -5,11 +5,15 @@ import com.ecabin.ledger.security.Permission;
 import com.ecabin.ledger.security.PermissionService;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.io.IOException;
+import java.io.OutputStream;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.UUID;
 import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -19,6 +23,7 @@ import org.springframework.dao.DataAccessException;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.annotation.Isolation;
 import org.springframework.web.server.ResponseStatusException;
 import org.springframework.http.HttpStatus;
 
@@ -37,6 +42,16 @@ public class UserLoginMonitoringService {
 
     private static final Set<String> ACTIVITY_FILTERS = Set.of("ALL", "RECENT", "INACTIVE_30", "NEVER");
     private static final Set<String> STATUS_FILTERS = Set.of("ACTIVE", "INACTIVE", "ALL");
+    private static final int EXPORT_PAGE_SIZE = 100;
+    private static final long MAX_EXPORT_ROWS = 10_000;
+    private static final List<ExportColumn> USER_EXPORT_COLUMNS = List.of(
+        new ExportColumn("displayName", "User name"), new ExportColumn("externalUserId", "Enterprise identity"),
+        new ExportColumn("role", "Application role"), new ExportColumn("membershipStatus", "Membership"),
+        new ExportColumn("lastLoginAt", "Last successful login"), new ExportColumn("lastLogoutAt", "Last recorded logout"),
+        new ExportColumn("daysSinceLogin", "Days since login"), new ExportColumn("inactivityStatus", "Classification"));
+    private static final List<ExportColumn> EVENT_EXPORT_COLUMNS = List.of(
+        new ExportColumn("eventType", "Event"), new ExportColumn("occurredAt", "Time"),
+        new ExportColumn("authenticationSource", "Source"), new ExportColumn("requestId", "Request"));
     private final JdbcTemplate jdbc;
     private final PermissionService permissions;
     private final Clock clock;
@@ -146,7 +161,7 @@ public class UserLoginMonitoringService {
         List<UserActivity> rows = jdbc.query("""
             SELECT m.external_user_id,m.display_name,m.role,m.isactive,m.last_login_at,ev.last_logout_at,ev.last_activity_at,
                    CASE WHEN m.last_login_at IS NULL THEN NULL ELSE floor(extract(epoch FROM (?::timestamptz-m.last_login_at))/86400)::bigint END AS days_since_login
-              FROM """ + from + where + " ORDER BY " + sort + " " + direction + " NULLS LAST,m.external_user_id ASC LIMIT ? OFFSET ?",
+              FROM """ + " " + from + where + " ORDER BY " + sort + " " + direction + " NULLS LAST,m.external_user_id ASC LIMIT ? OFFSET ?",
             userRowMapper(now), rowArgs.toArray());
         long count = total == null ? 0 : total;
         return new UserPage(rows, page, size, count, Math.max(1, (int) Math.ceil((double) count / size)));
@@ -168,6 +183,78 @@ public class UserLoginMonitoringService {
         long count = total == null ? 0 : total;
         return new EventPage(rows, page, size, count, Math.max(1, (int) Math.ceil((double) count / size)));
     }
+
+    /** Exports all matching tenant memberships, not only the currently visible page. */
+    @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
+    public void exportUsers(AuthenticatedUser actor, String search, String status, String activity,
+            String sortBy, String sortDirection, List<String> requestedColumns, OutputStream output) throws IOException {
+        List<ExportColumn> columns = resolveExportColumns(USER_EXPORT_COLUMNS, requestedColumns);
+        UserPage first = users(actor, 0, EXPORT_PAGE_SIZE, search, status, activity, sortBy, sortDirection);
+        enforceExportLimit(first.totalElements());
+        XlsxStreamWriter writer = new XlsxStreamWriter(output, columns.stream().map(ExportColumn::label).toList(), first.totalElements());
+        for (int page = 0; page < first.totalPages(); page++) {
+            UserPage current = page == 0 ? first : users(actor, page, EXPORT_PAGE_SIZE, search, status, activity, sortBy, sortDirection);
+            for (UserActivity item : current.items()) writer.writeRow(columns.stream().map(column -> userValue(item, column.key())).toList());
+        }
+        writer.finish();
+    }
+
+    /** Exports the complete event history for one membership, restricted to the authenticated tenant. */
+    @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
+    public void exportEvents(AuthenticatedUser actor, String externalUserId, OutputStream output) throws IOException {
+        List<ExportColumn> columns = EVENT_EXPORT_COLUMNS;
+        EventPage first = events(actor, externalUserId, 0, EXPORT_PAGE_SIZE);
+        enforceExportLimit(first.totalElements());
+        XlsxStreamWriter writer = new XlsxStreamWriter(output, columns.stream().map(ExportColumn::label).toList(), first.totalElements());
+        for (int page = 0; page < first.totalPages(); page++) {
+            EventPage current = page == 0 ? first : events(actor, externalUserId, page, EXPORT_PAGE_SIZE);
+            for (LoginEvent item : current.items()) writer.writeRow(List.of(
+                item.eventType().equals("LOGIN") ? "Successful login" : "Explicit application logout",
+                value(item.occurredAt()), value(item.authenticationSource()), value(item.requestId())));
+        }
+        writer.finish();
+    }
+
+    private List<ExportColumn> resolveExportColumns(List<ExportColumn> available, List<String> requested) {
+        if (requested == null) return available;
+        LinkedHashSet<String> unique = new LinkedHashSet<>(requested);
+        if (unique.isEmpty()) throw new IllegalArgumentException("Select at least one visible data column to export.");
+        List<ExportColumn> columns = new ArrayList<>(unique.size());
+        for (String key : unique) columns.add(available.stream().filter(column -> column.key().equals(key)).findFirst()
+            .orElseThrow(() -> new IllegalArgumentException("This login monitoring column cannot be exported.")));
+        return List.copyOf(columns);
+    }
+
+    private void enforceExportLimit(long rows) {
+        if (rows > MAX_EXPORT_ROWS) throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE,
+            "This export exceeds the 10,000 row limit. Narrow the filters and try again.");
+    }
+
+    private String userValue(UserActivity item, String key) {
+        return switch (key) {
+            case "displayName" -> item.displayName();
+            case "externalUserId" -> item.externalUserId();
+            case "role" -> item.role();
+            case "membershipStatus" -> item.membershipStatus() == 1 ? "Active" : "Inactive";
+            case "lastLoginAt" -> value(item.lastLoginAt());
+            case "lastLogoutAt" -> value(item.lastLogoutAt());
+            case "daysSinceLogin" -> item.daysSinceLogin() == null ? "" : item.daysSinceLogin().toString();
+            case "inactivityStatus" -> inactivityLabel(item.inactivityStatus());
+            default -> throw new IllegalArgumentException("This login monitoring column cannot be exported.");
+        };
+    }
+
+    private String inactivityLabel(String value) {
+        return switch (value) {
+            case "NEVER_LOGGED_IN" -> "NA";
+            case "ACTIVE_RECENTLY" -> "Active";
+            default -> "Inactive 30+ days";
+        };
+    }
+
+    private static String value(Object value) { return value == null ? "" : value.toString(); }
+
+    private record ExportColumn(String key, String label) {}
 
     private void requireAdmin(AuthenticatedUser actor) {
         if (actor == null) throw new AccessDeniedException("An active authenticated user is required.");

@@ -160,7 +160,7 @@ export default function AircraftRegistrationSelect({
       <span aria-hidden="true" className="shrink-0">{open ? "▴" : "▾"}</span>
     </button>
 
-    {open && <div className="absolute left-0 right-0 top-full z-30 mt-1 overflow-hidden rounded-lg border border-[#cfd8e3] bg-white shadow-[0_12px_28px_#17212f24]" role="group" aria-label={`${label} options`}>
+    {open && <div className="absolute left-0 right-0 top-full z-30 mt-1 flex max-h-64 flex-col overflow-hidden rounded-lg border border-[#cfd8e3] bg-white shadow-[0_12px_28px_#17212f24]" role="group" aria-label={`${label} options`}>
       <div className="border-b border-[#e5eaf0] p-2">
         <label className="sr-only" htmlFor={`${id}-search`}>Search aircraft registration or MSN</label>
         <input
@@ -180,7 +180,7 @@ export default function AircraftRegistrationSelect({
           className="w-full rounded-md border border-[#cfd8e3] bg-white px-3 py-2 text-sm text-[#17212f] outline-none placeholder:text-[#64748b] focus:border-[#ff6b18] focus:ring-2 focus:ring-[#ff6b1833]"
         />
       </div>
-      <ul id={listboxId} role="listbox" aria-label="Aircraft registrations" aria-busy={query.isPending || query.isFetchingNextPage} onScroll={loadMoreIfNearEnd} className="m-0 max-h-60 list-none overflow-y-auto p-1">
+      <ul id={listboxId} role="listbox" aria-label="Aircraft registrations" aria-busy={query.isPending || query.isFetchingNextPage} onScroll={loadMoreIfNearEnd} className="m-0 min-h-0 max-h-40 flex-1 list-none overflow-y-auto p-1">
         {options.map((option, index) => <li
           ref={element => { optionRefs.current[index] = element; }}
           id={`${listboxId}-option-${option.id}`}

@@ -46,12 +46,21 @@
 .app-shell .master-data-table .table-state-cell{height:180px!important;padding:16px;color:#000!important;font-size:13px}
 .app-shell .master-data-table .table-state-cell strong{font-size:14px}
 .app-shell .workflow-status-master-table .admin-data-table{min-width:1320px}
+.workflow-status-master-page{min-width:0;width:100%}
+.workflow-status-master-head{display:flex;align-items:center;justify-content:space-between;gap:14px;min-width:0;padding:18px 22px;border-bottom:1px solid #edf1f6;flex-wrap:wrap}
+.workflow-status-master-head>div{min-width:0}
+.workflow-status-master-head .role-protected-badge{max-width:100%;white-space:normal;text-align:center}
+.workflow-status-master-page .workflow-status-master-table{min-width:0;width:100%}
+.workflow-status-master-page .workflow-status-master-table .admin-data-table-wrap{box-sizing:border-box;width:100%;min-width:0;max-width:100%;overflow-x:auto;overscroll-behavior-x:contain}
+.workflow-status-master-page .workflow-status-master-table .admin-data-table{width:max-content;min-width:1320px;table-layout:auto}
 @media(max-width:700px){
   .app-shell .master-data-table .admin-table-tools{align-items:stretch;gap:9px;padding:14px}
   .app-shell .master-data-table .admin-table-search{width:100%;min-width:0}
   .app-shell .master-data-table .admin-table-actions{margin-left:0;justify-content:flex-end}
   .app-shell .master-data-table .admin-table-footer{align-items:flex-start;flex-direction:column;gap:9px;padding:12px 16px}
   .app-shell .master-data-table .admin-pagination{width:100%;justify-content:flex-start}
+  .workflow-status-master-head{align-items:flex-start;flex-direction:column;padding:16px}
+  .workflow-status-master-head .role-protected-badge{align-self:flex-start;text-align:left}
 }
 .admin-data-table thead th,.admin-data-table thead .sortable-heading{font-weight:700}
 .include-inactive{display:flex;align-items:center;gap:8px;padding:0 4px 13px;color:#000000;font-size:13px;white-space:nowrap}
@@ -219,6 +228,7 @@
 .operational-form-panel h3{margin:0 0 12px;color:#000000}
 .operational-form-panel>label,.operational-form-fields>label{color:#000000;font-size:13px;font-weight:600}
 .operational-form-panel input:not([type=checkbox]),.operational-form-panel select,.operational-form-panel textarea{width:100%;min-height:42px;border:1px solid #d7deea;border-radius:9px;background:#fff;padding:9px 11px;color:#000000}
+.operational-form-panel>label>select:not([multiple]),.operational-form-fields>label>select:not([multiple]){box-sizing:border-box;height:42px;min-height:42px;padding:0 11px}
 .operational-form-panel textarea{min-height:86px}
 
 .operational-form-fields>h4,.operational-form-fields>.configuration-field-error,.operational-form-fields>button{grid-column:1/-1}
@@ -364,7 +374,9 @@
 .login-monitoring-table { min-width: 0; }
 .login-monitoring-filters {}
 .login-monitoring-filters label { color: var(--muted, #000000); font-size: .78rem; }
-.login-monitoring-filters select { min-width: 170px; }
+.login-monitoring-filters select { box-sizing: border-box; height: 40px; min-width: 170px; padding: 0 10px; border: 1px solid #d5dce7; border-radius: 9px; background: #fff; color: #000; font: 500 13px var(--sans); }
+.login-monitoring-filters select:focus-visible { outline: 3px solid #3176e8; outline-offset: 2px; }
+.login-monitoring-table .admin-data-table td:last-child .button-secondary { min-height: 34px; white-space: nowrap; }
 .login-user-cell { display: grid; gap: 3px; min-width: 150px; }
 .login-user-cell small { color: var(--muted, #000000); overflow-wrap: anywhere; }
 .login-never-badge { color: #6e6251; background: #f5f0e7; border-radius: 999px; padding: 4px 9px; white-space: nowrap; }
@@ -372,11 +384,16 @@
 .login-monitoring-note { border: 1px solid var(--line, #e1e8e3); border-radius: 14px; color: var(--muted, #000000); background: var(--surface, #fff); }
 .login-monitoring-note strong { color: var(--ink, #000000); }
 .login-monitoring-note p { margin: 8px 0 0; }
-.login-history-modal { width: min(900px, calc(100vw - 32px)); max-height: min(85vh, 900px); overflow: auto; }
+.login-history-modal { display: flex; width: min(900px, calc(100vw - 32px)); max-height: min(85dvh, 900px); min-height: 0; gap: 0; overflow: hidden; }
+.login-history-modal > .modal-heading { padding-bottom: 14px; border-bottom: 1px solid #edf1f6; }
 .login-history-modal .modal-heading p { margin: 5px 0 0; color: var(--muted, #000000); overflow-wrap: anywhere; }
-.login-history-modal .admin-pagination { margin-top: 14px; }
+.login-history-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: -4px 0 12px; padding: 10px 12px; border: 1px solid #edf1f6; border-radius: 9px; background: #f8fafc; color: #526173; font-size: 12px; }
+.login-history-modal .login-history-events { min-height: 0; max-height: min(52dvh, 560px); overflow: auto; border: 1px solid #edf1f6; border-radius: 10px; }
+.login-history-modal .login-history-events .admin-data-table { min-width: 660px; }
+.login-history-footer { display: flex; flex: none; align-items: center; justify-content: space-between; gap: 12px; margin-top: 14px; padding-top: 12px; border-top: 1px solid #edf1f6; }
+.login-history-footer .admin-pagination { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 
-@media (max-width: 540px) { .login-monitoring-filters label, .login-monitoring-filters select { width: 100%; } .login-monitoring-alert { align-items: flex-start; flex-direction: column; } .login-history-modal { width: calc(100vw - 20px); } }
+@media (max-width: 540px) { .login-monitoring-filters label, .login-monitoring-filters select { width: 100%; } .login-monitoring-alert { align-items: flex-start; flex-direction: column; } .login-history-modal { width: calc(100vw - 20px); max-height: calc(100dvh - 24px); padding: 18px; } .login-history-modal .login-history-events { max-height: 48dvh; } .login-history-footer { align-items: flex-end; flex-direction: column; } .login-history-footer>button { align-self: flex-end; } }
 
 /* Data tables share a horizontal scroll container. Let content wrap within its own cell. */
 .admin-data-table{width:100%;table-layout:auto}

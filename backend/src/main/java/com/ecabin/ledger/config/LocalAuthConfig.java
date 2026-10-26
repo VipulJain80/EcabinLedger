@@ -59,7 +59,7 @@ public class LocalAuthConfig {
             ? OAuth2TokenValidatorResult.success()
             : OAuth2TokenValidatorResult.failure(new OAuth2Error("invalid_token", "Required API audience is missing.", null));
         decoder.setJwtValidator(new DelegatingOAuth2TokenValidator<>(
-            JwtValidators.createDefaultWithIssuer(ISSUER), audienceValidator));
+            JwtValidators.createDefaultWithIssuer(ISSUER), audienceValidator, new MaximumJwtLifetimeValidator()));
         return decoder;
     }
 }

@@ -20,6 +20,10 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.UUID;
 import java.util.List;
+import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.zip.ZipInputStream;
+import java.io.ByteArrayInputStream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.RowMapper;
@@ -87,6 +91,8 @@ class UserLoginMonitoringServiceTest {
         assertEquals(0, page.totalElements());
         var sql = org.mockito.ArgumentCaptor.forClass(String.class);
         verify(jdbc).query(sql.capture(), org.mockito.ArgumentMatchers.<RowMapper<UserLoginMonitoringService.UserActivity>>any(), any(Object[].class));
+        assertTrue(sql.getValue().contains("FROM operator_memberships_mst m LEFT JOIN LATERAL"));
+        assertTrue(!sql.getValue().contains("FROMoperator_memberships_mst"));
         assertTrue(sql.getValue().contains("WHERE m.operator_id=? AND m.isactive=1"));
         assertTrue(sql.getValue().contains("POSITION(LOWER(?) IN LOWER(m.display_name))"));
         assertTrue(sql.getValue().contains("m.last_login_at <= ?"));
@@ -99,5 +105,48 @@ class UserLoginMonitoringServiceTest {
         assertThrows(org.springframework.web.server.ResponseStatusException.class, () -> service.events(admin, "other@example.test", 0, 25));
 
         verify(jdbc, never()).query(anyString(), org.mockito.ArgumentMatchers.<RowMapper<UserLoginMonitoringService.LoginEvent>>any(), any(Object[].class));
+    }
+
+    @Test void exportsTenantScopedLoginActivityAsAnXlsxWorkbook() throws Exception {
+        when(jdbc.queryForObject(anyString(), eq(Long.class), any(Object[].class))).thenReturn(0L);
+        when(jdbc.query(anyString(), org.mockito.ArgumentMatchers.<RowMapper<UserLoginMonitoringService.UserActivity>>any(), any(Object[].class))).thenReturn(List.of());
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+
+        service.exportUsers(admin, "pilot", "ACTIVE", "ALL", "lastLoginAt", "DESC", List.of("displayName", "role"), output);
+
+        String worksheet = firstWorksheet(output.toByteArray());
+        assertTrue(worksheet.contains("User name"));
+        assertTrue(worksheet.contains("Application role"));
+        verify(permissions).require(admin, Permission.ADMINISTER_ORGANIZATION);
+        verify(jdbc).queryForObject(org.mockito.ArgumentMatchers.contains("WHERE m.operator_id=? AND m.isactive=1"), eq(Long.class), any(Object[].class));
+    }
+
+    @Test void exportsCompleteMembershipEventHistoryWithTenantScopedMembershipLookup() throws Exception {
+        when(jdbc.queryForObject(startsWith("SELECT EXISTS"), eq(Boolean.class), eq(tenantId), eq("member@example.test"))).thenReturn(true);
+        when(jdbc.queryForObject(startsWith("SELECT count(*) FROM user_login_events_dtl"), eq(Long.class), eq(tenantId), eq("member@example.test"))).thenReturn(0L);
+        when(jdbc.query(anyString(), org.mockito.ArgumentMatchers.<RowMapper<UserLoginMonitoringService.LoginEvent>>any(), any(Object[].class))).thenReturn(List.of());
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+
+        service.exportEvents(admin, "member@example.test", output);
+
+        String worksheet = firstWorksheet(output.toByteArray());
+        assertTrue(worksheet.contains("Event"));
+        assertTrue(worksheet.contains("Source"));
+        verify(jdbc).queryForObject(startsWith("SELECT EXISTS"), eq(Boolean.class), eq(tenantId), eq("member@example.test"));
+    }
+
+    @Test void exportRejectsUnapprovedColumnNames() {
+        assertThrows(IllegalArgumentException.class, () -> service.exportUsers(admin, null, "ACTIVE", "ALL", "lastLoginAt", "DESC", List.of("operator_id"), new ByteArrayOutputStream()));
+        verifyNoLoginQueries();
+    }
+
+    private void verifyNoLoginQueries() { org.mockito.Mockito.verifyNoInteractions(jdbc); }
+
+    private String firstWorksheet(byte[] workbook) throws Exception {
+        try (ZipInputStream zip = new ZipInputStream(new ByteArrayInputStream(workbook), StandardCharsets.UTF_8)) {
+            java.util.zip.ZipEntry entry;
+            while ((entry = zip.getNextEntry()) != null) if (entry.getName().equals("xl/worksheets/sheet1.xml")) return new String(zip.readAllBytes(), StandardCharsets.UTF_8);
+        }
+        throw new AssertionError("XLSX worksheet was not written.");
     }
 }

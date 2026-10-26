@@ -24,8 +24,15 @@ test("multi-select toggles preserve order and unrelated selected values", () => 
 
 test("searchable controls keep inline search, scrollable options, and keyboard dismissal/selection", async () => {
   const source = await readFile(new URL("./SearchableSelect.tsx", import.meta.url), "utf8");
+  const renderer = await readFile(new URL("../forms/OperationalFormRenderer.tsx", import.meta.url), "utf8");
+  const aircraft = await readFile(new URL("../forms/AircraftRegistrationSelect.tsx", import.meta.url), "utf8");
   assert.match(source, /type="search"/);
-  assert.match(source, /max-h-60 overflow-y-auto/);
+  assert.match(source, /flex max-h-64 flex-col/);
+  assert.match(source, /max-h-40 flex-1 list-none overflow-y-auto/);
+  assert.match(source, /h-\[42px\] min-h-\[42px\]/);
+  assert.match(renderer, /field\.type === "MULTI_SELECT" \|\| \(field\.type === "DROPDOWN"/);
+  assert.match(aircraft, /flex max-h-64 flex-col/);
+  assert.match(aircraft, /max-h-40 flex-1 list-none overflow-y-auto/);
   assert.match(source, /role="listbox"/);
   assert.match(source, /event\.key === "Escape"/);
   assert.match(source, /event\.key === "Enter" && activeOption/);

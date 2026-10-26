@@ -94,6 +94,79 @@ Verification executed:
 - `cd frontend && node --experimental-strip-types --test src/common/forms/*.test.mjs src/common/fleet/*.test.mjs src/common/dialogs/*.test.mjs` — passed: 22 tests, 0 failures.
 - `git diff --check` — passed.
 
+2026-10-26 — Add fixed token lifetime and inactivity logout
+
+The local demo issuer now issues 30-minute JWTs. Both the enterprise and local JWT decoders require `iat` and `exp`, reject tokens whose declared lifetime exceeds 30 minutes, and reject tokens at their exact expiration or 30-minute age on every authenticated request. The authenticated frontend shell signs users out after 10 minutes without mouse, pointer/click, keyboard, scroll, or touch activity; interaction never changes the token deadline. Idle activity and logout signals are shared between tabs, the current token is cached rather than refreshed by the app, and 401 responses clear the client session and redirect to login with a reason notice.
+
+Files changed for this feature:
+- `backend/src/main/java/com/ecabin/ledger/api/LocalDevAuthController.java` — issue local demo tokens for 30 minutes.
+- `backend/src/main/java/com/ecabin/ledger/config/MaximumJwtLifetimeValidator.java` — enforce `iat`, `exp`, and the strict 30-minute maximum.
+- `backend/src/main/java/com/ecabin/ledger/config/LocalAuthConfig.java` — apply maximum lifetime validation to local-auth tokens.
+- `backend/src/main/java/com/ecabin/ledger/config/SecurityConfig.java` — apply maximum lifetime validation to enterprise JWTs.
+- `backend/src/test/java/com/ecabin/ledger/api/LocalDevAuthControllerTest.java` — verify local token lifetime.
+- `backend/src/test/java/com/ecabin/ledger/config/MaximumJwtLifetimeValidatorTest.java` — cover exact expiration, maximum lifetime, and missing claims.
+- `frontend/src/common/auth/localSession.ts` — cache the gateway token for the loaded app, block a signed-out token locally, and synchronize logout notices.
+- `frontend/src/common/auth/SessionTimeout.tsx` — enforce inactivity and token deadlines, including browser resume and other-tab events.
+- `frontend/src/common/auth/sessionTimeoutModel.mjs` — compute safe token deadlines and expiration reasons.
+- `frontend/src/common/auth/sessionTimeoutModel.d.mts` — type the timeout model.
+- `frontend/src/common/auth/sessionTimeoutModel.test.mjs` — verify expiry, inactivity, malformed tokens, and tab/activity event wiring.
+- `frontend/src/app/login/page.tsx` — show session-ended notices and respect blocked tokens.
+- `frontend/src/app/loginhome/page.tsx` — mount the session timer and handle API 401 responses centrally.
+- `frontend/src/app/logout/page.tsx` — record explicit logout before synchronizing client cleanup.
+- `README.md` — document the 30-minute token contract, inactivity policy, and gateway integration requirement.
+- `updatesfiles.me` — record this implementation.
+
+Verification:
+- `mvn -f backend/pom.xml '-Dtest=LocalDevAuthControllerTest,MaximumJwtLifetimeValidatorTest' test` — 8 passed, 0 failed, 0 errors, 0 skipped.
+- `cd frontend && node --test src/common/auth/sessionTimeoutModel.test.mjs src/common/tables/tableLayout.test.mjs` — 11 passed, 0 failed, 0 skipped.
+- `cd frontend && pnpm exec tsc --noEmit --incremental false` — passed after the concurrent build completed. An earlier concurrent type-check saw `.next/types` being regenerated and failed with missing generated-file paths; the rerun passed.
+- `cd frontend && pnpm lint` — passed with 2 existing warnings in `loginhome/page.tsx` and `AttachmentPreviewDialog.tsx`.
+- `NEXT_PUBLIC_API_BASE_URL=https://localhost:8080/api/v1 pnpm exec next build --webpack` — passed.
+- `git diff --check` — passed.
+- PostgreSQL integration tests were not needed or run for this code-only authentication change.
+
+2026-10-26 — Improve User Login Monitoring filters and history dialog
+
+The Membership and Login activity dropdowns now use the same 40px height, border, radius, and focus treatment as the Rows selector. The View history action stays on one line. The event history dialog now includes the shared modal surface and keeps its event table scrollable within the dialog, with pagination and close actions retained.
+
+Files changed:
+- `frontend/src/app/configuration.css` — style the two filters and scope the history dialog/table layout to Login Monitoring.
+- `frontend/src/common/configuration/UserLoginMonitoringPage.tsx` — apply the shared modal class to the history dialog and scope its event table container.
+- `frontend/src/common/tables/tableLayout.test.mjs` — add regression checks for the filter styling, action button wrapping, and modal surface.
+- `updatesfiles.me` — record this UI fix.
+
+Verification:
+- `cd frontend && node --test src/common/tables/tableLayout.test.mjs` — 6 passed, 0 failed, 0 skipped.
+- `cd frontend && find src -name '*.test.mjs' -print0 | xargs -0 node --test` — 72 passed, 0 failed, 0 skipped; Node emitted existing module-type warnings.
+- `cd frontend && pnpm lint` — passed with 2 existing warnings in `loginhome/page.tsx` and `AttachmentPreviewDialog.tsx`.
+- `git diff --check` — passed.
+- `cd frontend && pnpm exec tsc --noEmit --incremental false` — passed.
+
+2026-10-26 — Constrain form dropdown height and add login monitoring Excel exports
+
+Aircraft and searchable form dropdowns now keep a 42px closed control and a bounded, scrollable options panel. Configured multi-select fields use the compact searchable panel so their controls do not grow vertically with the option count. User Login Monitoring no longer shows Membership or Login activity captions; accessible labels remain on both selectors. The membership table and each member's complete login/logout history now have Excel export actions. Exports are tenant-scoped, generated with the existing XLSX writer, validate requested columns, and stop above 10,000 rows before a download response begins. The history dialog has a clearer summary/export toolbar and aligned paging/close footer.
+
+Files changed:
+- `frontend/src/common/forms/AircraftRegistrationSelect.tsx` — bound the aircraft option panel height while retaining infinite scroll.
+- `frontend/src/common/forms/OperationalFormRenderer.tsx` — render configured multi-select fields using the compact searchable dropdown.
+- `frontend/src/common/selects/SearchableSelect.tsx` — standardize searchable control height to 42px and cap the complete option panel.
+- `frontend/src/common/configuration/UserLoginMonitoringPage.tsx` — remove visible filter captions, add full-result exports, and improve event-history modal layout.
+- `frontend/src/app/configuration.css` — set configured native dropdowns to 42px and style Login Monitoring exports/dialog.
+- `backend/src/main/java/com/ecabin/ledger/api/UserLoginMonitoringController.java` — add organization-admin protected XLSX routes for matching users and membership history, returning proper errors before download starts.
+- `backend/src/main/java/com/ecabin/ledger/service/UserLoginMonitoringService.java` — stream tenant-scoped, validated exports with a 10,000-row ceiling.
+- `backend/src/test/java/com/ecabin/ledger/service/UserLoginMonitoringServiceTest.java` — verify XLSX output, tenant-scoped history, and column allowlisting.
+- `frontend/src/common/selects/searchableDropdownModel.test.mjs` — protect 42px controls and bounded scroll panels.
+- `frontend/src/common/tables/tableLayout.test.mjs` — protect accessible unlabeled filter controls, modal layout, and export wiring.
+- `updatesfiles.me` — record this change.
+
+Verification:
+- `mvn -f backend/pom.xml '-Dtest=UserLoginMonitoringServiceTest' test` — 10 passed, 0 failed, 0 errors, 0 skipped.
+- `cd frontend && find src -name '*.test.mjs' -print0 | xargs -0 node --test` — 72 passed, 0 failed, 0 skipped; Node emitted existing module-type warnings.
+- `cd frontend && pnpm exec tsc --noEmit --incremental false` — passed.
+- `cd frontend && pnpm lint` — passed with 2 existing warnings in `loginhome/page.tsx` and `AttachmentPreviewDialog.tsx`.
+- `cd frontend && NEXT_PUBLIC_API_BASE_URL=https://localhost:8080/api/v1 pnpm exec next build --webpack` — passed.
+- `git diff --check` — passed.
+
 2026-10-24 — Isolate role visibility on the aircraft-specific Defect List
 
 The Defect List opened after selecting an aircraft now shows only the authenticated Auditor's own reported defects, while Reviewer, Maintenance, organization-administrator, and explicit tenant-wide defect readers see all defects for that aircraft in their own tenant. The aircraft context request also no longer requires a Reviewer-team routed defect, so it does not prevent the target list from loading. The existing `/api/v1/defects` Log Book route keeps its prior scope flags. Defect Summary fleet endpoints and report-query/Register APIs were not changed. No frontend file was needed because the page already calls the dedicated aircraft-specific endpoints.
@@ -2609,3 +2682,46 @@ Verification:
 - Default Turbopack build was attempted with the API URL configured but could not start a helper process because the sandbox denied port binding. An initial unconfigured build also correctly stopped because `NEXT_PUBLIC_API_BASE_URL` is required.
 - `git diff --check` — passed.
 - PostgreSQL migration/integration tests were not run: no disposable PostgreSQL target was configured. V70 has not been applied to any database. Reverse-proxy/gateway request limits and ClamAV deployment behavior were not verified in this code-only run.
+
+2026-10-26 — Fix User Login Monitoring users query SQL spacing
+
+The backend log showed PostgreSQL rejecting the users-page query because Java text-block trailing whitespace was stripped, concatenating `FROM` with `operator_memberships_mst` as `FROMoperator_memberships_mst`. Added an explicit separator before the shared FROM/JOIN fragment. Added a regression assertion for the generated query text. No database changes or migrations are needed.
+
+Files changed:
+- `backend/src/main/java/com/ecabin/ledger/service/UserLoginMonitoringService.java` — ensure the paginated users query has whitespace between `FROM` and the membership table.
+- `backend/src/test/java/com/ecabin/ledger/service/UserLoginMonitoringServiceTest.java` — assert the generated SQL contains the correct `FROM operator_memberships_mst` token and never the concatenated form.
+- `updatesfiles.me` — record this fix.
+
+Verification:
+- `mvn -f backend/pom.xml '-Dtest=UserLoginMonitoringServiceTest' test` — 7 passed, 0 failed, 0 errors, 0 skipped.
+- `git diff --check` — passed.
+- Restart the backend to load the corrected query; no Flyway migration is required.
+
+2026-10-26 — Correct Workflow Status Master header and table overflow
+
+The Workflow Status Master card header now has consistent inner spacing and aligns its module label/title with the code-controlled rules badge. At narrow widths, the badge wraps cleanly. The wide status table is constrained to the card and scrolls horizontally inside its own table region instead of distorting the page. The CSS is scoped to Workflow Status Master; DataTable and other administration tables are unchanged.
+
+Files changed:
+- `frontend/src/common/configuration/WorkflowStatusMasterPage.tsx` — add page/header scope classes.
+- `frontend/src/app/configuration.css` — style the header and contain wide-table overflow at desktop and mobile widths.
+- `frontend/src/common/tables/tableLayout.test.mjs` — protect the scoped header and scrolling rules.
+- `updatesfiles.me` — record this fix.
+
+Verification:
+- `cd frontend && node --test src/common/tables/tableLayout.test.mjs` — 5 passed, 0 failed, 0 skipped.
+- `cd frontend && pnpm lint` — passed with 2 existing warnings in `loginhome/page.tsx` and `AttachmentPreviewDialog.tsx`.
+- `cd frontend && pnpm exec tsc --noEmit --incremental false` — passed.
+- `git diff --check` — passed.
+
+2026-10-26 — Add Workflow Status Master to the menu section choices
+
+The Master Data menu-item form now offers `workflow-statuses` as an Application section key. Configuration already allowed and dispatched this route to Workflow Status Master, but the frontend's hard-coded selection list omitted it. This makes the existing page selectable when adding a menu item; it does not create a menu record or change its permissions.
+
+Files changed:
+- `frontend/src/app/configuration.tsx` — add the supported route key to the menu-item section choices.
+- `frontend/src/common/tables/tableLayout.test.mjs` — verify the option exists and remains connected to the existing Workflow Status Master dispatch.
+- `updatesfiles.me` — record this fix.
+
+Verification:
+- `cd frontend && node --test src/common/tables/tableLayout.test.mjs` — 6 passed, 0 failed, 0 skipped.
+- `git diff --check` — passed.

@@ -69,10 +69,10 @@ export default function WorkflowStatusMasterPage({ request }: { request: Request
     { id: "actions", header: "Actions", enableSorting: false, enableHiding: false, cell: ({ row }) => <button type="button" className="button-secondary" onClick={() => openEdit(row.original)}>Edit metadata</button> },
   ], []);
 
-  return <div className="content configuration-content">
+  return <div className="content configuration-content workflow-status-master-page">
     <div className="heading"><div><h1>Workflow Status Master</h1></div></div>
     <section className="configuration-table-card">
-      <div className="configuration-table-head"><div><div className="eyebrow">DEFECT MODULE</div><h2>Status definitions</h2></div><span className="role-protected-badge">Workflow rules remain code controlled</span></div>
+      <div className="configuration-table-head workflow-status-master-head"><div><div className="eyebrow">DEFECT MODULE</div><h2>Status definitions</h2></div><span className="role-protected-badge">Workflow rules remain code controlled</span></div>
       <DataTable<WorkflowStatus> className="master-data-table workflow-status-master-table" columns={columns} data={query.data?.items || []} total={query.data?.totalElements || 0} page={page} pageSize={pageSize} sorting={sorting} search={search} loading={query.isPending || query.isFetching} error={query.isError} errorMessage={query.error instanceof Error ? query.error.message : "Could not load workflow statuses."} onPageChange={setPage} onPageSizeChange={(size) => { setPageSize(size); setPage(0); }} onSortingChange={(next) => setSorting(next)} onSearchChange={(value) => { setSearch(value); setPage(0); }} onRetry={() => void query.refetch()} onExport={() => undefined} exporting={false} exportable={false} selectable={false} />
     </section>
     {editing && <DialogPortal onClose={() => { if (!saving) setEditing(null); }} closeOnEscape={!saving} labelledBy="workflow-status-edit-title" className="modal master-form-modal"><div className="modal-heading flex items-start justify-between"><div><div className="eyebrow">{editing.moduleCode} · {editing.statusCode}</div><h2 id="workflow-status-edit-title">Edit status metadata</h2><p>The status code is stable and cannot be changed.</p></div><button type="button" className="close" onClick={() => setEditing(null)} disabled={saving} aria-label="Close">×</button></div>

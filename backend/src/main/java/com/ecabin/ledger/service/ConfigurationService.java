@@ -64,7 +64,7 @@ public class ConfigurationService {
 
     private static final Set<String> PERMISSIONS = java.util.Arrays.stream(Permission.values()).map(Enum::name).collect(java.util.stream.Collectors.toUnmodifiableSet());
     private static final Set<String> DEFECT_VIEW_ALL_NAVIGATION_ROUTES = Set.of("home", "operations", "defects");
-    private static final Set<String> NAVIGATION_ROUTE_KEYS = Set.of("home","operations","reports","audit","configuration","defects","fleet","quality","organizations","fleets","aircraft","areas","defect-categories","defect-conditions","components","maintenance-teams","reviewer-routing","area-team-mapping","maintenance-sla-policies","review-queue","users","menu-items","roles","severities","permissions","role-permissions","api-rate-limits","user-login-monitoring","report-defect","report-master","email-notifications");
+    private static final Set<String> NAVIGATION_ROUTE_KEYS = Set.of("home","operations","reports","audit","configuration","defects","fleet","quality","organizations","fleets","aircraft","areas","defect-categories","defect-conditions","components","maintenance-teams","reviewer-routing","area-team-mapping","maintenance-sla-policies","review-queue","users","menu-items","roles","severities","permissions","role-permissions","api-rate-limits","user-login-monitoring","report-defect","report-master","email-notifications","workflow-statuses");
     private final JdbcTemplate jdbc;
     private final ObjectMapper mapper;
 

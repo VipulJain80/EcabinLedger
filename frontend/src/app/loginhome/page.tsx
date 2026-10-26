@@ -23,7 +23,8 @@ import ApiRateLimitsPage from "@/common/configuration/ApiRateLimitsPage";
 import UserLoginMonitoringPage from "@/common/configuration/UserLoginMonitoringPage";
 import { alert, responseErrorMessage } from "@/common/alerts";
 import { hasPermission } from "@/common/rbac/permissions";
-import { applicationBasePath, clearLocalSession, getApplicationAccessToken, getLocalSession } from "@/common/auth/localSession";
+import { applicationBasePath, endApplicationSession, getApplicationAccessToken, getLocalSession } from "@/common/auth/localSession";
+import SessionTimeout from "@/common/auth/SessionTimeout";
 import { formatDateTime } from "@/common/dateTime";
 import { useDefectWorkflowStatuses, workflowStatusLabel, WorkflowStatusBadge, SeverityBadge } from "@/common/workflow/workflowStatuses";
 
@@ -62,7 +63,12 @@ async function apiFetch(path: string, init: RequestInit = {}) {
   const token = await getApplicationAccessToken();
   const headers = new Headers(init.headers);
   if (token) headers.set("Authorization", `Bearer ${token}`);
-  return fetch(path, { ...init, headers, credentials: "omit", cache: "no-store" });
+  const response = await fetch(path, { ...init, headers, credentials: "omit", cache: "no-store" });
+  if (response.status === 401 && typeof window !== "undefined") {
+    await endApplicationSession(token, "expired");
+    window.location.replace(`${applicationBasePath}/login`);
+  }
+  return response;
 }
 
 async function configurationFetch(path: string, init: RequestInit = {}) {
@@ -125,7 +131,7 @@ export default function Home() {
   const [searchExecuted, setSearchExecuted] = useState(true);
   const [areaMasterOptions, setAreaMasterOptions] = useState<MasterOption[]>([]);
   const [selectedAreaId, setSelectedAreaId] = useState("");
-  const [localSessionEmail, setLocalSessionEmail] = useState<string | null>(() => getLocalSession()?.email || null);
+  const [localSessionEmail] = useState<string | null>(() => getLocalSession()?.email || null);
   const [activeSection, setActiveSection] = useState("defects");
   const currentPageLabel = navigation.flatMap((item) => [item, ...item.children]).find((item) => item.key === currentNavKey)?.label || (currentNavKey === "home" ? "Defect Summary" : "Defect LOG Book");
 
@@ -189,14 +195,9 @@ export default function Home() {
         setEvents([]);
         routeAccessChecked.current = false;
         if (expired) {
-          clearLocalSession();
-          setLocalSessionEmail(null);
-          window.location.replace(`${applicationBasePath}/login`);
           return;
         }
-        throw new Error(expired
-          ? "Your session has expired. Sign in through your organization’s enterprise access gateway."
-          : "Your account is not authorized for this organization or application page. Contact your organization administrator.");
+        throw new Error("Your account is not authorized for this organization or application page. Contact your organization administrator.");
       }
       const failedRequest = [
         { label: "Account identity", response: identityResponse },
@@ -450,6 +451,7 @@ export default function Home() {
   if (!identity) return <AccessStatePage applicationName={applicationName} loading={loading} message={authorizationError || "Access unavailable"} actionLabel={!loading ? "Try again" : undefined} onAction={!loading ? () => void load() : undefined} />;
 
   return <main className="shell app-shell block min-h-screen w-full max-w-full overflow-x-clip bg-[#eaf1ff]">
+    <SessionTimeout active={Boolean(identity)} />
     <div className="app-shell-header">
       <header className="app-topbar sticky top-0 z-[5] flex min-h-[70px] items-center gap-[clamp(14px,2vw,38px)] px-[clamp(18px,2.4vw,52px)]">
         <button type="button" className="app-logo app-logo-button" onClick={() => openNavigation({key:"home",label:"Defect Summary",icon:"⌂",section:"home",children:[]})} aria-label={`${identity.applicationName?.trim() || "eCabin Ledger"} Defect Summary`}><span>{(identity.applicationName?.trim() || "eCabin Ledger").charAt(0).toLowerCase()}</span><b>{identity.applicationName?.trim() || "eCabin Ledger"}</b></button>

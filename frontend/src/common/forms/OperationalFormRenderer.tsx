@@ -425,7 +425,7 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
         {!choices.length&&<p role="status">Loading closure decision options…</p>}
       </fieldset>;
     }
-    if ((field.type === "DROPDOWN" || field.type === "MULTI_SELECT") && shouldUseSearchableSelect(choices.length, 500)) {
+    if (field.type === "MULTI_SELECT" || (field.type === "DROPDOWN" && shouldUseSearchableSelect(choices.length, 500))) {
       const searchableOptions = choices.map(option => ({ value: option.id, label: option.label }));
       if (field.type === "MULTI_SELECT") {
         return <SearchableMultiSelect key={field.key} id={id} label={field.label} helpText={field.helpText} options={searchableOptions}

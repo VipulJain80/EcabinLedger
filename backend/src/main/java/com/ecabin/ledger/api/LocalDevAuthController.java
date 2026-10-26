@@ -28,7 +28,7 @@ import org.springframework.web.server.ResponseStatusException;
 @Profile("local-auth")
 public class LocalDevAuthController {
     private static final UUID DEMO_OPERATOR_ID = UUID.fromString("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
-    private static final long TOKEN_LIFETIME_SECONDS = 900;
+    private static final long TOKEN_LIFETIME_SECONDS = 30 * 60;
 
     private final JdbcTemplate jdbc;
     private final JwtEncoder encoder;

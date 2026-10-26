@@ -25,7 +25,7 @@ class LocalDevAuthControllerTest {
     @Test
     void issuesOnlyForTheFiveConfiguredActiveTenantIdentities() {
         StubJdbcTemplate jdbc = new StubJdbcTemplate(true);
-        JwtEncoder encoder = parameters -> new Jwt("local-demo-token", Instant.now(), Instant.now().plusSeconds(900),
+        JwtEncoder encoder = parameters -> new Jwt("local-demo-token", Instant.now(), Instant.now().plusSeconds(1800),
             Map.of("alg", "HS256"), Map.of("sub", parameters.getClaims().getSubject()));
         LocalDevAuthController controller = new LocalDevAuthController(jdbc, encoder, String.join(",", LOCAL_IDENTITIES));
 
@@ -33,7 +33,7 @@ class LocalDevAuthControllerTest {
             var response = controller.issueToken(new LocalDevAuthController.TokenRequest(email.toUpperCase()));
             assertEquals("local-demo-token", response.accessToken());
             long secondsRemaining = response.expiresAt().getEpochSecond() - Instant.now().getEpochSecond();
-            assertTrue(secondsRemaining >= 890 && secondsRemaining <= 900);
+            assertTrue(secondsRemaining >= 1790 && secondsRemaining <= 1800);
         }
         assertEquals(LOCAL_IDENTITIES, jdbc.checkedSubjects);
     }
@@ -56,7 +56,7 @@ class LocalDevAuthControllerTest {
     @Test
     void recordsLocalLoginOnlyAfterAnActiveAllowListedIdentityReceivesAToken() {
         StubJdbcTemplate jdbc = new StubJdbcTemplate(true);
-        JwtEncoder encoder = parameters -> new Jwt("local-demo-token", Instant.now(), Instant.now().plusSeconds(900),
+        JwtEncoder encoder = parameters -> new Jwt("local-demo-token", Instant.now(), Instant.now().plusSeconds(1800),
             Map.of("alg", "HS256"), Map.of("sub", parameters.getClaims().getSubject()));
         UserLoginMonitoringService monitoring = mock(UserLoginMonitoringService.class);
         LocalDevAuthController controller = new LocalDevAuthController(jdbc, encoder, monitoring, "abc@gmail.com");

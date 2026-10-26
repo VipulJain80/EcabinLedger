@@ -8,6 +8,7 @@ const dataTable = await readFile(new URL("./DataTable.tsx", import.meta.url), "u
 const registerPage = await readFile(new URL("../../app/loginhome/page.tsx", import.meta.url), "utf8");
 const aircraftDefectList = await readFile(new URL("../fleet/AircraftDefectListPage.tsx", import.meta.url), "utf8");
 const fleetStatusPage = await readFile(new URL("../fleet/FleetStatusPage.tsx", import.meta.url), "utf8");
+const loginMonitoringPage = await readFile(new URL("../configuration/UserLoginMonitoringPage.tsx", import.meta.url), "utf8");
 
 test("base register table rules are scoped instead of changing every table", () => {
   assert.match(globalsCss, /\.workspace \.register \.table-scroll table\s*\{/);
@@ -51,10 +52,34 @@ test("master tables use content-sized rows and scroll wide columns within their 
   assert.match(configurationCss, /\.app-shell \.master-data-table:not\(\.form-master-data-table\) \.admin-data-table td:last-child:has\(button\)\s*\{[^}]*min-width:\s*150px[^}]*white-space:\s*normal/s);
   assert.match(configurationCss, /\.app-shell \.master-data-table \.config-row-actions\s*\{[^}]*flex-wrap:\s*wrap[^}]*white-space:\s*normal/s);
   assert.match(configurationCss, /\.app-shell \.workflow-status-master-table \.admin-data-table\s*\{\s*min-width:\s*1320px\s*\}/);
+  assert.match(configurationCss, /\.workflow-status-master-head\s*\{[^}]*display:\s*flex[^}]*padding:\s*18px 22px/s);
+  assert.match(configurationCss, /\.workflow-status-master-page \.workflow-status-master-table \.admin-data-table-wrap\s*\{[^}]*min-width:\s*0[^}]*overflow-x:\s*auto/s);
+  assert.match(configurationCss, /\.workflow-status-master-page \.workflow-status-master-table \.admin-data-table\s*\{[^}]*width:\s*max-content[^}]*min-width:\s*1320px/s);
+  assert.match(workflowMaster, /className="configuration-table-head workflow-status-master-head"/);
   assert.match(configurationCss, /\.app-shell \.master-data-table \.admin-data-table td\s*\{[^}]*height:\s*auto[^}]*overflow-wrap:\s*anywhere/s);
   assert.match(workflowMaster, /className="master-data-table workflow-status-master-table"/);
   assert.match(formMaster, /className="master-data-table form-master-data-table"/);
   assert.match(routingMaster, /className="master-data-table" columns=\{mappingColumns\}/);
   assert.match(rateLimitsMaster, /className="configuration-table-card rate-policy-card master-data-table"/);
   assert.match(configurationPage, /className="master-data-table" columns=\{tableColumns\}/);
+  assert.match(configurationPage, /"maintenance-sla-policies",\s*"workflow-statuses",\s*"users"/);
+  assert.match(configurationPage, /activeKey === "workflow-statuses"\) return <WorkflowStatusMasterPage/);
+});
+
+test("login monitoring filters match the Rows selector and history uses the shared modal surface", () => {
+  assert.match(configurationCss, /\.login-monitoring-filters select\s*\{[^}]*height:\s*40px[^}]*border:\s*1px solid #d5dce7[^}]*border-radius:\s*9px/s);
+  assert.match(configurationCss, /\.login-monitoring-filters select:focus-visible\s*\{[^}]*outline:/s);
+  assert.match(configurationCss, /\.login-monitoring-table \.admin-data-table td:last-child \.button-secondary\s*\{[^}]*white-space:\s*nowrap/s);
+  assert.match(loginMonitoringPage, /className="modal login-history-modal"/);
+  assert.match(loginMonitoringPage, /className="table-scroll login-history-events"/);
+  assert.match(configurationCss, /\.login-history-modal \.login-history-events\s*\{[^}]*max-height:[^}]*overflow:\s*auto/s);
+  assert.match(loginMonitoringPage, /aria-label="Membership filter"/);
+  assert.match(loginMonitoringPage, /aria-label="Login activity filter"/);
+  assert.doesNotMatch(loginMonitoringPage, /<label>Membership</);
+  assert.doesNotMatch(loginMonitoringPage, /<label>Login activity</);
+  assert.match(loginMonitoringPage, /users\/export\?/);
+  assert.match(loginMonitoringPage, /events\/export/);
+  assert.match(loginMonitoringPage, /Export Excel/);
+  assert.match(configurationCss, /\.login-history-toolbar\s*\{[^}]*justify-content:\s*space-between/s);
+  assert.match(configurationCss, /\.login-history-footer\s*\{[^}]*justify-content:\s*space-between/s);
 });
