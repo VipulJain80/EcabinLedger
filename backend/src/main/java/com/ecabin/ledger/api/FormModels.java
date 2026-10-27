@@ -15,7 +15,7 @@ public final class FormModels {
     public enum FieldType { TEXT, TEXTAREA, NUMBER, DROPDOWN, MULTI_SELECT, DATE, CHECKBOX, FILE_UPLOAD, IMAGE_UPLOAD, AIRCRAFT_SELECT, SECTION }
     public enum FormPurpose { DEFECT_REPORT, REVIEW_DECISION, INSPECTION, CORRECTIVE_ACTION, VERIFICATION, CLOSURE_APPROVAL, REOPEN }
     public enum WorkflowStage { INITIAL_REPORT, REPORTED, UNDER_REVIEW, INSPECTION_REQUIRED, INSPECTION_IN_PROGRESS, INSPECTION_COMPLETE, ACTION_ASSIGNED, IN_PROGRESS, AWAITING_VERIFICATION, VERIFIED, APPROVAL_REQUIRED, CLOSED, REOPENED }
-    public enum OptionSource { DEFECT_CATEGORIES, DEFECT_SEVERITIES, GALLEY_SEVERITIES, REVIEW_DECISIONS, CLOSURE_DECISIONS, MAINTENANCE_ACTION_STATUSES, CABIN_AREAS, CABIN_ZONES, COMPONENTS, DEFECT_CONDITIONS, AIRCRAFT, FLEETS, MAINTENANCE_TEAMS }
+    public enum OptionSource { DEFECT_CATEGORIES, DEFECT_SEVERITIES, @Deprecated GALLEY_SEVERITIES, REVIEW_DECISIONS, CLOSURE_DECISIONS, MAINTENANCE_ACTION_STATUSES, CABIN_AREAS, CABIN_ZONES, COMPONENTS, DEFECT_CONDITIONS, AIRCRAFT, FLEETS, MAINTENANCE_TEAMS }
     public enum DefectFieldBinding { DEFECT_CATEGORY, COMPONENT_ID, CONDITION_ID, ZONE, ROW_NUMBER, SEAT_REFERENCE, TITLE, DESCRIPTION, REMARKS, SEVERITY, EVIDENCE_ATTACHMENTS, AIRCRAFT_ID, REVIEW_DECISION, REVIEW_MAINTENANCE_TEAM, REVIEW_REJECTION_REASON, REVIEW_REMARK, MAINTENANCE_STATUS, SLA_TARGET_DATE, MAINTENANCE_REMARK, CLOSURE_DECISION, CLOSURE_REMARK }
     public record TextRules(Integer minLength, Integer maxLength, Boolean alphaOnly, Boolean alphanumeric, String pattern) {}
     public record NumericRules(BigDecimal min, BigDecimal max, Integer precision) {}
@@ -33,18 +33,22 @@ public final class FormModels {
     public record FieldDefinition(@NotBlank @Size(max=80) String key, @NotBlank @Size(max=120) String label,
         @NotNull FieldType type, @Size(max=500) String helpText, boolean required, int order,
         TextRules textRules, NumericRules numericRules, DateRules dateRules, OptionSource optionSource,
-        OptionFilter optionFilter, FileRules fileRules, DefectFieldBinding binding, Boolean visible, Boolean readOnly, VisibilityRule visibleWhen, RequiredRule requiredWhen) {
+        OptionFilter optionFilter, FileRules fileRules, DefectFieldBinding binding, Boolean visible, Boolean readOnly, VisibilityRule visibleWhen, RequiredRule requiredWhen,
+        @Size(max=10000) String defaultValue) {
+        public FieldDefinition(String key,String label,FieldType type,String helpText,boolean required,int order,TextRules textRules,NumericRules numericRules,DateRules dateRules,OptionSource optionSource,OptionFilter optionFilter,FileRules fileRules,DefectFieldBinding binding,Boolean visible,Boolean readOnly,VisibilityRule visibleWhen,RequiredRule requiredWhen) {
+            this(key,label,type,helpText,required,order,textRules,numericRules,dateRules,optionSource,optionFilter,fileRules,binding,visible,readOnly,visibleWhen,requiredWhen,null);
+        }
         public FieldDefinition(String key,String label,FieldType type,String helpText,boolean required,int order,TextRules textRules,NumericRules numericRules,DateRules dateRules,OptionSource optionSource,OptionFilter optionFilter,FileRules fileRules,DefectFieldBinding binding,Boolean visible,Boolean readOnly,VisibilityRule visibleWhen) {
-            this(key,label,type,helpText,required,order,textRules,numericRules,dateRules,optionSource,optionFilter,fileRules,binding,visible,readOnly,visibleWhen,null);
+            this(key,label,type,helpText,required,order,textRules,numericRules,dateRules,optionSource,optionFilter,fileRules,binding,visible,readOnly,visibleWhen,null,null);
         }
         public FieldDefinition(String key,String label,FieldType type,String helpText,boolean required,int order,TextRules textRules,NumericRules numericRules,DateRules dateRules,OptionSource optionSource,OptionFilter optionFilter,FileRules fileRules,DefectFieldBinding binding,Boolean visible,Boolean readOnly) {
-            this(key,label,type,helpText,required,order,textRules,numericRules,dateRules,optionSource,optionFilter,fileRules,binding,visible,readOnly,null,null);
+            this(key,label,type,helpText,required,order,textRules,numericRules,dateRules,optionSource,optionFilter,fileRules,binding,visible,readOnly,null,null,null);
         }
         public FieldDefinition(String key,String label,FieldType type,String helpText,boolean required,int order,TextRules textRules,NumericRules numericRules,DateRules dateRules,OptionSource optionSource,OptionFilter optionFilter,FileRules fileRules) {
-            this(key,label,type,helpText,required,order,textRules,numericRules,dateRules,optionSource,optionFilter,fileRules,null,true,false,null,null);
+            this(key,label,type,helpText,required,order,textRules,numericRules,dateRules,optionSource,optionFilter,fileRules,null,true,false,null,null,null);
         }
         public FieldDefinition(String key,String label,FieldType type,String helpText,boolean required,int order,TextRules textRules,NumericRules numericRules,DateRules dateRules,OptionSource optionSource,OptionFilter optionFilter,FileRules fileRules,DefectFieldBinding binding) {
-            this(key,label,type,helpText,required,order,textRules,numericRules,dateRules,optionSource,optionFilter,fileRules,binding,true,false,null,null);
+            this(key,label,type,helpText,required,order,textRules,numericRules,dateRules,optionSource,optionFilter,fileRules,binding,true,false,null,null,null);
         }
     }
     public record FormConfiguration(@NotNull @Size(max=100) List<@NotNull FieldDefinition> fields) {}

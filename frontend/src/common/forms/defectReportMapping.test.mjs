@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { defectReportBindingIssue, defectReportPayload, fieldIdentityMetadata } from "./defectReportMapping.ts";
+import { answersWithoutUntouchedDefaults, canonicalizeLegacySeveritySource, defectReportBindingIssue, defectReportPayload, fieldIdentityMetadata, initializeFormValues } from "./defectReportMapping.ts";
 
 const fields = [
   { key: "aircraftId", label: "Aircraft Registration", type: "AIRCRAFT_SELECT", optionSource: "AIRCRAFT", required: true, binding: "AIRCRAFT_ID" },
@@ -24,17 +24,22 @@ test("report properties map only approved configured fields and reject unbound b
   assert.throws(() => defectReportPayload([...fields, { key: "remarks", label: "Remarks", type: "TEXTAREA", required: false }], answers), /no approved database mapping/i);
 });
 
-test("missing or misconfigured mandatory backend properties block reporting", () => {
-  assert.match(defectReportBindingIssue(fields.filter(field => field.binding !== "SEVERITY")), /severity/i);
+test("Aircraft Registration is the only universally required defect-report binding", () => {
+  const flexible = fields.map(field => field.binding === "AIRCRAFT_ID" ? field : { ...field, required: false });
+  assert.equal(defectReportBindingIssue(flexible), "");
+  assert.match(defectReportBindingIssue(fields.filter(field => field.binding !== "AIRCRAFT_ID")), /Aircraft Registration/i);
+  assert.equal(defectReportBindingIssue(fields.filter(field => field.binding !== "DEFECT_CATEGORY")), "");
+  assert.equal(defectReportBindingIssue(fields.map(field => field.binding === "DEFECT_CATEGORY" ? { ...field, required: false } : field)), "");
   assert.match(defectReportBindingIssue(fields.map(field => field.binding === "CONDITION_ID" ? { ...field, optionFilter: { componentFieldKey: "wrong" } } : field)), /depend on the component/);
-  assert.throws(() => defectReportPayload(fields, { category_ref: "cat-id" }), /Complete Component/);
+  assert.throws(() => defectReportPayload(flexible.filter(field => !["COMPONENT_ID", "CONDITION_ID"].includes(field.binding)), { category_ref: "cat-id", details: "Test description", zone: "Z1", title: "Test", severity_ref: "severity-id" }), /does not collect component id.*required to create a defect/i);
 });
 
-test("a remarks-only draft reports missing bindings as publication validation for administrators", () => {
+test("a small form can omit domain bindings at publication while submission explains typed persistence requirements", () => {
   const issue = defectReportBindingIssue([{ key: "remarks", label: "Remarks", type: "TEXTAREA", required: true, binding: "REMARKS" }]);
-  assert.match(issue, /Defect category, Component, Condition, Location, Title, Description, Severity, Aircraft Registration/);
-  assert.match(issue, /add the approved fields to this draft before publishing/i);
-  assert.doesNotMatch(issue, /This published defect-report form/i);
+  assert.match(issue, /Aircraft Registration/);
+  const aircraftOnly = [fields[0]];
+  assert.equal(defectReportBindingIssue(aircraftOnly), "");
+  assert.throws(() => defectReportPayload(aircraftOnly, {}), /which is required to create a defect/i);
 });
 
 test("designer metadata describes internal key, type and required state without repeating the label", () => {
@@ -47,19 +52,49 @@ test("hidden and read-only required fields cannot bypass defect validation", () 
   assert.match(defectReportBindingIssue(fields.map(field => field.binding === "TITLE" ? { ...field, readOnly: true } : field)), /must be editable/i);
 });
 
-test("Galley Area form uses its configured fields and keeps its evidence and severity choices constrained", () => {
+test("legacy Galley report projection remains compatible without imposing evidence or area restrictions", () => {
   const galley = [
     { key: "aircraftId", label: "Aircraft Registration", type: "AIRCRAFT_SELECT", optionSource: "AIRCRAFT", required: true, binding: "AIRCRAFT_ID" },
     { key: "location", label: "Galley Number / Location", type: "TEXT", required: true, binding: "ZONE" },
     { key: "component", label: "Component", type: "DROPDOWN", optionSource: "COMPONENTS", required: true, binding: "COMPONENT_ID" },
     { key: "condition", label: "Defect Condition", type: "DROPDOWN", optionSource: "DEFECT_CONDITIONS", optionFilter: { componentFieldKey: "component" }, required: true, binding: "CONDITION_ID" },
-    { key: "severity", label: "Severity", type: "DROPDOWN", optionSource: "GALLEY_SEVERITIES", required: true, binding: "SEVERITY" },
+    { key: "severity", label: "Severity", type: "DROPDOWN", optionSource: "DEFECT_SEVERITIES", required: true, binding: "SEVERITY" },
     { key: "remarks", label: "Remarks", type: "TEXTAREA", required: false, binding: "REMARKS" },
     { key: "evidence", label: "Evidence Image Upload", type: "IMAGE_UPLOAD", required: true, binding: "EVIDENCE_ATTACHMENTS", fileRules: { extensions: ["jpg", "jpeg", "png", "webp"], mimeTypes: ["image/jpeg", "image/png", "image/webp"], minCount: 1, maxCount: 1, maxFileSizeBytes: 5242880 } },
   ];
-  assert.equal(defectReportBindingIssue(galley, "GALLEY"), "");
+  assert.equal(defectReportBindingIssue(galley), "");
+  assert.equal(defectReportBindingIssue(galley), "");
   assert.deepEqual(defectReportPayload(galley, { location: "Galley 2", component: "component-id", condition: "condition-id", severity: "severity-id", remarks: "Latch loose" }, "GALLEY"), { componentId: "component-id", conditionId: "condition-id", zone: "Galley 2", severity: "severity-id", remarks: "Latch loose" });
-  assert.match(defectReportBindingIssue(galley.filter(field => field.binding !== "EVIDENCE_ATTACHMENTS"), "GALLEY"), /Evidence image upload/);
-  assert.match(defectReportBindingIssue(galley.map(field => field.binding === "REMARKS" ? { ...field, required: true } : field), "GALLEY"), /Remarks must be optional/);
-  assert.match(defectReportBindingIssue(galley.map(field => field.binding === "SEVERITY" ? { ...field, optionSource: "DEFECT_SEVERITIES" } : field), "GALLEY"), /galley severities/i);
+  assert.equal(defectReportBindingIssue(galley.filter(field => field.binding !== "EVIDENCE_ATTACHMENTS")), "");
+  assert.equal(defectReportBindingIssue(galley.map(field => field.binding === "REMARKS" ? { ...field, required: true } : field)), "");
+  assert.match(defectReportBindingIssue(galley.map(field => field.binding === "SEVERITY" ? { ...field, type: "TEXT" } : field)), /incompatible type/i);
+});
+
+test("legacy severity source remains readable and is normalized for edited configurations", () => {
+  const legacy = fields.map(field => field.binding === "SEVERITY" ? { ...field, optionSource: "GALLEY_SEVERITIES" } : field);
+  assert.equal(defectReportBindingIssue(legacy), "");
+  const editable = canonicalizeLegacySeveritySource(legacy);
+  assert.equal(editable.find(field => field.binding === "SEVERITY").optionSource, "DEFECT_SEVERITIES");
+  assert.equal(legacy.find(field => field.binding === "SEVERITY").optionSource, "GALLEY_SEVERITIES");
+  assert.equal(defectReportBindingIssue(editable), "");
+});
+
+test("backend capability metadata does not turn configurable defect fields into universal requirements", () => {
+  assert.equal(defectReportBindingIssue(fields.map(field => field.binding === "DEFECT_CATEGORY" ? { ...field, required: false } : field)), "");
+  assert.match(defectReportBindingIssue(fields.filter(field => field.binding !== "AIRCRAFT_ID")), /Aircraft Registration/i);
+});
+
+test("Remarks is accepted in every supported area without rewriting the area field set", () => {
+  const remarks = { key: "remarks", label: "Remarks", type: "TEXTAREA", required: false, binding: "REMARKS" };
+  for (const area of ["CABIN", "GALLEY", "LAVATORY", "ENTRY_AREA", "ATTENDANT_SEAT", "AIRPORT_TAXI"])
+    assert.equal(defectReportBindingIssue([fields[0], remarks]), "", area);
+});
+
+test("Text and Textarea defaults initialize without replacing answers and remain non-submitted until edited", () => {
+  const defaults = [{ key: "summary", label: "Summary", type: "TEXT", required: false, defaultValue: "Starting text" }, { key: "details", label: "Details", type: "TEXTAREA", required: false, defaultValue: "Starting details" }, { key: "blank", label: "Blank", type: "TEXT", required: false, defaultValue: "" }, { key: "none", label: "None", type: "TEXTAREA", required: false, defaultValue: null }];
+  const initial = initializeFormValues(defaults, { summary: "User input" });
+  assert.deepEqual(initial, { summary: "User input", details: "Starting details", blank: "" });
+  assert.deepEqual(answersWithoutUntouchedDefaults(defaults, initial, new Set(), { summary: "User input" }), { summary: "User input" });
+  assert.deepEqual(answersWithoutUntouchedDefaults(defaults, { ...initial, details: "Edited" }, new Set(["details"]), { summary: "User input" }), { summary: "User input", details: "Edited" });
+  assert.deepEqual(initializeFormValues(defaults, { summary: "" }).summary, "");
 });

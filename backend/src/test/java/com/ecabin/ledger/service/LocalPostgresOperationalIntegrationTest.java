@@ -547,7 +547,7 @@ class LocalPostgresOperationalIntegrationTest {
         assertTrue(decisionOptions.maintenanceTeams().stream().anyMatch(team->team.id().equals(maintenanceTeam)));
         assertThrows(IllegalArgumentException.class,()->reviewerQueue.decide(org,approved.id(),"reviewer.test@ecabin.local",new ReviewerDecisionRequest("APPROVE",null,null,null,decisionForm.id(),decisionPublished.id())));
         assertThrows(IllegalStateException.class,()->defects.transition(org,approved.id(),"reviewer.test@ecabin.local",new TransitionRequest("ACTION_ASSIGNED","Attempt to bypass the decision operation.",null,null)),"Generic status changes cannot perform Reviewer approval or create Maintenance assignment.");
-        assertThrows(IllegalStateException.class,()->defects.transition(org,approved.id(),"reviewer.test@ecabin.local",new TransitionRequest("INSPECTION_REQUIRED","Attempt to bypass the Galley Reviewer decision.",null,null)),"A Galley case cannot bypass its Reviewer decision through the legacy inspection transition.");
+        assertThrows(IllegalStateException.class,()->defects.transition(org,approved.id(),"reviewer.test@ecabin.local",new TransitionRequest("INSPECTION_REQUIRED","Attempt to bypass the Reviewer decision.",null,null)),"A case cannot bypass the shared Reviewer decision through the generic status transition.");
         var approval=reviewerQueue.decide(org,approved.id(),"reviewer.test@ecabin.local",new ReviewerDecisionRequest("APPROVE",maintenanceTeam,null,null,decisionForm.id(),decisionPublished.id()));
         assertEquals("ACTION_ASSIGNED",approval.status());
         assertEquals("ACTION_ASSIGNED",defects.get(org,approved.id()).status());
@@ -890,6 +890,76 @@ class LocalPostgresOperationalIntegrationTest {
         assertThrows(ResponseStatusException.class,()->forms.submissions(orgB,defect.id()));
         assertThrows(ResponseStatusException.class,()->forms.submit(orgA,"form-reporter",defect.id(),new SubmitFormRequest(created.id(),published.id(),java.util.Map.of("finding","OK","component",component.toString(),"condition",UUID.randomUUID().toString()))));
         assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM defect_events_dtl WHERE operator_id=? AND entity_type='FORM_SUBMISSION' AND entity_id=?",Integer.class,orgA,result.id()));
+    }
+
+    @Test
+    @Transactional
+    @Rollback
+    void legacyGalleySeveritySourceUsesCanonicalTenantOptionsAndCopiesToCabinWithoutChangingHistory() {
+        UUID orgA=createTenant("SEVERITY_COPY_A"),orgB=createTenant("SEVERITY_COPY_B");
+        UUID galleyArea=jdbc.queryForObject("SELECT id FROM cabin_areas_mst WHERE operator_id=? AND code='GALLEY' AND isactive=1",UUID.class,orgA);
+        UUID cabinArea=jdbc.queryForObject("SELECT id FROM cabin_areas_mst WHERE operator_id=? AND code='CABIN' AND isactive=1",UUID.class,orgA);
+
+        var source=forms.create(orgA,"form-admin",new CreateFormRequest("GALLEY_SEVERITY_SOURCE","Galley severity source",galleyArea));
+        var sourceDraft=forms.saveDraft(orgA,"form-admin",source.id(),source.draftVersionId(),reportConfiguration());
+        var sourcePublished=forms.publish(orgA,"form-admin",source.id(),sourceDraft.id());
+        jdbc.update("UPDATE operational_form_versions_dtl SET fields_json=jsonb_set(fields_json,'{fields,6,optionSource}',to_jsonb('GALLEY_SEVERITIES'::text)) WHERE operator_id=? AND form_id=? AND id=? AND status='PUBLISHED'",orgA,source.id(),sourcePublished.id());
+        assertEquals("GALLEY_SEVERITIES",jdbc.queryForObject("SELECT fields_json #>> '{fields,6,optionSource}' FROM operational_form_versions_dtl WHERE operator_id=? AND form_id=? AND id=?",String.class,orgA,source.id(),sourcePublished.id()));
+
+        var severityField=forms.version(orgA,source.id(),sourcePublished.id()).configuration().fields().get(6);
+        var galleyOptions=forms.options(orgA,source.id(),sourcePublished.id(),severityField.key(),galleyArea,null);
+        var expectedActiveSeverities=jdbc.query("SELECT id,severity_code AS code,severity_name AS name FROM defect_severities_mst WHERE operator_id=? AND isactive=1 ORDER BY sort_order,severity_code LIMIT 500",(rs,n)->new com.ecabin.ledger.api.FormModels.FormOption(rs.getObject("id",UUID.class),rs.getString("code"),rs.getString("name")),orgA);
+        assertEquals(expectedActiveSeverities,galleyOptions,"Legacy published Galley forms must use the full active tenant severity catalog and its canonical ordering.");
+        UUID foreignSeverity=jdbc.queryForObject("SELECT id FROM defect_severities_mst WHERE operator_id=? AND severity_code='MEDIUM' AND isactive=1",UUID.class,orgB);
+        assertFalse(galleyOptions.stream().anyMatch(option->option.id().equals(foreignSeverity)),"Severity options remain tenant-scoped.");
+
+        var firstCopy=forms.duplicate(orgA,"form-admin",source.id(),new com.ecabin.ledger.api.FormModels.DuplicateFormRequest("CABIN_SEVERITY_COPY_A","Cabin severity copy A",cabinArea,FormPurpose.DEFECT_REPORT,WorkflowStage.INITIAL_REPORT,sourcePublished.id()));
+        var copiedVersion=forms.version(orgA,firstCopy.id(),firstCopy.draftVersionId());
+        assertEquals(OptionSource.DEFECT_SEVERITIES,copiedVersion.configuration().fields().get(6).optionSource());
+        assertEquals("GALLEY_SEVERITIES",jdbc.queryForObject("SELECT fields_json #>> '{fields,6,optionSource}' FROM operational_form_versions_dtl WHERE operator_id=? AND form_id=? AND id=?",String.class,orgA,source.id(),sourcePublished.id()),"Copying must not rewrite the original published version.");
+
+        var secondCopy=forms.duplicate(orgA,"form-admin",source.id(),new com.ecabin.ledger.api.FormModels.DuplicateFormRequest("CABIN_SEVERITY_COPY_B","Cabin severity copy B",cabinArea,FormPurpose.DEFECT_REPORT,WorkflowStage.INITIAL_REPORT,sourcePublished.id()));
+        assertEquals(OptionSource.DEFECT_SEVERITIES,forms.version(orgA,secondCopy.id(),secondCopy.draftVersionId()).configuration().fields().get(6).optionSource());
+        var optionalSeverity=reportConfiguration().fields().stream().map(field->field.binding()==DefectFieldBinding.SEVERITY
+            ?new FieldDefinition(field.key(),field.label(),field.type(),field.helpText(),false,field.order(),field.textRules(),field.numericRules(),field.dateRules(),field.optionSource(),field.optionFilter(),field.fileRules(),field.binding(),field.visible(),field.readOnly(),field.visibleWhen(),field.requiredWhen())
+            :field).toList();
+        assertThrows(IllegalArgumentException.class,()->forms.saveDraft(orgA,"form-admin",secondCopy.id(),secondCopy.draftVersionId(),new FormConfiguration(optionalSeverity)),"Severity remains mandatory under the existing domain policy.");
+
+        var legacyDraft=forms.saveDraft(orgA,"form-admin",firstCopy.id(),copiedVersion.id(),forms.version(orgA,source.id(),sourcePublished.id()).configuration());
+        assertEquals(OptionSource.DEFECT_SEVERITIES,legacyDraft.configuration().fields().get(6).optionSource(),"Saving a draft derived from legacy configuration writes the canonical source.");
+        var cabinPublished=forms.publish(orgA,"form-admin",firstCopy.id(),legacyDraft.id());
+        var cabinOptions=forms.options(orgA,firstCopy.id(),cabinPublished.id(),"severity_ref",cabinArea,null);
+        assertEquals(expectedActiveSeverities,cabinOptions,"Galley and Cabin use identical severity records and ordering.");
+
+        jdbc.queryForObject("SELECT set_config('ecabin.actor_id', ?, true)",String.class,"form-admin");
+        UUID extraSeverity=UUID.randomUUID();
+        jdbc.update("INSERT INTO defect_severities_mst(id,operator_id,severity_code,severity_name,description,sort_order) VALUES(?,?,?,'Cabin extra','Integration fixture',5)",extraSeverity,orgA,"EXTRA_"+extraSeverity.toString().substring(0,8).toUpperCase());
+        assertTrue(forms.options(orgA,firstCopy.id(),cabinPublished.id(),"severity_ref",cabinArea,null).stream().anyMatch(option->option.id().equals(extraSeverity)),"New active tenant severity rows appear without an area-specific code list.");
+
+        UUID component=UUID.randomUUID();
+        jdbc.update("INSERT INTO cabin_components_mst(id,operator_id,area_id,code,name) VALUES(?,?,?,?,?)",component,orgA,cabinArea,"CMP_"+component.toString().substring(0,8),"Cabin fixture component");
+        UUID condition=createCondition(orgA,component);
+        var answers=new java.util.HashMap<>(reportAnswers(orgA,component,condition,"FWD CABIN","Fixture title","Fixture description"));
+        answers.put("severity_ref",foreignSeverity.toString());
+        assertThrows(IllegalArgumentException.class,()->forms.resolveDefectReport(orgA,cabinArea,firstCopy.id(),cabinPublished.id(),answers),"A cross-tenant severity UUID must be rejected during submission resolution.");
+        answers.put("severity_ref",extraSeverity.toString());
+        jdbc.update("UPDATE defect_severities_mst SET isactive=2 WHERE operator_id=? AND id=?",orgA,extraSeverity);
+        assertThrows(IllegalArgumentException.class,()->forms.resolveDefectReport(orgA,cabinArea,firstCopy.id(),cabinPublished.id(),answers),"An inactive severity UUID must be rejected during submission resolution.");
+
+        var invalidAreaCopy=forms.create(orgA,"form-admin",new CreateFormRequest("GALLEY_REMARKS_SOURCE","Galley remarks source",galleyArea));
+        var compactGalley=new FormConfiguration(List.of(
+            new FieldDefinition("aircraftId","Aircraft Registration",FieldType.AIRCRAFT_SELECT,null,true,0,null,null,null,OptionSource.AIRCRAFT,null,null,DefectFieldBinding.AIRCRAFT_ID),
+            new FieldDefinition("location","Galley location",FieldType.TEXT,null,true,1,null,null,null,null,null,null,DefectFieldBinding.ZONE),
+            new FieldDefinition("component_ref","Component",FieldType.DROPDOWN,null,true,2,null,null,null,OptionSource.COMPONENTS,null,null,DefectFieldBinding.COMPONENT_ID),
+            new FieldDefinition("condition_ref","Condition",FieldType.DROPDOWN,null,true,3,null,null,null,OptionSource.DEFECT_CONDITIONS,new OptionFilter(null,"component_ref"),null,DefectFieldBinding.CONDITION_ID),
+            new FieldDefinition("severity_ref","Severity",FieldType.DROPDOWN,null,true,4,null,null,null,OptionSource.DEFECT_SEVERITIES,null,null,DefectFieldBinding.SEVERITY),
+            new FieldDefinition("remarks","Remarks",FieldType.TEXTAREA,null,false,5,new TextRules(null,4000,false,false,null),null,null,null,null,null,DefectFieldBinding.REMARKS),
+            new FieldDefinition("evidence","Evidence",FieldType.IMAGE_UPLOAD,null,true,6,null,null,null,null,null,new com.ecabin.ledger.api.FormModels.FileRules(List.of("jpg"),List.of("image/jpeg"),5_242_880L,1,3),DefectFieldBinding.EVIDENCE_ATTACHMENTS)));
+        var invalidSourceDraft=forms.saveDraft(orgA,"form-admin",invalidAreaCopy.id(),invalidAreaCopy.draftVersionId(),compactGalley);
+        var invalidSourcePublished=forms.publish(orgA,"form-admin",invalidAreaCopy.id(),invalidSourceDraft.id());
+        var targetAreaFailure=assertThrows(IllegalArgumentException.class,()->forms.duplicate(orgA,"form-admin",invalidAreaCopy.id(),new com.ecabin.ledger.api.FormModels.DuplicateFormRequest("INVALID_CABIN_COPY","Invalid Cabin copy",cabinArea,FormPurpose.DEFECT_REPORT,WorkflowStage.INITIAL_REPORT,invalidSourcePublished.id())));
+        assertTrue(targetAreaFailure.getMessage().contains("Remarks")&&targetAreaFailure.getMessage().contains("not applicable to the selected cabin area"),"Cross-area duplication must retain actionable target-area binding validation.");
+        assertEquals("GALLEY_SEVERITIES",jdbc.queryForObject("SELECT fields_json #>> '{fields,6,optionSource}' FROM operational_form_versions_dtl WHERE operator_id=? AND form_id=? AND id=?",String.class,orgA,source.id(),sourcePublished.id()));
     }
 
     @Test

@@ -60,11 +60,10 @@ public class ReviewerQueueService {
     public ReviewerDecisionOptions decisionOptions(UUID org,UUID defectId,String actor){
         ReviewTarget target=reviewTarget(org,defectId);
         requireDecisionScope(org,defectId,actor,target);
-        if(!"GALLEY".equals(target.areaCode()))throw new ResponseStatusException(HttpStatus.NOT_FOUND,"The Galley Reviewer decision form is not available for this cabin area.");
         if(!Set.of("REPORTED","UNDER_REVIEW").contains(target.status()))throw new ResponseStatusException(HttpStatus.CONFLICT,"This case is not awaiting an initial Reviewer decision.");
         if(Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM defect_events_dtl rejected WHERE rejected.operator_id=? AND rejected.defect_id=? AND rejected.event_type='REVIEW_REJECTED' AND rejected.occurred_at >= COALESCE((SELECT max(s.submitted_at) FROM operational_form_submissions_dtl s WHERE s.operator_id=rejected.operator_id AND s.defect_id=rejected.defect_id AND s.purpose='DEFECT_REPORT'),'-infinity'::timestamptz))",Boolean.class,org,defectId)))
-            throw new ResponseStatusException(HttpStatus.CONFLICT,"The Auditor must submit the corrected Galley report before another Reviewer decision.");
-        String areaName=jdbc.queryForObject("SELECT name FROM cabin_areas_mst WHERE operator_id=? AND code='GALLEY' AND isactive=1 AND id=(SELECT area_id FROM defects_dtl WHERE operator_id=? AND id=?)",String.class,org,org,defectId);
+            throw new ResponseStatusException(HttpStatus.CONFLICT,"The original reporter must submit the corrected report before another Reviewer decision.");
+        String areaName=jdbc.queryForObject("SELECT a.name FROM cabin_areas_mst a JOIN defects_dtl d ON d.operator_id=a.operator_id AND d.area_id=a.id WHERE a.operator_id=? AND d.id=? AND a.isactive=1 AND d.isactive=1",String.class,org,defectId);
         List<ReviewerDecisionTeam> teams=jdbc.query("SELECT t.id,t.name FROM maintenance_teams_mst t WHERE t.operator_id=? AND t.team_type='MAINTENANCE' AND t.isactive=1 AND EXISTS(SELECT 1 FROM operator_membership_teams_mst mt JOIN operator_memberships_mst m ON m.operator_id=mt.operator_id AND m.external_user_id=mt.external_user_id AND m.isactive=1 JOIN operator_roles_mst r ON r.operator_id=m.operator_id AND r.role_key=m.role AND r.isactive=1 WHERE mt.operator_id=t.operator_id AND mt.team_name=t.name AND mt.isactive=1 AND ('|'||r.permissions||'|') LIKE '%|PERFORM_ACTION|%') ORDER BY t.name",(rs,n)->new ReviewerDecisionTeam(rs.getObject("id",UUID.class),rs.getString("name")),org);
         return new ReviewerDecisionOptions(areaName,target.status(),teams);
     }
@@ -93,7 +92,7 @@ public class ReviewerQueueService {
         jdbc.update("INSERT INTO defect_events_dtl(operator_id,defect_id,event_type,note,actor_id,entity_type,entity_id,previous_state,new_state,request_id) VALUES(?,?,'REVIEW_ROUTING_CHANGED',? ,?,'DEFECT',?,jsonb_build_object('reviewerTeamId',CAST(? AS text)),jsonb_build_object('reviewerTeamId',CAST(? AS text)),?)",org,defectId,reason.trim(),actor,defectId,previous==null?null:previous.toString(),teamId.toString(),safeRequestId());
     }
 
-    /** Persist a Galley review decision and route approved work directly to Maintenance. */
+    /** Persist a typed Reviewer decision and route approved work directly to Maintenance. */
     @Transactional
     public WorkflowRecord decide(UUID org,UUID defectId,String actor,ReviewerDecisionRequest request){
         String decision=request.decision()==null?"":request.decision().trim().toUpperCase(java.util.Locale.ROOT);
@@ -110,11 +109,10 @@ public class ReviewerQueueService {
             return new ReviewTarget(rs.getString("status"),rs.getObject("reviewer_team_id",UUID.class),rs.getString("reviewer_team"),rs.getString("area_code"),rs.getString("reported_by"),rs.getString("assigned_to"),rs.getString("assigned_user_id"),rs.getString("assigned_team"));
         },org,defectId);
         requireDecisionScope(org,defectId,actor,target);
-        if(!"GALLEY".equals(target.areaCode()))throw new ResponseStatusException(HttpStatus.NOT_FOUND,"The Galley Reviewer decision form is not available for this cabin area.");
         if(!Set.of("REPORTED","UNDER_REVIEW").contains(target.status()))throw new ResponseStatusException(HttpStatus.CONFLICT,"This defect is no longer awaiting its initial review decision.");
         requirePublishedDecisionForm(org,defectId,target.status(),request.formId(),request.versionId());
         if(Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM defect_events_dtl rejected WHERE rejected.operator_id=? AND rejected.defect_id=? AND rejected.event_type='REVIEW_REJECTED' AND rejected.occurred_at >= COALESCE((SELECT max(s.submitted_at) FROM operational_form_submissions_dtl s WHERE s.operator_id=rejected.operator_id AND s.defect_id=rejected.defect_id AND s.purpose='DEFECT_REPORT'),'-infinity'::timestamptz))",Boolean.class,org,defectId)))
-            throw new ResponseStatusException(HttpStatus.CONFLICT,"The Auditor must submit the corrected Galley report before another Reviewer decision.");
+            throw new ResponseStatusException(HttpStatus.CONFLICT,"The original reporter must submit the corrected report before another Reviewer decision.");
         if(decision.equals("REJECT")){
             if(request.maintenanceTeamId()!=null)throw new IllegalArgumentException("Do not assign a maintenance team when rejecting a report.");
             String reporter=target.reportedBy();
@@ -151,8 +149,8 @@ public class ReviewerQueueService {
 
     private boolean eligibleReviewer(UUID org,UUID teamId,String actor){return Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM maintenance_teams_mst t JOIN operator_membership_teams_mst mt ON mt.operator_id=t.operator_id AND mt.team_name=t.name AND mt.isactive=1 JOIN operator_memberships_mst m ON m.operator_id=mt.operator_id AND m.external_user_id=mt.external_user_id AND m.isactive=1 JOIN operator_roles_mst r ON r.operator_id=m.operator_id AND r.role_key=m.role AND r.isactive=1 WHERE t.operator_id=? AND t.id=? AND t.team_type='REVIEWER' AND t.isactive=1 AND mt.external_user_id=? AND ('|'||r.permissions||'|') LIKE '%|REVIEW|%')",Boolean.class,org,teamId,actor));}
     private void requirePublishedDecisionForm(UUID org,UUID defectId,String status,UUID formId,UUID versionId){
-        if(formId==null||versionId==null)throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Select the published Galley Reviewer Decision form before submitting.");
-        boolean valid=Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM operational_forms_dtl f JOIN operational_form_versions_dtl v ON v.operator_id=f.operator_id AND v.form_id=f.id AND v.id=f.published_version_id AND v.status='PUBLISHED' JOIN defects_dtl d ON d.operator_id=f.operator_id AND d.area_id=f.area_id AND d.id=? AND d.isactive=1 JOIN cabin_areas_mst a ON a.operator_id=d.operator_id AND a.id=d.area_id AND a.code='GALLEY' AND a.isactive=1 WHERE f.operator_id=? AND f.id=? AND f.published_version_id=? AND f.purpose='REVIEW_DECISION' AND f.workflow_stage=? AND f.isactive=1)",Boolean.class,defectId,org,formId,versionId,status));
+        if(formId==null||versionId==null)throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Select the published Reviewer Decision form before submitting.");
+        boolean valid=Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM operational_forms_dtl f JOIN operational_form_versions_dtl v ON v.operator_id=f.operator_id AND v.form_id=f.id AND v.id=f.published_version_id AND v.status='PUBLISHED' JOIN operational_form_version_areas_dtl va ON va.operator_id=v.operator_id AND va.form_id=v.form_id AND va.form_version_id=v.id JOIN defects_dtl d ON d.operator_id=va.operator_id AND d.area_id=va.area_id AND d.id=? AND d.isactive=1 JOIN cabin_areas_mst a ON a.operator_id=d.operator_id AND a.id=d.area_id AND a.isactive=1 WHERE f.operator_id=? AND f.id=? AND f.published_version_id=? AND f.purpose='REVIEW_DECISION' AND f.workflow_stage=? AND f.isactive=1)",Boolean.class,defectId,org,formId,versionId,status));
         if(!valid)throw new ResponseStatusException(HttpStatus.CONFLICT,"The selected Reviewer Decision version is no longer published or does not match this case's current stage.");
         if(operationalForms!=null&&!operationalForms.publishedForDefect(org,defectId,com.ecabin.ledger.api.FormModels.FormPurpose.REVIEW_DECISION).stream().anyMatch(form->form.id().equals(formId)&&form.versionId().equals(versionId)))
             throw new ResponseStatusException(HttpStatus.CONFLICT,"The selected Reviewer Decision version has an invalid or ineligible published configuration. Ask an administrator to correct it in Form Master.");

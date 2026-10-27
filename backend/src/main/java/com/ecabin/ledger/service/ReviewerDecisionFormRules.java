@@ -9,13 +9,13 @@ import com.ecabin.ledger.api.FormModels.VisibilityRule;
 import java.util.EnumMap;
 import java.util.Map;
 
-/** Allow-listed shape for the Galley workflow form; conditions are typed equality checks only. */
+/** Area-neutral allow-listed shape for Reviewer decisions; conditions are typed equality checks only. */
 public final class ReviewerDecisionFormRules {
     private ReviewerDecisionFormRules() {}
 
     public static void requireValid(FormConfiguration configuration) {
         if (configuration == null || configuration.fields() == null || configuration.fields().size() != 4)
-            throw new IllegalArgumentException("A Galley Reviewer Decision form must contain Decision, Assign Team, Rejection Reason, and optional Remark fields.");
+            throw new IllegalArgumentException("A Reviewer Decision form must contain Decision, Assign Team, Rejection Reason, and optional Remark fields.");
         Map<DefectFieldBinding,FieldDefinition> fields = new EnumMap<>(DefectFieldBinding.class);
         for (FieldDefinition field : configuration.fields()) {
             if (field.type() == FieldType.SECTION || field.binding() == null || fields.putIfAbsent(field.binding(),field) != null)

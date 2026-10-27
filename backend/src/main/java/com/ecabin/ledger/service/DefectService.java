@@ -525,9 +525,8 @@ public class DefectService {
         DefectView current = jdbc.query("SELECT d.*, " + closedAtProjection() + ", " + severityNameProjection() + ", a.tail_number, a.aircraft_type, current_action.id AS active_action_id FROM defects_dtl d JOIN aircraft_mst a ON a.id=d.aircraft_id AND a.operator_id=d.operator_id LEFT JOIN LATERAL (SELECT ca.id FROM corrective_actions_dtl ca WHERE ca.operator_id=d.operator_id AND ca.defect_id=d.id AND ca.isactive=1 AND ca.status IN ('ASSIGNED','IN_PROGRESS','ON_HOLD') ORDER BY ca.created_at DESC LIMIT 1) current_action ON TRUE WHERE d.operator_id=? AND d.id=? AND d.isactive=1 AND a.isactive=1 FOR UPDATE OF d", DEFECT, operatorId, id)
             .stream().findFirst().orElseThrow(() -> new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.NOT_FOUND, "Defect not found."));
         DefectWorkflow.requireTransition(current.status(), target, input.note());
-        if (current.status().equals("UNDER_REVIEW") && target.equals("INSPECTION_REQUIRED")
-            && "GALLEY".equals(jdbc.queryForObject("SELECT code FROM cabin_areas_mst WHERE operator_id=? AND id=? AND isactive=1", String.class, operatorId, current.areaId())))
-            throw new IllegalStateException("Galley Reviewer decisions must be submitted through the dedicated decision operation.");
+        if (current.status().equals("UNDER_REVIEW") && target.equals("INSPECTION_REQUIRED"))
+            throw new IllegalStateException("Reviewer decisions must be submitted through the authorized Reviewer decision operation.");
         if (current.status().equals("INSPECTION_IN_PROGRESS") || Set.of("INSPECTION_COMPLETE", "ACTION_ASSIGNED", "IN_PROGRESS", "AWAITING_VERIFICATION", "VERIFIED", "CLOSED").contains(target))
             throw new IllegalStateException("Use the dedicated inspection, action, verification or approval operation for this transition.");
         String inspectionOutcome = input.inspectionOutcome() == null ? null : input.inspectionOutcome().toUpperCase();

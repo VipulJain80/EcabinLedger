@@ -45,7 +45,8 @@ test("only the aircraft-specific Defect List passes aircraft visibility context 
   assert.match(shell, /<ReviewerWorkQueuePage[\s\S]*?openQueueDefect\(defectId\)/);
   assert.match(detailPage, /defectDetailsRequestPath\(defectId,aircraftListId\)/);
   assert.match(detailPage, /onBack\?onBack\(\):router\.push\(returnPath\)/);
-  assert.match(shell, /setOpenDefectId\(null\);setOpenDefectAircraftListId\(null\)/);
+  assert.match(shell, /function returnFromDefectDetails\(\)[\s\S]*?setOpenDefectId\(null\);[\s\S]*?setOpenDefectAircraftListId\(null\);[\s\S]*?if \(currentNavKey === "defects"\) void load\(\);/);
+  assert.match(shell, /if \(returnToAircraftList\) window\.dispatchEvent\(new Event\("aircraft-defect-list-refresh"\)\)/);
 });
 
 test("history formats SLA calendar dates without shifting timezone and distinguishes unset from cleared dates", () => {

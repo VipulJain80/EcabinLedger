@@ -2725,3 +2725,109 @@ Files changed:
 Verification:
 - `cd frontend && node --test src/common/tables/tableLayout.test.mjs` — 6 passed, 0 failed, 0 skipped.
 - `git diff --check` — passed.
+
+--------------27OCT2026------------------------------
+2026-10-27 — Use one canonical severity source across operational areas
+
+Form Master now treats `DEFECT_SEVERITIES` as the canonical source for defect-report Severity fields. The legacy `GALLEY_SEVERITIES` token remains readable for already-published forms and resolves to the same active, tenant-scoped severity records in the same `sort_order, severity_code` order. Editable configurations, copies, restored drafts, remapped drafts, saves, and publications normalize the legacy token without rewriting an existing published version. Severity remains required. Cross-area duplication still validates every other binding against the destination area and now identifies the offending field when an existing target-area rule blocks the copy. No database migration was needed.
+
+Files changed:
+- `backend/src/main/java/com/ecabin/ledger/api/FormModels.java` — retain `GALLEY_SEVERITIES` as a deprecated compatibility enum value.
+- `backend/src/main/java/com/ecabin/ledger/service/FormConfigurationCompatibility.java` — normalize only legacy Severity source values, preserving all other field metadata.
+- `backend/src/main/java/com/ecabin/ledger/service/OperationalFormService.java` — use the shared severity query for both tokens, canonicalize editable draft/copy/restore/remap/publish paths, and retain strict destination-area validation.
+- `backend/src/main/resources/db/dev-seed.sql` — seed new Galley forms with `DEFECT_SEVERITIES`.
+- `backend/src/test/java/com/ecabin/ledger/service/FormConfigurationCompatibilityTest.java` — verify normalization and metadata preservation without mutating the original configuration.
+- `backend/src/test/java/com/ecabin/ledger/service/DefectReportBindingRulesTest.java` — cover canonical and legacy severity source compatibility while keeping requiredness rules.
+- `backend/src/test/java/com/ecabin/ledger/service/LocalPostgresOperationalIntegrationTest.java` — add transactional PostgreSQL coverage for legacy option loading, Galley-to-Cabin duplication, multiple Cabin copies, tenant/active-option enforcement, mandatory Severity, and target-area binding failures.
+- `frontend/src/common/configuration/FormMasterPage.tsx` — derive selectable option sources from backend binding metadata and normalize legacy values when a version is loaded for editing.
+- `frontend/src/common/forms/defectReportMapping.ts` — remove area-specific Severity-source validation and provide legacy normalization for editor state.
+- `frontend/src/common/forms/defectReportMapping.test.mjs` — cover the common source and legacy normalization.
+- `updatesfiles.me` — record this change.
+
+Verification:
+- `mvn -f backend/pom.xml '-Dtest=DefectReportBindingRulesTest,FormConfigurationCompatibilityTest' test` — 7 passed, 0 failed, 0 errors, 0 skipped; Maven also compiled all backend test sources, including the new PostgreSQL integration test.
+- `cd frontend && node --test src/common/forms/defectReportMapping.test.mjs` — 7 passed, 0 failed, 0 skipped. Node emitted a module-type performance warning.
+- `cd frontend && pnpm lint` — passed with 2 existing warnings in `loginhome/page.tsx` and `AttachmentPreviewDialog.tsx`.
+- `cd frontend && pnpm exec tsc --noEmit` — passed.
+- `git diff --check` — passed.
+- The PostgreSQL integration test was not run because `ECABIN_DB_VERIFY` is not set. No migration or database changes were performed.
+
+2026-10-27 — Form Master configurable requiredness and text defaults
+
+Form binding support is now separated from form-level requiredness for defect-report fields. Aircraft Registration remains mandatory and Defect Category retains its configured policy. Component, Condition, Location/Zone, Title, Description, and Severity no longer inherit a universal required setting from being approved bindings. Defect creation still validates domain-required values and returns an actionable error when a configured form cannot provide one. Text and Textarea fields support immutable-version default values; defaults display on open but are not sent as answers until edited. Existing configurations without defaults continue to load with no default.
+
+Files changed for this increment:
+- `backend/src/main/java/com/ecabin/ledger/api/FormModels.java` — add nullable `defaultValue` to field definitions while retaining prior constructors for source compatibility.
+- `backend/src/main/java/com/ecabin/ledger/service/FormFieldBindingCatalog.java` — mark the approved defect fields configurable while retaining Aircraft Registration and Category policy.
+- `backend/src/main/java/com/ecabin/ledger/service/DefectReportBindingRules.java` — remove the universal required-binding list and retain mandatory Aircraft Registration, Category policy, and existing compact projection validation.
+- `backend/src/main/java/com/ecabin/ledger/service/OperationalFormService.java` — validate Text/Textarea defaults and report missing domain-required values before mapping submissions.
+- `backend/src/test/java/com/ecabin/ledger/service/DefectReportBindingRulesTest.java` and `FormFieldBindingCatalogTest.java` — cover configurable versus required bindings.
+- `backend/src/test/java/com/ecabin/ledger/service/OperationalFormServiceTest.java` and `FormConfigurationCompatibilityTest.java` — cover default serialization, validation, and backward compatibility.
+- `frontend/src/common/configuration/FormMasterPage.tsx` — derive required controls from backend metadata and edit/show Text/Textarea defaults.
+- `frontend/src/common/forms/defectReportMapping.ts` and `OperationalFormRenderer.tsx` — initialize defaults without overwriting entered values or submitting untouched defaults.
+- `frontend/src/common/forms/defectReportMapping.test.mjs` — cover metadata-driven requiredness and default handling.
+- `updatesfiles.me` — record this increment.
+
+Verification:
+- Focused backend unit tests — 36 passed, 0 failures, 0 errors, 0 skipped.
+- `cd frontend && node --test src/common/forms/defectReportMapping.test.mjs` — 9 passed, 0 failed, 0 skipped; Node emitted a module-type performance warning.
+- `cd frontend && pnpm lint` — 0 errors, 2 existing warnings (`loginhome/page.tsx`, `AttachmentPreviewDialog.tsx`).
+- `cd frontend && NODE_ENV=development NEXT_PUBLIC_API_BASE_URL=http://localhost:8080 pnpm exec next typegen` and `pnpm exec tsc --noEmit` — passed.
+- `git diff --check` — passed. No database records or migrations were changed; PostgreSQL integration tests were not run.
+
+2026-10-27 — Flexible defect forms and shared area workflows
+
+Defect-report form configuration no longer requires a comprehensive set of approved bindings. Aircraft Registration remains the only universal presence/visibility/requiredness rule; the other supported fields can be omitted or configured independently. Remarks is accepted across supported areas. Missing values still required by typed defect creation are reported at submission, with no invented data or database nullability changes. Text/Textarea defaults keep their existing versioned behavior. New severity configuration continues to use `DEFECT_SEVERITIES`, while old published values remain readable.
+
+Reviewer decision form resolution and the reviewer UI now support the shared workflow for all configured areas instead of Galley-only gating. Area/purpose/stage selections in Form Master use backend mapping metadata. Reviewer authorization, tenant/team checks, eligible statuses, typed decisions, assignment validation, and audit events remain backend-enforced. The existing compact Galley report projection and non-Galley legacy closure path remain for compatibility.
+
+Files changed in this increment:
+- `backend/src/main/java/com/ecabin/ledger/service/DefectReportBindingRules.java` — keep Aircraft Registration as the universal form requirement and separate domain submission requirements.
+- `backend/src/main/java/com/ecabin/ledger/service/FormFieldBindingCatalog.java` — allow supported bindings, including Remarks and workflow bindings, across configured areas without forcing their presence.
+- `backend/src/main/java/com/ecabin/ledger/service/OperationalFormService.java` — remove form-completeness restrictions, preserve submission-time typed validation, and resolve reviewer forms across mapped areas.
+- `backend/src/main/java/com/ecabin/ledger/service/ReviewerQueueService.java` — remove Galley-only reviewer form and queue restrictions while retaining team and status authorization.
+- `backend/src/main/java/com/ecabin/ledger/service/DefectService.java` — apply the reviewer-transition guard consistently across areas.
+- `backend/src/main/java/com/ecabin/ledger/service/ReviewerDecisionFormRules.java` — use generic reviewer decision wording.
+- `backend/src/test/java/com/ecabin/ledger/service/DefectReportBindingRulesTest.java`, `FormFieldBindingCatalogTest.java`, `OperationalFormServiceTest.java`, and `LocalPostgresOperationalIntegrationTest.java` — cover optional bindings, area-neutral Remarks, and the configured area/purpose matrix; the PostgreSQL test source was updated but not executed.
+- `frontend/src/common/configuration/FormMasterPage.tsx` — use backend mapping metadata for purpose/stage selections and enforce Aircraft Registration in the editor.
+- `frontend/src/common/forms/defectReportMapping.ts`, `defectReportMapping.test.mjs`, and `OperationalFormRenderer.tsx` — align publishing/submission checks with backend metadata and preserve Text/Textarea default behavior.
+- `frontend/src/common/fleet/ReviewerDecisionForm.tsx` (renamed from `GalleyReviewerDecisionForm.tsx`), `DefectDetailsPage.tsx`, `frontend/src/app/loginhome/page.tsx`, and `frontend/src/app/configuration.css` — make reviewer decision UI and dispatch area-neutral.
+- `updatesfiles.me` — record this increment.
+
+Verification:
+- Focused backend Maven tests — 41 passed, 0 failures, 0 errors, 0 skipped.
+- `cd frontend && node --experimental-strip-types --test src/common/forms/defectReportMapping.test.mjs` — 10 passed, 0 failed, 0 skipped; Node emitted a module-type performance warning.
+- `cd frontend && pnpm exec tsc --noEmit` — passed.
+- `cd frontend && pnpm lint` — passed with 3 warnings at the time of the run: an unused `reportFormFiles` variable in `loginhome/page.tsx`, an unused map argument in `FormMasterPage.tsx` (fixed after that run), and the existing `<img>` optimization warning in `AttachmentPreviewDialog.tsx`. Rerun lint for the final warning count.
+- PostgreSQL integration tests were not run; no migrations or database records were changed.
+
+2026-10-27 — Reviewer decision buttons
+
+The Reviewer Decision field now displays the allowed backend-provided choices as accessible Approve/Reject buttons instead of a select menu. Selection still drives the existing conditional team/rejection fields and posts the same typed decision payload to the existing authorized endpoint. Reject uses a distinct warning treatment; buttons remain keyboard operable and stack responsively.
+
+Files changed:
+- `frontend/src/common/fleet/ReviewerDecisionForm.tsx` — render decision choices as pressed-state buttons while preserving backend options and submission behavior.
+- `frontend/src/app/configuration.css` — style the button group, focus state, selected rejection state, and small-screen sizing.
+- `updatesfiles.me` — record this UI change.
+
+Verification:
+- `cd frontend && pnpm lint` — passed with 0 errors and 2 existing warnings (`reportFormFiles` in `loginhome/page.tsx`; `<img>` in `AttachmentPreviewDialog.tsx`).
+- `cd frontend && pnpm exec tsc --noEmit` — passed after the production build completed. An initial concurrent type-check overlapped Next.js regenerating `.next/types` and failed on temporarily missing generated files; the sequential rerun passed.
+- `cd frontend && NEXT_PUBLIC_API_BASE_URL=https://localhost:8080 pnpm exec next build --webpack` — passed.
+- `git diff --check` — passed.
+- No backend API, authorization, decision contract, or database behavior changed.
+
+2026-10-27 — Refresh defect lists after returning from case details
+
+Returning from Defect Details now reloads the Defect Log Book when that was the source page, so status changes made in the detail workflow are reflected immediately. Returning to the aircraft-specific Defect List also triggers its existing authenticated query refresh after the list remounts. The originating scroll position is preserved.
+
+Files changed:
+- `frontend/src/app/loginhome/page.tsx` — refresh the source list when closing embedded Defect Details and preserve aircraft-list refresh behavior.
+- `frontend/src/common/fleet/defectDetailsModel.test.mjs` — assert the back handler refreshes the Log Book and aircraft list.
+- `updatesfiles.me` — record this fix.
+
+Verification:
+- `cd frontend && node --experimental-strip-types --test src/common/fleet/defectDetailsModel.test.mjs src/common/tables/tableLayout.test.mjs` — 13 passed, 0 failed, 0 skipped; Node emitted its existing module-type performance warning.
+- `cd frontend && pnpm exec tsc --noEmit` — passed.
+- `cd frontend && pnpm lint` — passed with 0 errors and 2 existing warnings (`reportFormFiles` in `loginhome/page.tsx`; `<img>` in `AttachmentPreviewDialog.tsx`).
+- `git diff --check` — passed.

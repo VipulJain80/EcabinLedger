@@ -5,7 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { alert, responseErrorMessage } from "@/common/alerts";
 import { formatDateTime } from "@/common/dateTime";
 import { isPublishedFormForArea, orderedOperationalFields, unsupportedPublishedField } from "./publishedFormDefinition";
-import { defectReportBindingIssue } from "./defectReportMapping";
+import { answersWithoutUntouchedDefaults, defectReportBindingIssue, initializeFormValues } from "./defectReportMapping";
 import EvidenceUploadField from "./EvidenceUploadField";
 import { maxTotalBytesForField, partitionEvidenceSelection, validateEvidenceFile } from "./evidenceFileRules";
 import { isFieldRequired, isFieldVisible } from "./conditionalFieldVisibility";
@@ -19,6 +19,7 @@ type Field = {
   key: string;
   label: string;
   type: string;
+  defaultValue?: string | null;
   helpText?: string | null;
   required: boolean;
   order: number;
@@ -51,7 +52,7 @@ function evidenceSourceLabel(source?:string|null){
 function fileIdentity(file: File) { return `${file.name}:${file.size}:${file.lastModified}`; }
 const EMPTY_FILES: File[] = [];
 
-export default function OperationalFormRenderer({ request, defectId, actionId, areaId, areaName, areaCode, initialFormId, initialVersionId, purpose = "DEFECT_REPORT", workflowStage = "INITIAL_REPORT", previewOnly = false, preparationMode = false, initialAnswers, initialFiles, onAnswersChange, onFilesChange, onPreparationReady, onAircraftSelected, onWorkflowComplete, aircraftOptionsCacheKey = "" }: {
+export default function OperationalFormRenderer({ request, defectId, actionId, areaId, areaName, initialFormId, initialVersionId, purpose = "DEFECT_REPORT", workflowStage = "INITIAL_REPORT", previewOnly = false, preparationMode = false, initialAnswers, initialFiles, onAnswersChange, onFilesChange, onPreparationReady, onAircraftSelected, onWorkflowComplete, aircraftOptionsCacheKey = "" }: {
   request: Request;
   defectId?: string;
   actionId?: string;
@@ -75,6 +76,7 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
 }) {
   const [formId, setFormId] = useState(initialFormId || "");
   const [values, setValues] = useState<Record<string, unknown>>(initialAnswers || {});
+  const [dirtyFields,setDirtyFields]=useState<Set<string>>(()=>new Set());
   const [files, setFiles] = useState<Record<string, Uploaded[]>>({});
   const [pendingFiles, setPendingFiles] = useState<Record<string, File[]>>(initialFiles || {});
   const [uploadErrors, setUploadErrors] = useState<Record<string, Record<string, string>>>({});
@@ -125,7 +127,7 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
     queryFn:async({signal})=>{const response=await request(`/defects/${encodeURIComponent(defectId!)}/maintenance-sla-policy?status=${encodeURIComponent(selectedMaintenanceStatus)}`,{signal});if(!response.ok)throw new Error(await responseErrorMessage(response,"Could not load the effective SLA date policy."));return response.json();},
     retry:false,
   });
-  const reportBindingIssue = preparationMode && selected ? defectReportBindingIssue(selectedFields, areaCode) : "";
+  const reportBindingIssue = preparationMode && selected ? defectReportBindingIssue(selectedFields) : "";
   const definitionIssue = selected && !isPublishedFormForArea(selected, areaId)
     ? "The published form does not belong to the selected cabin area. Contact your administrator."
     : unsupportedField ? `Published form field “${unsupportedField.label}” uses unsupported type “${unsupportedField.type}”. Contact your administrator.` : "";
@@ -180,8 +182,8 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
 
   useEffect(() => {
     if (!selected) return;
-    if (previousSelectionContext.current !== null && previousSelectionContext.current !== selectionContext) {
-      setValues(initialAnswers || {}); setFiles({}); setPendingFiles(initialFiles || {}); setUploadErrors({}); setOptions({}); setMessage("");
+    if (previousSelectionContext.current === null || previousSelectionContext.current !== selectionContext) {
+      setValues(initializeFormValues(selected.configuration.fields, initialAnswers || {})); setDirtyFields(new Set()); setFiles({}); setPendingFiles(initialFiles || {}); setUploadErrors({}); setOptions({}); setMessage("");
       setSelectedAircraft(null);onAircraftSelected?.(null);
       submissionGuard.current = false; initialUploadsStarted.current = false;
     }
@@ -194,7 +196,8 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
       if (dependent.optionFilter?.areaFieldKey === field.key || dependent.optionFilter?.componentFieldKey === field.key) delete next[dependent.key];
     }
     setValues(next);
-    if (preparationMode) onAnswersChange?.(next);
+    const dirty=new Set(dirtyFields);dirty.add(field.key);setDirtyFields(dirty);
+    if (preparationMode) onAnswersChange?.(answersWithoutUntouchedDefaults(selected?.configuration.fields||[],next,dirty,initialAnswers||{}));
   }
 
   const upload = useCallback(async (field: Field, file: File, selectionAlreadyValidated = false): Promise<boolean> => {
@@ -289,12 +292,15 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!selected || !defectId || submissionGuard.current || previewOnly) return;
+    const untouchedRequiredDefault=selectedFields.find(field=>field.required&&field.defaultValue!=null&&!dirtyFields.has(field.key)&&initialAnswers?.[field.key]===undefined);
+    if(untouchedRequiredDefault){setMessage(`Review and enter a value for ${untouchedRequiredDefault.label} before submitting.`);return;}
+    const explicitAnswers=answersWithoutUntouchedDefaults(selectedFields,values,dirtyFields,initialAnswers||{});
     if(purpose==="CLOSURE_APPROVAL"){
       const decisionField=selectedFields.find(field=>field.binding==="CLOSURE_DECISION");
       const remarkField=selectedFields.find(field=>field.binding==="CLOSURE_REMARK");
       const decision=String(values[decisionField?.key||""]||"");
       const allowed=decisionField?options[`${selected.versionId}:${decisionField.key}:${areaId}:`]||[]:[];
-      const remark=String(values[remarkField?.key||""]||"").trim();
+      const remark=String(explicitAnswers[remarkField?.key||""]||"").trim();
       if(!allowed.some(option=>option.code===decision)){setMessage("Choose Accept or Decline.");return;}
       if(decision==="DECLINE"&&!remark){setMessage("Enter a reason before declining closure.");return;}
       if(remark.length>2000){setMessage("Remarks must be 2,000 characters or fewer.");return;}
@@ -329,7 +335,7 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
       if(slaPolicyQuery.isPending||slaPolicyQuery.isError){setMessage(slaPolicyQuery.error?.message||"Wait for the SLA policy to load before submitting.");return;}
       const targetDate=String(values[dateField?.key||""]||"");
       if(slaPolicyQuery.data.policy.dateRequired&&!targetDate){setMessage("SLA Target Date is required.");return;}
-      const remark=String(values[remarkField?.key||""]||"");
+      const remark=String(explicitAnswers[remarkField?.key||""]||"");
       submissionGuard.current=true;setSubmitting(true);setMessage("");setSuccessMessage("");
       const attachments=Object.fromEntries(selectedFields.filter(field=>field.type==="IMAGE_UPLOAD"||field.type==="FILE_UPLOAD").map(field=>[field.key,(files[field.key]||[]).filter(file=>file.scanStatus!=="REJECTED").map(file=>file.id)]));
       try{const response=await request(`/defects/${encodeURIComponent(defectId)}/actions/${encodeURIComponent(actionId)}/maintenance-form`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({formId:selected.id,formVersionId:selected.versionId,status:statusCode,slaTargetDate:targetDate||null,remark:remark||null,attachments})});if(!response.ok)throw new Error(await responseErrorMessage(response,"Maintenance update failed validation."));const confirmation="Maintenance action updated.";setSuccessMessage(confirmation);void alert.success(confirmation);setValues({});await available.refetch();onWorkflowComplete?.("");}
@@ -338,7 +344,8 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
       return;
     }
     submissionGuard.current = true;
-    const answers = { ...values };
+    const answers = explicitAnswers;
+    for(const field of selectedFields)if(field.readOnly)delete answers[field.key];
     for (const field of selectedFields.filter(item => item.type.includes("UPLOAD"))) answers[field.key] = (files[field.key] || []).map(file => file.id);
     setSubmitting(true); setMessage("");setSuccessMessage("");
     try {

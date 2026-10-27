@@ -76,6 +76,39 @@ class OperationalFormServiceTest {
         }
     }
 
+    @Test void textAndTextareaDefaultsRoundTripWithVersionedConfiguration(){
+        for(FieldType type:List.of(FieldType.TEXT,FieldType.TEXTAREA)){
+            var field=new FieldDefinition("notes","Notes",type,null,false,0,new TextRules(1,40,false,false,"[A-Za-z ]+"),null,null,null,null,null,null,true,false,null,null,"Starting notes");
+            var configuration=service.validateConfiguration(operator,area,new FormConfiguration(List.of(field)));
+            try{
+                String stored=new ObjectMapper().writeValueAsString(configuration);
+                FormConfiguration reloaded=new ObjectMapper().readValue(stored,FormConfiguration.class);
+                assertEquals("Starting notes",reloaded.fields().get(0).defaultValue());
+                FormConfiguration copied=new ObjectMapper().readValue(new ObjectMapper().writeValueAsString(reloaded),FormConfiguration.class);
+                assertEquals("Starting notes",copied.fields().get(0).defaultValue());
+            }catch(Exception ex){throw new AssertionError(ex);}
+        }
+    }
+
+    @Test void validatesDefaultsAgainstTextRulesAndDisallowsUnsupportedFieldTypes(){
+        var tooLong=new FieldDefinition("notes","Notes",FieldType.TEXT,null,false,0,new TextRules(null,5,false,false,null),null,null,null,null,null,null,true,false,null,null,"default too long");
+        assertThrows(IllegalArgumentException.class,()->service.validateConfiguration(operator,area,new FormConfiguration(List.of(tooLong))));
+        var wrongPattern=new FieldDefinition("notes","Notes",FieldType.TEXTAREA,null,false,0,new TextRules(null,40,true,false,null),null,null,null,null,null,null,true,false,null,null,"123");
+        assertThrows(IllegalArgumentException.class,()->service.validateConfiguration(operator,area,new FormConfiguration(List.of(wrongPattern))));
+        var unsupported=new FieldDefinition("choice","Choice",FieldType.DROPDOWN,null,false,0,null,null,null,OptionSource.CABIN_AREAS,null,null,null,true,false,null,null,"CABIN");
+        assertThrows(IllegalArgumentException.class,()->service.validateConfiguration(operator,area,new FormConfiguration(List.of(unsupported))));
+        var empty=new FieldDefinition("notes","Notes",FieldType.TEXT,null,false,0,new TextRules(1,40,false,false,null),null,null,null,null,null,null,true,false,null,null,"");
+        assertDoesNotThrow(()->service.validateConfiguration(operator,area,new FormConfiguration(List.of(empty))));
+        var nullDefault=new FieldDefinition("notes","Notes",FieldType.TEXT,null,false,0,new TextRules(1,40,false,false,null),null,null,null,null,null,null,true,false,null,null,null);
+        assertDoesNotThrow(()->service.validateConfiguration(operator,area,new FormConfiguration(List.of(nullDefault))));
+    }
+
+    @Test void legacyFormJsonWithoutDefaultValueLoadsWithoutIntroducingOne(){
+        String json="{\"fields\":[{\"key\":\"notes\",\"label\":\"Notes\",\"type\":\"TEXT\",\"required\":false,\"order\":0}]}";
+        try{assertNull(new ObjectMapper().readValue(json,FormConfiguration.class).fields().get(0).defaultValue());}
+        catch(Exception ex){throw new AssertionError(ex);}
+    }
+
     @Test void requiresConditionDropdownToDependOnComponentMaster(){
         var condition=new FieldDefinition("condition","Condition",FieldType.DROPDOWN,null,false,1,null,null,null,OptionSource.DEFECT_CONDITIONS,new OptionFilter(null,"component"),null);
         assertThrows(IllegalArgumentException.class,()->service.validateConfiguration(operator,area,new FormConfiguration(List.of(field("component",FieldType.TEXT),condition))));
@@ -122,6 +155,24 @@ class OperationalFormServiceTest {
         assertTrue(options.stream().anyMatch(option->option.areaId().equals(cabin)&&option.purpose()==FormPurpose.CLOSURE_APPROVAL&&option.workflowStage()==WorkflowStage.APPROVAL_REQUIRED));
         assertTrue(options.stream().anyMatch(option->option.areaId().equals(futureArea)&&option.purpose()==FormPurpose.CLOSURE_APPROVAL&&option.workflowStage()==WorkflowStage.APPROVAL_REQUIRED));
         assertFalse(options.stream().anyMatch(option->option.purpose()==FormPurpose.DEFECT_REPORT&&option.workflowStage()!=WorkflowStage.INITIAL_REPORT));
+    }
+
+    @Test void sharedWorkflowPurposeMappingsAreOfferedForEveryAuditedAndFutureArea(){
+        JdbcTemplate jdbc=mock(JdbcTemplate.class);
+        List<String> codes=List.of("ATTENDANT_SEAT","CABIN","ENTRY_AREA","GALLEY","LAVATORY","AIRPORT_TAXI");
+        List<Map<String,Object>> areas=new java.util.ArrayList<>();
+        for(String code:codes)areas.add(Map.of("id",UUID.randomUUID(),"code",code));
+        when(jdbc.query(anyString(),any(RowMapper.class),any(Object[].class))).thenReturn(areas);
+        var mappedService=new OperationalFormService(jdbc,new ObjectMapper());
+
+        var options=mappedService.mappingOptions(operator);
+
+        for(String code:codes)for(FormPurpose purpose:List.of(FormPurpose.REVIEW_DECISION,FormPurpose.CORRECTIVE_ACTION,FormPurpose.CLOSURE_APPROVAL)){
+            var matching=options.stream().filter(option->option.areaCode().equals(code)&&option.purpose()==purpose).toList();
+            assertFalse(matching.isEmpty(),code+" / "+purpose);
+        }
+        assertTrue(options.stream().filter(option->option.purpose()==FormPurpose.REVIEW_DECISION)
+            .allMatch(option->option.workflowStage()==WorkflowStage.REPORTED||option.workflowStage()==WorkflowStage.UNDER_REVIEW));
     }
 
     @Test void closureFormResolutionUsesAnyActiveTenantAreaWithoutGalleySpecialCasing(){
