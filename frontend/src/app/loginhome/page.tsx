@@ -17,7 +17,7 @@ import AccessStatePage, { accessFailureMessage } from "@/common/auth/AccessState
 import DialogPortal from "@/common/dialogs/DialogPortal";
 import OperationalFormRenderer from "@/common/forms/OperationalFormRenderer";
 import { formPurposeForStatus } from "@/common/forms/formResolution";
-import { defectReportPayload, ReportField } from "@/common/forms/defectReportMapping";
+import { configuredAnswerIssue, ReportField } from "@/common/forms/defectReportMapping";
 import NotificationBell from "@/common/notifications/NotificationBell";
 import ApiRateLimitsPage from "@/common/configuration/ApiRateLimitsPage";
 import UserLoginMonitoringPage from "@/common/configuration/UserLoginMonitoringPage";
@@ -360,8 +360,8 @@ export default function Home() {
     }
     setSaving(true);
     const formElement = event.currentTarget;
-    try { defectReportPayload(selectedFormForReport.configuration.fields, reportFormAnswers, areaMasterOptions.find(item=>item.id===selectedAreaId)?.code); }
-    catch (error) { await alert.warning(error instanceof Error ? error.message : "Configure the selected report form before saving."); return; }
+    const schemaIssue=configuredAnswerIssue(selectedFormForReport.configuration.fields,{...reportFormAnswers,...reportFormFiles});
+    if(schemaIssue){setSaving(false);await alert.warning(schemaIssue);return;}
     const payload = { tailNumber: selectedAircraft.tailNumber, areaId: selectedAreaId, aircraftId: selectedAircraftId, formId: selectedFormForReport.id, formVersionId: selectedFormForReport.versionId, formAnswers: reportFormAnswers };
     try {
       reportIdempotencyKey.current ||= crypto.randomUUID();

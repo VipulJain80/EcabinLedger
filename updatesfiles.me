@@ -94,6 +94,8 @@ Verification executed:
 - `cd frontend && node --experimental-strip-types --test src/common/forms/*.test.mjs src/common/fleet/*.test.mjs src/common/dialogs/*.test.mjs` — passed: 22 tests, 0 failures.
 - `git diff --check` — passed.
 
+
+
 2026-10-26 — Add fixed token lifetime and inactivity logout
 
 The local demo issuer now issues 30-minute JWTs. Both the enterprise and local JWT decoders require `iat` and `exp`, reject tokens whose declared lifetime exceeds 30 minutes, and reject tokens at their exact expiration or 30-minute age on every authenticated request. The authenticated frontend shell signs users out after 10 minutes without mouse, pointer/click, keyboard, scroll, or touch activity; interaction never changes the token deadline. Idle activity and logout signals are shared between tabs, the current token is cached rather than refreshed by the app, and 401 responses clear the client session and redirect to login with a reason notice.
@@ -2831,3 +2833,98 @@ Verification:
 - `cd frontend && pnpm exec tsc --noEmit` — passed.
 - `cd frontend && pnpm lint` — passed with 0 errors and 2 existing warnings (`reportFormFiles` in `loginhome/page.tsx`; `<img>` in `AttachmentPreviewDialog.tsx`).
 - `git diff --check` — passed.
+
+-----------28Oct2026----------
+2026-10-28 — Clear stale Form Master validation rules when changing bindings
+
+Changing a field's approved binding now clears validation settings that do not apply to the resulting field type. For example, a Text field rebound as Number no longer retains its Text rules, which the backend correctly rejects. Defect submission's separate typed-domain requirements remain unchanged.
+
+Files changed:
+- `frontend/src/common/configuration/FormMasterPage.tsx` — apply type-appropriate validation rules when changing a field binding.
+- `frontend/src/common/configuration/formMasterFieldRules.ts` — retain only validation-rule groups supported by the resulting field type.
+- `updatesfiles.me` — record this fix.
+
+Verification:
+- `cd frontend && pnpm exec tsc --noEmit` — passed.
+- `git diff --check` — passed.
+- Automated tests were not run.
+2026-10-28 — Generic versioned operational form submissions and publication compatibility
+
+Removed the frontend's fixed defect-report payload builder. The browser now validates answers against the selected published form schema and sends configured answers; the backend validates that schema before creating the typed defect, then persists the validated answers with the immutable form/version reference. Typed defect columns, tenant-scoped reference checks, aircraft validation, attachment ownership/scanning, and workflow persistence remain authoritative. Historical submissions are left unchanged.
+
+Form Master now consumes backend projection-capability metadata for publication feedback. Aircraft Registration remains the only universally required form field. Other fields needed by the current typed defect database model are required for publication only when the selected projection needs them; drafts can be saved while incomplete. Remarks no longer has an area-name restriction. The verified legacy Galley projection is recognized by its exact historical field signature. Area-to-domain location compatibility is checked before publication; areas without a supported location mapping remain blocked until their domain mapping is defined.
+
+Files changed:
+- `backend/src/main/java/com/ecabin/ledger/api/DefectController.java` — validate the selected published answer schema before creating a defect.
+- `backend/src/main/java/com/ecabin/ledger/api/FormModels.java` — expose projection capability metadata and generic answers on form-submission responses, retaining compatibility constructors.
+- `backend/src/main/java/com/ecabin/ledger/service/DefectReportBindingRules.java` — separate universal Aircraft configuration from typed-projection compatibility; narrowly identify the legacy Galley signature and centralize area-to-location compatibility.
+- `backend/src/main/java/com/ecabin/ledger/service/FormFieldBindingCatalog.java` — publish the typed-projection requirements as backend metadata consumed by Form Master.
+- `backend/src/main/java/com/ecabin/ledger/service/OperationalFormService.java` — validate against published schemas, resolve typed defect fields, and persist/read generic submitted answers.
+- `backend/src/main/resources/db/migration/V71__retain_versioned_form_answers.sql` — add a nullable JSONB answer snapshot; existing immutable rows remain NULL and are not backfilled.
+- `backend/src/test/java/com/ecabin/ledger/service/DefectReportBindingRulesTest.java` — cover requiredness metadata, legacy Galley signature, area mapping, and publication compatibility.
+- `backend/src/test/java/com/ecabin/ledger/service/OperationalFormServiceTest.java` — cover Aircraft Registration configuration and field-validation behavior.
+- `backend/src/test/java/com/ecabin/ledger/service/LocalPostgresOperationalIntegrationTest.java` — add generic answer persistence/retrieval and cross-area Remarks coverage.
+- `backend/src/test/java/com/ecabin/ledger/service/PostgresMigrationSmokeTest.java` — assert the forward migration adds a nullable JSONB answer column and update expected migration head to V71.
+- `frontend/src/common/forms/defectReportMapping.ts` — replace hardcoded payload mapping with schema-based answer checks; preserve default-value handling.
+- `frontend/src/common/forms/defectReportMapping.test.mjs` — test configured validation, optional fields, cross-area Remarks, and defaults.
+- `frontend/src/common/configuration/FormMasterPage.tsx` — show metadata-driven publication requirements and allow additional unbound fields to be saved/published where the backend supports them.
+- `frontend/src/common/fleet/ReportDefectPage.tsx` and `frontend/src/app/loginhome/page.tsx` — submit configured answer maps without client-side domain remapping.
+- `frontend/src/common/fleet/ReviewerDecisionForm.tsx` — display unbound submitted answers alongside typed defect snapshots.
+- `updatesfiles.me` — record this implementation and verification.
+
+Verification:
+- `mvn -f backend/pom.xml -Dtest=DefectReportBindingRulesTest,OperationalFormServiceTest test` — 28 passed, 0 failed, 0 errors, 0 skipped.
+- `node --experimental-strip-types --test src/common/forms/defectReportMapping.test.mjs` — 10 passed, 0 failed, 0 skipped; Node emitted the existing module-type performance warning.
+- `NEXT_PUBLIC_API_BASE_URL=https://localhost:8080 pnpm exec next typegen` — passed.
+- `pnpm exec tsc --noEmit` — passed after the production build completed; an earlier concurrent run overlapped Next.js route-type regeneration and reported missing generated files.
+- `NEXT_PUBLIC_API_BASE_URL=https://localhost:8080 pnpm exec next build --webpack` — passed.
+- `pnpm lint` — passed with 0 errors and 1 existing `<img>` optimization warning in `AttachmentPreviewDialog.tsx`.
+- `git diff --check` — passed.
+- PostgreSQL migration and operational integration tests were not run; V71 was not applied and no database records were modified.
+
+2026-10-28 — Keep defect-report publication independent from optional typed fields
+
+Removed the leftover publication-time requirement for Defect Category, Component, Condition, Location, Title, Description, and Severity. Aircraft Registration remains required, visible, and editable. Typed values still required by the current defect model are validated at submission before the defect row is created, with an actionable missing-field message. Form Master no longer treats typed-projection metadata as a rule that makes those fields mandatory in each form. Added a regression test proving Cabin and Lavatory form lookup returns a published aircraft-only form.
+
+Files changed for this fix:
+- `backend/src/main/java/com/ecabin/ledger/service/DefectReportBindingRules.java` — publication validation now checks supported area mapping and the Aircraft Registration invariant only.
+- `frontend/src/common/configuration/FormMasterPage.tsx` — remove projection metadata from form-requiredness and publication-blocking UI rules.
+- `backend/src/test/java/com/ecabin/ledger/service/DefectReportBindingRulesTest.java` — cover optional typed bindings at publication.
+- `backend/src/test/java/com/ecabin/ledger/service/OperationalFormServiceTest.java` — cover published form lookup for Cabin and Lavatory with only Aircraft Registration configured.
+- `updatesfiles.me` — record this fix.
+
+Verification:
+- `mvn -f backend/pom.xml '-Dtest=DefectReportBindingRulesTest,OperationalFormServiceTest' test` — 29 passed, 0 failed, 0 errors, 0 skipped.
+- `node --experimental-strip-types --test src/common/forms/defectReportMapping.test.mjs` — 10 passed, 0 failed, 0 skipped; Node emitted the existing module-type warning.
+- `pnpm exec tsc --noEmit` — passed.
+- `pnpm lint` — 0 errors, 1 existing `<img>` optimization warning in `AttachmentPreviewDialog.tsx`.
+- `git diff --check` — passed.
+- No migrations or database records were changed; PostgreSQL integration tests were not run.
+
+2026-10-28 — Derive defect form persistence requirements from schema
+
+The fixed universal binding list has been removed. Defect form requiredness continues to come from the selected immutable version's configured `required` and conditional-required metadata; Aircraft Registration remains an explicit protected form invariant. Backend field-binding metadata now separates binding support and storage projection from database-requiredness, which is derived from the active `defects_dtl` schema and returned to Form Master. Publication checks only configured fields needed to satisfy current NOT NULL columns without database defaults. Submission resolves optional configured text and reference values without forcing answers, then validates database-required values before insertion. The existing database default for omitted category is applied by PostgreSQL. Tenant-scoped active-reference checks remain when a reference is supplied.
+
+A forward-only V72 migration relaxes the historical defect form snapshot check for component and condition references, matching their nullable columns in `defects_dtl`; existing snapshots are unchanged. No database migration was executed and no database records were modified.
+
+Files changed for this increment:
+- `backend/src/main/java/com/ecabin/ledger/api/FormModels.java` — separate storage-column metadata and schema-derived persistence-required metadata from the legacy binding-requiredness flag.
+- `backend/src/main/java/com/ecabin/ledger/api/OperationalFormsController.java` — return Form Master binding capabilities enriched with current schema requirements.
+- `backend/src/main/java/com/ecabin/ledger/service/FormFieldBindingCatalog.java` — describe supported typed persistence columns without a universal mandatory-binding list.
+- `backend/src/main/java/com/ecabin/ledger/service/DefectPersistenceRequirements.java` — derive required fields from PostgreSQL schema nullability/default metadata; validate publication and submissions using that result.
+- `backend/src/main/java/com/ecabin/ledger/service/DefectReportBindingRules.java` — retain the Aircraft Registration invariant and remove typed projection completeness requirements from general form validation.
+- `backend/src/main/java/com/ecabin/ledger/service/OperationalFormService.java` — keep publication compatibility aligned with schema and resolve absent optional answers without unconditional reads.
+- `backend/src/main/java/com/ecabin/ledger/service/DefectService.java` — validate required typed values from schema metadata before insert; preserve active tenant reference checks and use the existing database category default when omitted.
+- `backend/src/main/resources/db/migration/V72__allow_optional_defect_snapshot_bindings.sql` — permit null component/condition IDs in new immutable snapshots.
+- `frontend/src/common/configuration/FormMasterPage.tsx` — use backend-provided persistence-required metadata for controls and publication feedback.
+- `backend/src/test/java/com/ecabin/ledger/service/DefectPersistenceRequirementsTest.java` — verify schema-driven required bindings and submission validation.
+- `backend/src/test/java/com/ecabin/ledger/service/DefectReportBindingRulesTest.java`, `OperationalFormServiceTest.java`, `PostgresMigrationSmokeTest.java` — cover protected aircraft invariant, schema compatibility, and V72 constraint definition.
+- `updatesfiles.me` — record this implementation and verification.
+
+Verification:
+- `mvn -f backend/pom.xml '-Dtest=DefectReportBindingRulesTest,DefectPersistenceRequirementsTest,OperationalFormServiceTest,FormFieldBindingCatalogTest,FormConfigurationCompatibilityTest' test` — 39 passed, 0 failures, 0 errors, 0 skipped.
+- `node --experimental-strip-types --test src/common/forms/defectReportMapping.test.mjs` — 10 passed, 0 failed, 0 skipped; Node emitted a module-type performance warning.
+- `pnpm exec tsc --noEmit` — passed.
+- `pnpm lint` — 0 errors, 1 existing `<img>` warning in `AttachmentPreviewDialog.tsx`.
+- `git diff --check` — passed.
+- PostgreSQL migration/integration tests were not run; V72 was not applied.

@@ -116,6 +116,7 @@ public class DefectController {
         var selectedForm = forms.published(user.organizationId(), request.formId(), request.formVersionId(),request.areaId());
         if (!request.areaId().equals(selectedForm.areaId()))
             throw new IllegalArgumentException("The selected published form is not configured for the chosen cabin area.");
+        forms.validateDefectReportAnswers(user.organizationId(),request.areaId(),request.formId(),request.formVersionId(),request.formAnswers());
         var mapped=forms.resolveDefectReport(user.organizationId(),request.areaId(),request.formId(),request.formVersionId(),request.formAnswers());
         CreateDefectRequest canonical=new CreateDefectRequest(request.tailNumber(),(String)mapped.get("location"),(String)mapped.get("category"),request.areaId(),
             (UUID)mapped.get("componentId"),(UUID)mapped.get("conditionId"),(String)mapped.get("zone"),(Integer)mapped.get("rowNumber"),(String)mapped.get("seatReference"),null,

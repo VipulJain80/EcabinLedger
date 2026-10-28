@@ -3,7 +3,7 @@
 import { FormEvent, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import OperationalFormRenderer from "@/common/forms/OperationalFormRenderer";
-import { defectReportPayload, ReportField } from "@/common/forms/defectReportMapping";
+import { configuredAnswerIssue, ReportField } from "@/common/forms/defectReportMapping";
 import { alert, responseErrorMessage } from "@/common/alerts";
 import { areaFormSelection, selectableCabinAreas, singleAreaForm } from "@/common/fleet/areaFormSelection";
 import { useDefectWorkflowStatuses, workflowStatusLabel } from "@/common/workflow/workflowStatuses";
@@ -41,8 +41,9 @@ export default function ReportDefectPage({request,onCreated,onOpenDefect,organiz
 
   async function submit(event:FormEvent<HTMLFormElement>){event.preventDefault();if(saving||!selectedForm||!area||!aircraft||!ready)return;setSaving(true);setStatusMessage("");
     try{
-      defectReportPayload(selectedForm.configuration.fields,answers,area.code);
-      for(const field of selectedForm.configuration.fields as UploadField[]){if(!field.type.includes("UPLOAD"))continue;const count=(files[field.key]||[]).length;const rules=field.fileRules;if(field.required&&count<(rules?.minCount??1))throw new Error(`Attach at least ${rules?.minCount??1} image(s) for ${field.label}.`);if(rules?.maxCount!==undefined&&count>rules.maxCount)throw new Error(`Select no more than ${rules.maxCount} files for ${field.label}.`);}
+      const schemaIssue=configuredAnswerIssue(selectedForm.configuration.fields,{...answers,...files});
+      if(schemaIssue)throw new Error(schemaIssue);
+      for(const field of selectedForm.configuration.fields as UploadField[]){if(!field.type.includes("UPLOAD"))continue;const count=(files[field.key]||[]).length;const rules=field.fileRules;if(rules?.maxCount!==undefined&&count>rules.maxCount)throw new Error(`Select no more than ${rules.maxCount} files for ${field.label}.`);}
       idempotencyKey.current ||= crypto.randomUUID();
       let defect=created;
       if(!defect){const response=await request("/defects",{method:"POST",headers:{"content-type":"application/json","Idempotency-Key":idempotencyKey.current},body:JSON.stringify({tailNumber:aircraft.tailNumber,aircraftId:aircraft.id,areaId,formId:selectedForm.id,formVersionId:selectedForm.versionId,formAnswers:answers})});if(!response.ok)throw new Error(await responseErrorMessage(response,"Could not create the defect. Check the selected aircraft and required form fields."));defect=await response.json() as Created;setCreated(defect);}

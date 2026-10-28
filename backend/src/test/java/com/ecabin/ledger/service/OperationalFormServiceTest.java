@@ -10,6 +10,7 @@ import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
+import org.springframework.jdbc.core.ResultSetExtractor;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
@@ -18,28 +19,28 @@ class OperationalFormServiceTest {
     private final UUID operator=UUID.randomUUID(),area=UUID.randomUUID();
 
     @Test void acceptsTypedFieldConfigurationAndPreservesOrdering(){
-        var result=service.validateConfiguration(operator,area,new FormConfiguration(List.of(
+        var result=validateDraft(new FormConfiguration(List.of(
             new FieldDefinition("finding","Finding",FieldType.TEXT,null,true,0,new TextRules(1,240,false,false,"[A-Za-z0-9 .,/-]+"),null,null,null,null,null),
             new FieldDefinition("serviceable","Serviceable",FieldType.CHECKBOX,null,false,1,null,null,null,null,null,null),
             new FieldDefinition("component","Component",FieldType.DROPDOWN,null,true,2,null,null,null,OptionSource.COMPONENTS,null,null),
             new FieldDefinition("condition","Condition",FieldType.DROPDOWN,null,true,3,null,null,null,OptionSource.DEFECT_CONDITIONS,new OptionFilter(null,"component"),null),
             new FieldDefinition("evidence","Evidence",FieldType.FILE_UPLOAD,null,true,4,null,null,null,null,null,new FileRules(List.of("png","pdf"),List.of("image/png","application/pdf"),5_000_000L,1,3))
         )));
-        assertEquals(5,result.fields().size());
+        assertEquals(6,result.fields().size());
     }
 
     @Test void rejectsDuplicateKeysAndUnsafePatterns(){
         var duplicate=new FormConfiguration(List.of(field("finding",FieldType.TEXT),field("finding",FieldType.DATE)));
         assertThrows(IllegalArgumentException.class,()->service.validateConfiguration(operator,area,duplicate));
         var unsafe=new FieldDefinition("reference","Reference",FieldType.TEXT,null,false,0,new TextRules(null,40,false,false,"(a+)+"),null,null,null,null,null);
-        assertThrows(IllegalArgumentException.class,()->service.validateConfiguration(operator,area,new FormConfiguration(List.of(unsafe))));
+        assertThrows(IllegalArgumentException.class,()->validateDraft(new FormConfiguration(List.of(unsafe))));
     }
 
     @Test void rejectsTypeMismatchedRulesAndInvalidEvidenceLimits(){
         var mismatched=new FieldDefinition("date","Date",FieldType.DATE,null,false,0,new TextRules(1,20,false,false,null),null,null,null,null,null);
-        assertThrows(IllegalArgumentException.class,()->service.validateConfiguration(operator,area,new FormConfiguration(List.of(mismatched))));
+        assertThrows(IllegalArgumentException.class,()->validateDraft(new FormConfiguration(List.of(mismatched))));
         var invalidFile=new FieldDefinition("evidence","Evidence",FieldType.FILE_UPLOAD,null,false,0,null,null,null,null,null,new FileRules(List.of("exe"),List.of("application/pdf"),100L,3,2));
-        assertThrows(IllegalArgumentException.class,()->service.validateConfiguration(operator,area,new FormConfiguration(List.of(invalidFile))));
+        assertThrows(IllegalArgumentException.class,()->validateDraft(new FormConfiguration(List.of(invalidFile))));
     }
 
     @Test void acceptsAndSerializesIndependentUploadRulesForBothFieldTypes(){
@@ -48,7 +49,7 @@ class OperationalFormServiceTest {
             List<String> mimes=type==FieldType.IMAGE_UPLOAD?List.of("image/png"):List.of("image/png","application/pdf");
             var field=new FieldDefinition("evidence","Evidence",type,null,false,0,null,null,null,null,null,
                 new FileRules(extensions,mimes,20L*1024*1024,1,3,30L*1024*1024));
-            var configuration=service.validateConfiguration(operator,area,new FormConfiguration(List.of(field)));
+            var configuration=validateDraft(new FormConfiguration(List.of(field)));
             assertEquals(30L*1024*1024,configuration.fields().get(0).fileRules().maxTotalSizeBytes());
             String json;
             try{json=new ObjectMapper().writeValueAsString(configuration);}catch(Exception ex){throw new AssertionError(ex);}
@@ -63,7 +64,7 @@ class OperationalFormServiceTest {
     @Test void existingUploadConfigurationsWithoutTotalLimitRemainValidAndKeepAbsentProperty(){
         var legacy=new FieldDefinition("evidence","Evidence",FieldType.IMAGE_UPLOAD,null,true,0,null,null,null,null,null,
             new FileRules(List.of("png"),List.of("image/png"),5L*1024*1024,1,3));
-        var validated=service.validateConfiguration(operator,area,new FormConfiguration(List.of(legacy)));
+        var validated=validateDraft(new FormConfiguration(List.of(legacy)));
         assertNull(validated.fields().get(0).fileRules().maxTotalSizeBytes());
         assertEquals(15L*1024*1024,com.ecabin.ledger.storage.EvidenceFileValidator.maxTotalBytes(validated.fields().get(0)));
     }
@@ -72,14 +73,14 @@ class OperationalFormServiceTest {
         for(Long limit:List.of(0L,-1L,19L*1024*1024,201L*1024*1024,30L*1024*1024+1)){
             var invalid=new FieldDefinition("evidence","Evidence",FieldType.FILE_UPLOAD,null,false,0,null,null,null,null,null,
                 new FileRules(List.of("pdf"),List.of("application/pdf"),20L*1024*1024,0,3,limit));
-            assertThrows(IllegalArgumentException.class,()->service.validateConfiguration(operator,area,new FormConfiguration(List.of(invalid))),String.valueOf(limit));
+            assertThrows(IllegalArgumentException.class,()->validateDraft(new FormConfiguration(List.of(invalid))),String.valueOf(limit));
         }
     }
 
     @Test void textAndTextareaDefaultsRoundTripWithVersionedConfiguration(){
         for(FieldType type:List.of(FieldType.TEXT,FieldType.TEXTAREA)){
             var field=new FieldDefinition("notes","Notes",type,null,false,0,new TextRules(1,40,false,false,"[A-Za-z ]+"),null,null,null,null,null,null,true,false,null,null,"Starting notes");
-            var configuration=service.validateConfiguration(operator,area,new FormConfiguration(List.of(field)));
+            var configuration=validateDraft(new FormConfiguration(List.of(field)));
             try{
                 String stored=new ObjectMapper().writeValueAsString(configuration);
                 FormConfiguration reloaded=new ObjectMapper().readValue(stored,FormConfiguration.class);
@@ -92,15 +93,15 @@ class OperationalFormServiceTest {
 
     @Test void validatesDefaultsAgainstTextRulesAndDisallowsUnsupportedFieldTypes(){
         var tooLong=new FieldDefinition("notes","Notes",FieldType.TEXT,null,false,0,new TextRules(null,5,false,false,null),null,null,null,null,null,null,true,false,null,null,"default too long");
-        assertThrows(IllegalArgumentException.class,()->service.validateConfiguration(operator,area,new FormConfiguration(List.of(tooLong))));
+        assertThrows(IllegalArgumentException.class,()->validateDraft(new FormConfiguration(List.of(tooLong))));
         var wrongPattern=new FieldDefinition("notes","Notes",FieldType.TEXTAREA,null,false,0,new TextRules(null,40,true,false,null),null,null,null,null,null,null,true,false,null,null,"123");
-        assertThrows(IllegalArgumentException.class,()->service.validateConfiguration(operator,area,new FormConfiguration(List.of(wrongPattern))));
+        assertThrows(IllegalArgumentException.class,()->validateDraft(new FormConfiguration(List.of(wrongPattern))));
         var unsupported=new FieldDefinition("choice","Choice",FieldType.DROPDOWN,null,false,0,null,null,null,OptionSource.CABIN_AREAS,null,null,null,true,false,null,null,"CABIN");
-        assertThrows(IllegalArgumentException.class,()->service.validateConfiguration(operator,area,new FormConfiguration(List.of(unsupported))));
+        assertThrows(IllegalArgumentException.class,()->validateDraft(new FormConfiguration(List.of(unsupported))));
         var empty=new FieldDefinition("notes","Notes",FieldType.TEXT,null,false,0,new TextRules(1,40,false,false,null),null,null,null,null,null,null,true,false,null,null,"");
-        assertDoesNotThrow(()->service.validateConfiguration(operator,area,new FormConfiguration(List.of(empty))));
+        assertDoesNotThrow(()->validateDraft(new FormConfiguration(List.of(empty))));
         var nullDefault=new FieldDefinition("notes","Notes",FieldType.TEXT,null,false,0,new TextRules(1,40,false,false,null),null,null,null,null,null,null,true,false,null,null,null);
-        assertDoesNotThrow(()->service.validateConfiguration(operator,area,new FormConfiguration(List.of(nullDefault))));
+        assertDoesNotThrow(()->validateDraft(new FormConfiguration(List.of(nullDefault))));
     }
 
     @Test void legacyFormJsonWithoutDefaultValueLoadsWithoutIntroducingOne(){
@@ -111,7 +112,15 @@ class OperationalFormServiceTest {
 
     @Test void requiresConditionDropdownToDependOnComponentMaster(){
         var condition=new FieldDefinition("condition","Condition",FieldType.DROPDOWN,null,false,1,null,null,null,OptionSource.DEFECT_CONDITIONS,new OptionFilter(null,"component"),null);
-        assertThrows(IllegalArgumentException.class,()->service.validateConfiguration(operator,area,new FormConfiguration(List.of(field("component",FieldType.TEXT),condition))));
+        assertThrows(IllegalArgumentException.class,()->validateDraft(new FormConfiguration(List.of(field("component",FieldType.TEXT),condition))));
+    }
+
+    @Test void everyDefectReportDraftRequiresVisibleEditableAircraftRegistration(){
+        var aircraft=new FieldDefinition("aircraftId","Aircraft Registration",FieldType.AIRCRAFT_SELECT,null,true,0,null,null,null,OptionSource.AIRCRAFT,null,null,DefectFieldBinding.AIRCRAFT_ID);
+        assertDoesNotThrow(()->validateDraft(new FormConfiguration(List.of(aircraft))));
+        assertThrows(IllegalArgumentException.class,()->service.validateConfiguration(operator,area,new FormConfiguration(List.of(field("notes",FieldType.TEXT)))));
+        var hidden=new FieldDefinition("aircraftId","Aircraft Registration",FieldType.AIRCRAFT_SELECT,null,true,0,null,null,null,OptionSource.AIRCRAFT,null,null,DefectFieldBinding.AIRCRAFT_ID,false,false);
+        assertThrows(IllegalArgumentException.class,()->validateDraft(new FormConfiguration(List.of(hidden))));
     }
 
     @Test void publishedAreaLookupUsesTenantAreaActiveFormAndCurrentPublishedVersionMapping(){
@@ -132,6 +141,28 @@ class OperationalFormServiceTest {
         assertTrue(query.getValue().contains("v.operator_id=f.operator_id AND v.form_id=f.id"));
         assertTrue(query.getValue().contains("JOIN operational_form_version_areas_dtl va"));
         assertFalse(query.getValue().contains("cabin_zones"));
+    }
+
+    @Test void publishedDefectReportLookupUsesSchemaRequiredFieldsForCabinAndLavatory(){
+        for(String areaCode:List.of("CABIN","LAVATORY")){
+            JdbcTemplate jdbc=mock(JdbcTemplate.class);
+            when(jdbc.queryForObject(anyString(),eq(Boolean.class),any(Object[].class))).thenReturn(true);
+            when(jdbc.queryForObject(anyString(),eq(String.class),any(Object[].class))).thenReturn(areaCode);
+            var aircraft=new FieldDefinition("aircraftId","Aircraft Registration",FieldType.AIRCRAFT_SELECT,null,true,0,null,null,null,OptionSource.AIRCRAFT,null,null,DefectFieldBinding.AIRCRAFT_ID);
+            var zone=new FieldDefinition("zone","Location",FieldType.TEXT,null,true,1,null,null,null,null,null,null,DefectFieldBinding.ZONE);
+            var title=new FieldDefinition("title","Title",FieldType.TEXT,null,true,2,null,null,null,null,null,null,DefectFieldBinding.TITLE);
+            var description=new FieldDefinition("description","Description",FieldType.TEXTAREA,null,true,3,null,null,null,null,null,null,DefectFieldBinding.DESCRIPTION);
+            var severity=new FieldDefinition("severity","Severity",FieldType.DROPDOWN,null,true,4,null,null,null,OptionSource.DEFECT_SEVERITIES,null,null,DefectFieldBinding.SEVERITY);
+            var form=new FormForArea(UUID.randomUUID(),"DEFECT_REPORT", "Report",area,
+                FormPurpose.DEFECT_REPORT,WorkflowStage.INITIAL_REPORT,UUID.randomUUID(),1,new FormConfiguration(List.of(aircraft,zone,title,description,severity)));
+            when(jdbc.query(anyString(),any(RowMapper.class),any(Object[].class))).thenReturn(List.of(form));
+            when(jdbc.query(contains("information_schema.columns"),any(ResultSetExtractor.class))).thenReturn(Map.of("zone",true,"title",true,"description",true,"severity",true,"category",false,"component_id",false,"condition_id",false,"severity_id",false));
+
+            var mappedService=new OperationalFormService(jdbc,new ObjectMapper());
+
+            assertEquals(List.of(form),mappedService.publishedForArea(operator,area),
+                "The selected form must satisfy only persisted database requirements and configured aircraft selection.");
+        }
     }
 
     @Test void inactiveOrForeignTenantAreaReturnsNoFormsAndDoesNotQueryMappings(){
@@ -237,5 +268,12 @@ class OperationalFormServiceTest {
         assertTrue(updates.getAllValues().stream().anyMatch(sql->sql.contains("INSERT INTO defect_events_dtl")),"The mapping change must be audited.");
     }
 
+    private FormConfiguration validateDraft(FormConfiguration configuration){
+        if(configuration.fields().stream().anyMatch(candidate->candidate.binding()==DefectFieldBinding.AIRCRAFT_ID))
+            return service.validateConfiguration(operator,area,configuration);
+        var fields=new java.util.ArrayList<>(configuration.fields());
+        fields.add(new FieldDefinition("aircraftId","Aircraft Registration",FieldType.AIRCRAFT_SELECT,null,true,fields.size(),null,null,null,OptionSource.AIRCRAFT,null,null,DefectFieldBinding.AIRCRAFT_ID));
+        return service.validateConfiguration(operator,area,new FormConfiguration(fields));
+    }
     private FieldDefinition field(String key,FieldType type){return new FieldDefinition(key,key,type,null,false,0,null,null,null,null,null,null);}
 }

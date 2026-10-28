@@ -1,15 +1,13 @@
 export type DefectBinding = "DEFECT_CATEGORY" | "COMPONENT_ID" | "CONDITION_ID" | "ZONE" | "ROW_NUMBER" | "SEAT_REFERENCE" | "TITLE" | "DESCRIPTION" | "REMARKS" | "SEVERITY" | "EVIDENCE_ATTACHMENTS" | "AIRCRAFT_ID" | "REVIEW_DECISION" | "REVIEW_MAINTENANCE_TEAM" | "REVIEW_REJECTION_REASON" | "REVIEW_REMARK" | "MAINTENANCE_STATUS" | "SLA_TARGET_DATE" | "MAINTENANCE_REMARK" | "CLOSURE_DECISION" | "CLOSURE_REMARK";
-export type ReportField = { key: string; label: string; type: string; required: boolean; defaultValue?: string | null; visible?: boolean | null; readOnly?: boolean | null; optionSource?: string | null; binding?: DefectBinding | null; optionFilter?: { componentFieldKey?: string | null } | null; fileRules?: { minCount?: number; extensions?: string[]; mimeTypes?: string[]; maxFileSizeBytes?: number } | null };
+export type ReportField = { key: string; label: string; type: string; required: boolean; defaultValue?: string | null; visible?: boolean | null; readOnly?: boolean | null; visibleWhen?: { fieldKey: string; equals: string } | null; requiredWhen?: { fieldKey: string; equals: string } | null; optionSource?: string | null; binding?: DefectBinding | null; optionFilter?: { componentFieldKey?: string | null } | null; fileRules?: { minCount?: number; maxCount?: number; extensions?: string[]; mimeTypes?: string[]; maxFileSizeBytes?: number } | null };
 export function defectReportBindingIssue(fields: readonly ReportField[]): string {
-  const unsupported = fields.find(field => field.type !== "SECTION" && !field.binding);
-  if (unsupported) return `“${unsupported.label}” has no approved database mapping. Configure an approved backend binding before publishing or submitting this form.`;
   const hiddenRequired = fields.find(field => field.visible === false && field.required);
   if (hiddenRequired) return `Required field “${hiddenRequired.label}” cannot be hidden.`;
   const lockedRequired = fields.find(field => field.readOnly && field.required);
   if (lockedRequired) return `Required field “${lockedRequired.label}” must be editable.`;
   const bound = fields.filter(field => field.binding);
   const aircraft = bound.filter(field => field.binding === "AIRCRAFT_ID");
-  if (aircraft.length !== 1 || !aircraft[0].required || aircraft[0].visible === false || aircraft[0].readOnly === true)
+  if (aircraft.length !== 1 || !aircraft[0].required || aircraft[0].visible === false || aircraft[0].readOnly === true || aircraft[0].visibleWhen || aircraft[0].requiredWhen)
     return "Every defect-report form must include a visible, editable, required Aircraft Registration selector.";
   const expected: Partial<Record<DefectBinding, [string, string?]>> = {
     DEFECT_CATEGORY: ["DROPDOWN", "DEFECT_CATEGORIES"], COMPONENT_ID: ["DROPDOWN", "COMPONENTS"],
@@ -27,37 +25,32 @@ export function defectReportBindingIssue(fields: readonly ReportField[]): string
   return "";
 }
 
+/** Client-side usability check against the selected version's field schema; the backend remains authoritative. */
+export function configuredAnswerIssue(fields: readonly ReportField[], answers: Record<string, unknown>): string {
+  for (const field of fields) {
+    if (field.type === "SECTION" || field.type === "AIRCRAFT_SELECT" || field.visible === false) continue;
+    if (field.visibleWhen && String(answers[field.visibleWhen.fieldKey] ?? "") !== field.visibleWhen.equals) continue;
+    const value = answers[field.key];
+    if (field.type === "FILE_UPLOAD" || field.type === "IMAGE_UPLOAD") {
+      const minimum = field.required ? Math.max(1, field.fileRules?.minCount ?? 0) : field.fileRules?.minCount ?? 0;
+      const count = Array.isArray(value) ? value.length : 0;
+      if (count < minimum) return `Attach at least ${minimum} file(s) for ${field.label}.`;
+      if (field.fileRules?.maxCount != null && count > field.fileRules.maxCount) return `Select no more than ${field.fileRules.maxCount} files for ${field.label}.`;
+      continue;
+    }
+    const required = field.required || Boolean(field.requiredWhen && String(answers[field.requiredWhen.fieldKey] ?? "") === field.requiredWhen.equals);
+    if (!required) continue;
+    const empty = value == null || (typeof value === "string" && value.trim() === "") || (Array.isArray(value) && value.length === 0) || (field.type === "CHECKBOX" && value !== true);
+    if (empty) return `Complete ${field.label} before submitting the form.`;
+  }
+  return "";
+}
+
 /** Normalize old Galley source tokens in editable Form Master state without changing stored history. */
 export function canonicalizeLegacySeveritySource<T extends ReportField>(fields: readonly T[]): T[] {
   return fields.map(field => field.binding === "SEVERITY" && field.optionSource === "GALLEY_SEVERITIES"
     ? { ...field, optionSource: "DEFECT_SEVERITIES" } as T
     : field);
-}
-
-export function defectReportPayload(fields: readonly ReportField[], answers: Record<string, unknown>, areaCode?: string): Record<string, unknown> {
-  const issue = defectReportBindingIssue(fields);
-  if (issue) throw new Error(issue);
-  const value = (binding: DefectBinding) => {
-    const field = fields.find(item => item.binding === binding);
-    if (!field) throw new Error(`This form does not collect ${binding.replaceAll("_", " ").toLowerCase()}, which is required to create a defect. Ask an administrator to add the field and publish a new version.`);
-    const answer = field ? answers[field.key] : undefined;
-    if (answer === undefined || answer === null || answer === "") throw new Error(`Complete ${field?.label || binding.replaceAll("_", " ")} before saving the defect.`);
-    return answer;
-  };
-  const legacyGalleyProjection = areaCode === "GALLEY" && fields.some(field => field.binding === "REMARKS")
-    && !fields.some(field => ["DEFECT_CATEGORY", "TITLE", "DESCRIPTION"].includes(field.binding || ""));
-  if (legacyGalleyProjection) return { componentId: value("COMPONENT_ID"), conditionId: value("CONDITION_ID"), zone: value("ZONE"), severity: value("SEVERITY"), remarks: fields.some(field => field.binding === "REMARKS") ? answers[fields.find(field => field.binding === "REMARKS")!.key] || "" : "" };
-  const description=value("DESCRIPTION");
-  const remarksField=fields.find(field=>field.binding==="REMARKS");
-  const remarks=remarksField?answers[remarksField.key]:undefined;
-  const combinedDescription=typeof remarks==="string"&&remarks.trim()?`${description}\nRemarks: ${remarks.trim()}`:description;
-  if(typeof combinedDescription==="string"&&combinedDescription.length>4000)throw new Error("Description and Remarks must fit within 4000 characters.");
-  return {
-    category: value("DEFECT_CATEGORY"), componentId: value("COMPONENT_ID"), conditionId: value("CONDITION_ID"),
-    zone: value("ZONE"), title: value("TITLE"), description: combinedDescription, severity: value("SEVERITY"),
-    ...(fields.some(field => field.binding === "ROW_NUMBER") && answers[fields.find(field => field.binding === "ROW_NUMBER")!.key] ? { rowNumber: answers[fields.find(field => field.binding === "ROW_NUMBER")!.key] } : {}),
-    ...(fields.some(field => field.binding === "SEAT_REFERENCE") && answers[fields.find(field => field.binding === "SEAT_REFERENCE")!.key] ? { seatReference: answers[fields.find(field => field.binding === "SEAT_REFERENCE")!.key] } : {}),
-  };
 }
 
 /** Initialize versioned defaults once without replacing supplied or subsequently edited answers. */

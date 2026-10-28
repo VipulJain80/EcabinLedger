@@ -53,7 +53,24 @@ public final class FormFieldBindingCatalog {
                 ? List.of(FormPurpose.REVIEW_DECISION) : List.of(FormPurpose.DEFECT_REPORT);
         return new FieldBindingDefinition(key,key==DefectFieldBinding.AIRCRAFT_ID?"aircraftId":key.name().toLowerCase(java.util.Locale.ROOT),name,property,table,column,dataType,
             types,areas,purposes,required,optionSource,validation,
-            key==DefectFieldBinding.EVIDENCE_ATTACHMENTS?"SYSTEM_MANAGED_REFERENCE":key==DefectFieldBinding.AIRCRAFT_ID?"SYSTEM_CONTROLLED_SELECTION":key==DefectFieldBinding.CLOSURE_DECISION||key==DefectFieldBinding.CLOSURE_REMARK||key==DefectFieldBinding.REVIEW_DECISION||key==DefectFieldBinding.REVIEW_MAINTENANCE_TEAM||key==DefectFieldBinding.REVIEW_REJECTION_REASON||key==DefectFieldBinding.REVIEW_REMARK||key==DefectFieldBinding.MAINTENANCE_STATUS||key==DefectFieldBinding.SLA_TARGET_DATE||key==DefectFieldBinding.MAINTENANCE_REMARK?"WORKFLOW_CONTROLLED":"USER_EDITABLE",multiple,dependency);
+            key==DefectFieldBinding.EVIDENCE_ATTACHMENTS?"SYSTEM_MANAGED_REFERENCE":key==DefectFieldBinding.AIRCRAFT_ID?"SYSTEM_CONTROLLED_SELECTION":key==DefectFieldBinding.CLOSURE_DECISION||key==DefectFieldBinding.CLOSURE_REMARK||key==DefectFieldBinding.REVIEW_DECISION||key==DefectFieldBinding.REVIEW_MAINTENANCE_TEAM||key==DefectFieldBinding.REVIEW_REJECTION_REASON||key==DefectFieldBinding.REVIEW_REMARK||key==DefectFieldBinding.MAINTENANCE_STATUS||key==DefectFieldBinding.SLA_TARGET_DATE||key==DefectFieldBinding.MAINTENANCE_REMARK?"WORKFLOW_CONTROLLED":"USER_EDITABLE",multiple,dependency,
+            persistenceColumns(key),false);
+    }
+
+    /** Storage projection, separate from requiredness. The database schema decides which columns require a value. */
+    private static List<String> persistenceColumns(DefectFieldBinding binding) {
+        return switch (binding) {
+            case DEFECT_CATEGORY -> List.of("category");
+            case COMPONENT_ID -> List.of("component_id");
+            case CONDITION_ID -> List.of("condition_id");
+            case ZONE -> List.of("zone");
+            case ROW_NUMBER -> List.of("row_number");
+            case SEAT_REFERENCE -> List.of("seat_reference");
+            case TITLE -> List.of("title");
+            case DESCRIPTION -> List.of("description");
+            case SEVERITY -> List.of("severity", "severity_id");
+            default -> List.of();
+        };
     }
 
     public List<FieldBindingDefinition> all() { return FIELDS; }

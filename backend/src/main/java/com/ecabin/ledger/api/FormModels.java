@@ -96,14 +96,22 @@ public final class FormModels {
     public record FieldBindingDefinition(DefectFieldBinding binding, String stableKey, String name, String domainProperty,
         String destinationTable, String destinationColumn, String dataType, List<FieldType> supportedFieldTypes,
         List<String> cabinAreaCodes, List<FormPurpose> formPurposes, String requiredPolicy, OptionSource referenceDataSource,
-        String validation, String classification, boolean multipleAllowed, String dependsOnBinding) {}
+        String validation, String classification, boolean multipleAllowed, String dependsOnBinding,
+        List<String> persistenceColumns, boolean persistenceRequired) {
+        public FieldBindingDefinition(DefectFieldBinding binding,String stableKey,String name,String domainProperty,String destinationTable,String destinationColumn,String dataType,List<FieldType> supportedFieldTypes,List<String> cabinAreaCodes,List<FormPurpose> formPurposes,String requiredPolicy,OptionSource referenceDataSource,String validation,String classification,boolean multipleAllowed,String dependsOnBinding){
+            this(binding,stableKey,name,domainProperty,destinationTable,destinationColumn,dataType,supportedFieldTypes,cabinAreaCodes,formPurposes,requiredPolicy,referenceDataSource,validation,classification,multipleAllowed,dependsOnBinding,List.of(destinationColumn),false);
+        }
+        public FieldBindingDefinition withPersistenceRequired(boolean required){return new FieldBindingDefinition(binding,stableKey,name,domainProperty,destinationTable,destinationColumn,dataType,supportedFieldTypes,cabinAreaCodes,formPurposes,requiredPolicy,referenceDataSource,validation,classification,multipleAllowed,dependsOnBinding,persistenceColumns,required);}
+    }
     public record FormDataSnapshot(String defectCategory, UUID componentId, UUID conditionId, String zone,
         Integer rowNumber, String seatReference, String title, String description, UUID severityId) {}
     public record SubmitFormRequest(@NotNull UUID formId, @NotNull UUID versionId, FormPurpose purpose, @NotNull Map<String,Object> answers) {
         public SubmitFormRequest(UUID formId,UUID versionId,Map<String,Object> answers) { this(formId,versionId,null,answers); }
     }
     public record FormSubmission(UUID id, UUID defectId, UUID formId, UUID versionId, int versionNumber, FormPurpose purpose, WorkflowStage workflowStage,
-        String submittedBy, FormDataSnapshot snapshot, Instant submittedAt) {}
+        String submittedBy, FormDataSnapshot snapshot, Instant submittedAt, Map<String,Object> answers) {
+        public FormSubmission(UUID id,UUID defectId,UUID formId,UUID versionId,int versionNumber,FormPurpose purpose,WorkflowStage workflowStage,String submittedBy,FormDataSnapshot snapshot,Instant submittedAt){this(id,defectId,formId,versionId,versionNumber,purpose,workflowStage,submittedBy,snapshot,submittedAt,Map.of());}
+    }
     public record AttachmentView(UUID id, UUID defectId, UUID formSubmissionId, String fieldKey, String filename,
         String mimeType, long sizeBytes, String scanStatus, Instant uploadedAt, String source, String uploadedBy) {}
 }

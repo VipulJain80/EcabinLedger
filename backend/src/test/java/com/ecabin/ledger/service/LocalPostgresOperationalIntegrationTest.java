@@ -886,6 +886,8 @@ class LocalPostgresOperationalIntegrationTest {
         assertEquals(created.id(),result.formId());
         assertEquals(published.id(),result.versionId());
         assertEquals("FWD CABIN / ROW 14 / SEAT 14A",result.snapshot().zone());
+        assertEquals("Reported from the aft galley inspection",result.answers().get("observerNote"),"Versioned generic fields must survive submission persistence and retrieval alongside the typed domain snapshot.");
+        assertEquals("Reported from the aft galley inspection",jdbc.queryForObject("SELECT submitted_answers_json->>'observerNote' FROM operational_form_submissions_dtl WHERE operator_id=? AND id=?",String.class,orgA,result.id()));
         assertEquals(1,forms.submissions(orgA,defect.id()).size());
         assertThrows(ResponseStatusException.class,()->forms.submissions(orgB,defect.id()));
         assertThrows(ResponseStatusException.class,()->forms.submit(orgA,"form-reporter",defect.id(),new SubmitFormRequest(created.id(),published.id(),java.util.Map.of("finding","OK","component",component.toString(),"condition",UUID.randomUUID().toString()))));
@@ -947,18 +949,12 @@ class LocalPostgresOperationalIntegrationTest {
         assertThrows(IllegalArgumentException.class,()->forms.resolveDefectReport(orgA,cabinArea,firstCopy.id(),cabinPublished.id(),answers),"An inactive severity UUID must be rejected during submission resolution.");
 
         var invalidAreaCopy=forms.create(orgA,"form-admin",new CreateFormRequest("GALLEY_REMARKS_SOURCE","Galley remarks source",galleyArea));
-        var compactGalley=new FormConfiguration(List.of(
-            new FieldDefinition("aircraftId","Aircraft Registration",FieldType.AIRCRAFT_SELECT,null,true,0,null,null,null,OptionSource.AIRCRAFT,null,null,DefectFieldBinding.AIRCRAFT_ID),
-            new FieldDefinition("location","Galley location",FieldType.TEXT,null,true,1,null,null,null,null,null,null,DefectFieldBinding.ZONE),
-            new FieldDefinition("component_ref","Component",FieldType.DROPDOWN,null,true,2,null,null,null,OptionSource.COMPONENTS,null,null,DefectFieldBinding.COMPONENT_ID),
-            new FieldDefinition("condition_ref","Condition",FieldType.DROPDOWN,null,true,3,null,null,null,OptionSource.DEFECT_CONDITIONS,new OptionFilter(null,"component_ref"),null,DefectFieldBinding.CONDITION_ID),
-            new FieldDefinition("severity_ref","Severity",FieldType.DROPDOWN,null,true,4,null,null,null,OptionSource.DEFECT_SEVERITIES,null,null,DefectFieldBinding.SEVERITY),
-            new FieldDefinition("remarks","Remarks",FieldType.TEXTAREA,null,false,5,new TextRules(null,4000,false,false,null),null,null,null,null,null,DefectFieldBinding.REMARKS),
-            new FieldDefinition("evidence","Evidence",FieldType.IMAGE_UPLOAD,null,true,6,null,null,null,null,null,new com.ecabin.ledger.api.FormModels.FileRules(List.of("jpg"),List.of("image/jpeg"),5_242_880L,1,3),DefectFieldBinding.EVIDENCE_ATTACHMENTS)));
+        var compactGalley=new FormConfiguration(java.util.stream.Stream.concat(reportConfiguration().fields().stream(),java.util.stream.Stream.of(
+            new FieldDefinition("remarks","Remarks",FieldType.TEXTAREA,null,false,9,new TextRules(null,4000,false,false,null),null,null,null,null,null,DefectFieldBinding.REMARKS))).toList());
         var invalidSourceDraft=forms.saveDraft(orgA,"form-admin",invalidAreaCopy.id(),invalidAreaCopy.draftVersionId(),compactGalley);
         var invalidSourcePublished=forms.publish(orgA,"form-admin",invalidAreaCopy.id(),invalidSourceDraft.id());
-        var targetAreaFailure=assertThrows(IllegalArgumentException.class,()->forms.duplicate(orgA,"form-admin",invalidAreaCopy.id(),new com.ecabin.ledger.api.FormModels.DuplicateFormRequest("INVALID_CABIN_COPY","Invalid Cabin copy",cabinArea,FormPurpose.DEFECT_REPORT,WorkflowStage.INITIAL_REPORT,invalidSourcePublished.id())));
-        assertTrue(targetAreaFailure.getMessage().contains("Remarks")&&targetAreaFailure.getMessage().contains("not applicable to the selected cabin area"),"Cross-area duplication must retain actionable target-area binding validation.");
+        var cabinCopy=forms.duplicate(orgA,"form-admin",invalidAreaCopy.id(),new com.ecabin.ledger.api.FormModels.DuplicateFormRequest("CABIN_REMARKS_COPY","Cabin remarks copy",cabinArea,FormPurpose.DEFECT_REPORT,WorkflowStage.INITIAL_REPORT,invalidSourcePublished.id()));
+        assertTrue(forms.version(orgA,cabinCopy.id(),cabinCopy.draftVersionId()).configuration().fields().stream().anyMatch(field->field.binding()==DefectFieldBinding.REMARKS),"Remarks remains a supported configurable field when a form is copied to Cabin.");
         assertEquals("GALLEY_SEVERITIES",jdbc.queryForObject("SELECT fields_json #>> '{fields,6,optionSource}' FROM operational_form_versions_dtl WHERE operator_id=? AND form_id=? AND id=?",String.class,orgA,source.id(),sourcePublished.id()));
     }
 
@@ -1158,7 +1154,8 @@ class LocalPostgresOperationalIntegrationTest {
             new FieldDefinition("title","Finding",FieldType.TEXT,null,true,4,new TextRules(1,160,false,false,null),null,null,null,null,null,DefectFieldBinding.TITLE),
             new FieldDefinition("description","Details",FieldType.TEXTAREA,null,true,5,new TextRules(1,4000,false,false,null),null,null,null,null,null,DefectFieldBinding.DESCRIPTION),
             new FieldDefinition("severity_ref","Severity",FieldType.DROPDOWN,null,true,6,null,null,null,OptionSource.DEFECT_SEVERITIES,null,null,DefectFieldBinding.SEVERITY),
-            new FieldDefinition("aircraftId","Aircraft Registration",FieldType.AIRCRAFT_SELECT,null,true,7,null,null,null,OptionSource.AIRCRAFT,null,null,DefectFieldBinding.AIRCRAFT_ID)));
+            new FieldDefinition("aircraftId","Aircraft Registration",FieldType.AIRCRAFT_SELECT,null,true,7,null,null,null,OptionSource.AIRCRAFT,null,null,DefectFieldBinding.AIRCRAFT_ID),
+            new FieldDefinition("observerNote","Observer note",FieldType.TEXT,null,false,8,new TextRules(null,200,false,false,null),null,null,null,null,null)));
     }
 
     private FormConfiguration reviewDecisionConfiguration(){
@@ -1173,7 +1170,7 @@ class LocalPostgresOperationalIntegrationTest {
         UUID category=jdbc.query("SELECT id FROM defect_categories_mst WHERE operator_id=? AND code='SEAT' AND isactive=1",rs->rs.next()?rs.getObject("id",UUID.class):null,org);
         if(category==null){category=UUID.randomUUID();jdbc.update("INSERT INTO defect_categories_mst(id,operator_id,code,name) VALUES(?,?,'SEAT','Passenger seat')",category,org);}
         UUID severity=jdbc.queryForObject("SELECT id FROM defect_severities_mst WHERE operator_id=? AND severity_code='MEDIUM' AND isactive=1",UUID.class,org);
-        return java.util.Map.of("category_ref",category.toString(),"component_ref",component.toString(),"condition_ref",condition.toString(),"zone",zone,"title",title,"description",description,"severity_ref",severity.toString());
+        return java.util.Map.of("category_ref",category.toString(),"component_ref",component.toString(),"condition_ref",condition.toString(),"zone",zone,"title",title,"description",description,"severity_ref",severity.toString(),"observerNote","Reported from the aft galley inspection");
     }
 
     private java.util.Map<String,Object> galleyReportAnswers(UUID org,UUID component,UUID condition,String zone,String title,String description,String severityCode) {

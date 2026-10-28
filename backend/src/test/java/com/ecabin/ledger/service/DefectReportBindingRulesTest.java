@@ -15,12 +15,11 @@ class DefectReportBindingRulesTest {
         assertEquals("component",mapped.get(DefectFieldBinding.CONDITION_ID).optionFilter().componentFieldKey());
     }
 
-    @Test void domainPersistenceRequirementsAreSeparateFromFormRequirednessAndUseGeneratedProjection() {
-        assertEquals(List.of(DefectFieldBinding.DEFECT_CATEGORY,DefectFieldBinding.COMPONENT_ID,DefectFieldBinding.CONDITION_ID,
-            DefectFieldBinding.ZONE,DefectFieldBinding.TITLE,DefectFieldBinding.DESCRIPTION,DefectFieldBinding.SEVERITY),
-            DefectReportBindingRules.requiredDomainValues(false));
-        assertEquals(List.of(DefectFieldBinding.COMPONENT_ID,DefectFieldBinding.CONDITION_ID,DefectFieldBinding.ZONE,DefectFieldBinding.SEVERITY),
-            DefectReportBindingRules.requiredDomainValues(true));
+    @Test void bindingCatalogDescribesStorageWithoutEmbeddingAUniversalRequiredBindingList() {
+        var catalog=new FormFieldBindingCatalog();
+        assertFalse(catalog.all().stream().anyMatch(FieldBindingDefinition::persistenceRequired));
+        assertEquals(List.of("category"),catalog.require(DefectFieldBinding.DEFECT_CATEGORY).persistenceColumns());
+        assertEquals(List.of("severity","severity_id"),catalog.require(DefectFieldBinding.SEVERITY).persistenceColumns());
     }
 
     @Test void aircraftIsTheOnlyUniversallyRequiredDefectBinding() {
@@ -40,6 +39,25 @@ class DefectReportBindingRulesTest {
         assertThrows(IllegalArgumentException.class,()->DefectReportBindingRules.requireComplete(small.stream().map(field->field.binding()==DefectFieldBinding.AIRCRAFT_ID?new FieldDefinition(field.key(),field.label(),field.type(),field.helpText(),field.required(),field.order(),field.textRules(),field.numericRules(),field.dateRules(),field.optionSource(),field.optionFilter(),field.fileRules(),field.binding(),true,true,null,null):field).toList()));
     }
 
+    @Test void publicationRequiresAircraftButDoesNotRequireTypedDomainFieldsToBeConfigured() {
+        assertDoesNotThrow(()->DefectReportBindingRules.requirePublicationCompatible("CABIN",complete()));
+        var aircraftOnly=List.of(aircraft());
+        assertDoesNotThrow(()->DefectReportBindingRules.requirePublicationCompatible("CABIN",aircraftOnly));
+        assertDoesNotThrow(()->DefectReportBindingRules.requirePublicationCompatible("LAVATORY",aircraftOnly));
+        var optionalTyped=complete().stream().map(field->field.binding()==DefectFieldBinding.TITLE
+            ?new FieldDefinition(field.key(),field.label(),field.type(),field.helpText(),false,field.order(),field.textRules(),field.numericRules(),field.dateRules(),field.optionSource(),field.optionFilter(),field.fileRules(),field.binding()):field).toList();
+        assertDoesNotThrow(()->DefectReportBindingRules.requirePublicationCompatible("CABIN",optionalTyped));
+        var conditionalDomain=complete().stream().map(field->field.binding()==DefectFieldBinding.TITLE
+            ?new FieldDefinition(field.key(),field.label(),field.type(),field.helpText(),field.required(),field.order(),field.textRules(),field.numericRules(),field.dateRules(),field.optionSource(),field.optionFilter(),field.fileRules(),field.binding(),field.visible(),field.readOnly(),new VisibilityRule("showTitle","true"),null):field).toList();
+        assertDoesNotThrow(()->DefectReportBindingRules.requirePublicationCompatible("CABIN",conditionalDomain),
+            "Form publication does not impose field-presence requirements for typed values.");
+        assertThrows(IllegalArgumentException.class,()->DefectReportBindingRules.requirePublicationCompatible("AIRPORT_TAXI",complete()),
+            "A new area must not publish a defect report until its persisted location semantics are supported.");
+        assertEquals("CABIN",DefectReportBindingRules.locationForAreaCode("ENTRY_AREA"));
+        assertEquals("GALLEY",DefectReportBindingRules.locationForAreaCode("GALLEY"));
+        assertThrows(IllegalArgumentException.class,()->DefectReportBindingRules.locationForAreaCode("AIRPORT_TAXI"));
+    }
+
     @Test void incompatibleReferenceSourceAndDuplicateBindingAreRejected() {
         var invalid=complete().stream().map(field->field.binding()==DefectFieldBinding.DEFECT_CATEGORY?new FieldDefinition(field.key(),field.label(),field.type(),field.helpText(),field.required(),field.order(),field.textRules(),field.numericRules(),field.dateRules(),OptionSource.COMPONENTS,field.optionFilter(),field.fileRules(),field.binding()):field).toList();
         assertThrows(IllegalArgumentException.class,()->DefectReportBindingRules.requireComplete(invalid));
@@ -50,7 +68,7 @@ class DefectReportBindingRulesTest {
     @Test void legacyCompactGalleyDesignRemainsReadableWithoutUniversalEvidenceRequirement() {
         var fields=List.of(
             field("aircraftId","Aircraft Registration",FieldType.AIRCRAFT_SELECT,OptionSource.AIRCRAFT,null,DefectFieldBinding.AIRCRAFT_ID,true),
-            field("location","Galley Number / Location",FieldType.TEXT,null,null,DefectFieldBinding.ZONE,true),
+            field("galley_location","Galley Number / Location",FieldType.TEXT,null,null,DefectFieldBinding.ZONE,true),
             field("component","Component",FieldType.DROPDOWN,OptionSource.COMPONENTS,null,DefectFieldBinding.COMPONENT_ID,true),
             field("condition","Defect Condition",FieldType.DROPDOWN,OptionSource.DEFECT_CONDITIONS,new OptionFilter(null,"component"),DefectFieldBinding.CONDITION_ID,true),
             field("severity","Severity",FieldType.DROPDOWN,OptionSource.GALLEY_SEVERITIES,null,DefectFieldBinding.SEVERITY,true),

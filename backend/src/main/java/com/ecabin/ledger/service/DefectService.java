@@ -1,6 +1,7 @@
 package com.ecabin.ledger.service;
 
 import static com.ecabin.ledger.api.ApiModels.*;
+import com.ecabin.ledger.api.FormModels.DefectFieldBinding;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -48,13 +49,15 @@ public class DefectService {
     private final NotificationService notifications;
     private final AreaMaintenanceRoutingService areaRouting;
     private final DefectReferenceService defectReferences;
+    private final DefectPersistenceRequirements persistenceRequirements;
     private com.ecabin.ledger.email.EmailOutboxService emailOutbox;
 
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     public void setEmailOutbox(com.ecabin.ledger.email.EmailOutboxService emailOutbox) { this.emailOutbox = emailOutbox; }
 
     @org.springframework.beans.factory.annotation.Autowired
-    public DefectService(JdbcTemplate jdbc, NotificationService notifications, AreaMaintenanceRoutingService areaRouting, DefectReferenceService defectReferences) { this.jdbc = jdbc; this.notifications = notifications; this.areaRouting = areaRouting; this.defectReferences = defectReferences; }
+    public DefectService(JdbcTemplate jdbc, NotificationService notifications, AreaMaintenanceRoutingService areaRouting, DefectReferenceService defectReferences,DefectPersistenceRequirements persistenceRequirements) { this.jdbc = jdbc; this.notifications = notifications; this.areaRouting = areaRouting; this.defectReferences = defectReferences;this.persistenceRequirements=persistenceRequirements; }
+    public DefectService(JdbcTemplate jdbc,NotificationService notifications,AreaMaintenanceRoutingService areaRouting,DefectReferenceService defectReferences){this(jdbc,notifications,areaRouting,defectReferences,new DefectPersistenceRequirements(jdbc,new FormFieldBindingCatalog()));}
     /** Compatibility constructor for isolated legacy unit tests. */
     public DefectService(JdbcTemplate jdbc, NotificationService notifications, AreaMaintenanceRoutingService areaRouting) { this(jdbc, notifications, areaRouting, new DefectReferenceService(jdbc)); }
     public DefectService(JdbcTemplate jdbc, NotificationService notifications) { this(jdbc, notifications, null, new DefectReferenceService(jdbc)); }
@@ -429,6 +432,17 @@ public class DefectService {
     @Transactional
     public DefectView create(UUID operatorId, String actorId, CreateDefectRequest input,UUID idempotencyKey) {
         jdbc.queryForObject("SELECT set_config('ecabin.actor_id', ?, true)", String.class, actorId);
+        Map<DefectFieldBinding,Object> submittedProjection = new java.util.EnumMap<>(DefectFieldBinding.class);
+        submittedProjection.put(DefectFieldBinding.DEFECT_CATEGORY,input.category());
+        submittedProjection.put(DefectFieldBinding.COMPONENT_ID,input.componentId());
+        submittedProjection.put(DefectFieldBinding.CONDITION_ID,input.conditionId());
+        submittedProjection.put(DefectFieldBinding.ZONE,input.zone());
+        submittedProjection.put(DefectFieldBinding.ROW_NUMBER,input.rowNumber());
+        submittedProjection.put(DefectFieldBinding.SEAT_REFERENCE,input.seatReference());
+        submittedProjection.put(DefectFieldBinding.TITLE,input.title());
+        submittedProjection.put(DefectFieldBinding.DESCRIPTION,input.description());
+        submittedProjection.put(DefectFieldBinding.SEVERITY,input.severity());
+        persistenceRequirements.requireRequiredBindings(submittedProjection);
         String payloadHash=idempotencyKey==null?null:reportPayloadHash(input);
         if(idempotencyKey!=null){
             var existing=jdbc.query("SELECT id,reported_by,report_payload_hash FROM defects_dtl WHERE operator_id=? AND report_idempotency_key=?",rs->rs.next()?new Object[]{rs.getObject("id",UUID.class),rs.getString("reported_by"),rs.getString("report_payload_hash")}:null,operatorId,idempotencyKey);
@@ -438,14 +452,16 @@ public class DefectService {
             }
         }
         String location = input.location().toUpperCase();
-        String severity = input.severity().toUpperCase(java.util.Locale.ROOT);
+        String severity = input.severity()==null||input.severity().isBlank()?null:input.severity().trim().toUpperCase(java.util.Locale.ROOT);
         if (!LOCATIONS.contains(location)) throw new IllegalArgumentException("Unsupported defect location.");
-        String category = input.category().toUpperCase();
-        boolean hasTenantCatalog = Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM defect_categories_mst WHERE operator_id=?)", Boolean.class, operatorId));
-        boolean activeCategory = Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM defect_categories_mst WHERE operator_id=? AND code=? AND isactive=1)", Boolean.class, operatorId, category));
-        if (hasTenantCatalog ? !activeCategory : !CATEGORIES.contains(category)) throw new IllegalArgumentException("Unsupported defect category.");
-        UUID severityId = jdbc.query("SELECT id FROM defect_severities_mst WHERE operator_id=? AND severity_code=? AND isactive=1",rs->rs.next()?rs.getObject(1,UUID.class):null,operatorId,severity);
-        if (severityId == null) throw new IllegalArgumentException("Choose an active severity belonging to this organization.");
+        String category = input.category()==null?null:input.category().trim().toUpperCase(java.util.Locale.ROOT);
+        if(category!=null){
+            boolean hasTenantCatalog = Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM defect_categories_mst WHERE operator_id=?)", Boolean.class, operatorId));
+            boolean activeCategory = Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM defect_categories_mst WHERE operator_id=? AND code=? AND isactive=1)", Boolean.class, operatorId, category));
+            if (hasTenantCatalog ? !activeCategory : !CATEGORIES.contains(category)) throw new IllegalArgumentException("Unsupported defect category.");
+        }
+        UUID severityId = severity==null?null:jdbc.query("SELECT id FROM defect_severities_mst WHERE operator_id=? AND severity_code=? AND isactive=1",rs->rs.next()?rs.getObject(1,UUID.class):null,operatorId,severity);
+        if (severity!=null && severityId == null) throw new IllegalArgumentException("Choose an active severity belonging to this organization.");
         Object[] aircraft = input.aircraftId() == null
             ? jdbc.query("SELECT id,tail_number FROM aircraft_mst WHERE operator_id=? AND tail_number=? AND isactive=1", (rs, row) -> new Object[]{rs.getObject("id", UUID.class), rs.getString("tail_number")}, operatorId, input.tailNumber().toUpperCase()).stream().findFirst().orElse(null)
             : jdbc.query("SELECT id,tail_number FROM aircraft_mst WHERE operator_id=? AND id=? AND isactive=1", (rs, row) -> new Object[]{rs.getObject("id", UUID.class), rs.getString("tail_number")}, operatorId, input.aircraftId()).stream().findFirst().orElse(null);
@@ -456,10 +472,11 @@ public class DefectService {
         UUID aircraftId = (UUID) aircraft[0];
         if (!exists("SELECT 1 FROM cabin_areas_mst WHERE operator_id=? AND id=? AND isactive=1", operatorId, input.areaId()))
             throw new IllegalArgumentException("Choose an active area belonging to this organization.");
-        String componentName = jdbc.query("SELECT name FROM cabin_components_mst WHERE operator_id=? AND id=? AND area_id=? AND isactive=1", rs -> rs.next() ? rs.getString(1) : null, operatorId, input.componentId(), input.areaId());
-        if (componentName == null) throw new IllegalArgumentException("Choose an active component that belongs to the selected area and organization.");
-        String conditionName = jdbc.query("SELECT c.name FROM component_conditions_mst m JOIN defect_conditions_mst c ON c.operator_id=m.operator_id AND c.id=m.condition_id AND c.isactive=1 WHERE m.operator_id=? AND m.component_id=? AND m.condition_id=? AND m.isactive=1", rs -> rs.next() ? rs.getString(1) : null, operatorId, input.componentId(), input.conditionId());
-        if (conditionName == null) throw new IllegalArgumentException("Choose an active condition mapped to the selected component and organization.");
+        String componentName = input.componentId()==null?null:jdbc.query("SELECT name FROM cabin_components_mst WHERE operator_id=? AND id=? AND area_id=? AND isactive=1", rs -> rs.next() ? rs.getString(1) : null, operatorId, input.componentId(), input.areaId());
+        if (input.componentId()!=null&&componentName == null) throw new IllegalArgumentException("Choose an active component that belongs to the selected area and organization.");
+        if(input.conditionId()!=null&&input.componentId()==null)throw new IllegalArgumentException("Choose a component before selecting a defect condition.");
+        String conditionName = input.conditionId()==null?null:jdbc.query("SELECT c.name FROM component_conditions_mst m JOIN defect_conditions_mst c ON c.operator_id=m.operator_id AND c.id=m.condition_id AND c.isactive=1 WHERE m.operator_id=? AND m.component_id=? AND m.condition_id=? AND m.isactive=1", rs -> rs.next() ? rs.getString(1) : null, operatorId, input.componentId(), input.conditionId());
+        if (input.conditionId()!=null&&conditionName == null) throw new IllegalArgumentException("Choose an active condition mapped to the selected component and organization.");
         LocalDate reportDate = jdbc.queryForObject("SELECT (transaction_timestamp() AT TIME ZONE 'Asia/Kolkata')::date", LocalDate.class);
         lockReportIdentity(operatorId, aircraftId, input.areaId(), input.componentId(), input.conditionId(), reportDate);
         if(idempotencyKey!=null){
@@ -470,8 +487,10 @@ public class DefectService {
             }
         }
         Instant reportDayStart = reportDate.atStartOfDay(ZoneId.of("Asia/Kolkata")).toInstant();
-        String reportedZone = input.zone().trim();
-        var duplicate = jdbc.query("SELECT reference FROM defects_dtl WHERE operator_id=? AND aircraft_id=? AND location=? AND area_id=? AND component_id=? AND condition_id=? AND UPPER(BTRIM(zone))=UPPER(BTRIM(?)) AND reported_at>=? AND reported_at<? ORDER BY reported_at LIMIT 1",
+        String reportedZone = cleanOptionalText(input.zone());
+        String title=cleanOptionalText(input.title());
+        String description=cleanOptionalText(input.description());
+        var duplicate = jdbc.query("SELECT reference FROM defects_dtl WHERE operator_id=? AND aircraft_id=? AND location=? AND area_id=? AND component_id IS NOT DISTINCT FROM ? AND condition_id IS NOT DISTINCT FROM ? AND UPPER(BTRIM(zone))=UPPER(BTRIM(?)) AND reported_at>=? AND reported_at<? ORDER BY reported_at LIMIT 1",
             rs -> rs.next() ? rs.getString("reference") : null, operatorId, aircraftId, location, input.areaId(), input.componentId(), input.conditionId(), reportedZone,
             java.sql.Timestamp.from(reportDayStart), java.sql.Timestamp.from(reportDayStart.plusSeconds(86_400)));
         if (duplicate != null) throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.CONFLICT,
@@ -483,8 +502,21 @@ public class DefectService {
         UUID workflowVersionId = configuredRoute == null ? null : configuredRoute.workflowVersionId();
         UUID reviewerTeamId=direct?null:jdbc.query("SELECT o.default_reviewer_team_id FROM operators_mst o JOIN maintenance_teams_mst t ON t.operator_id=o.id AND t.id=o.default_reviewer_team_id AND t.isactive=1 AND t.team_type='REVIEWER' WHERE o.id=? AND EXISTS (SELECT 1 FROM operator_membership_teams_mst omt JOIN operator_memberships_mst m ON m.operator_id=omt.operator_id AND m.external_user_id=omt.external_user_id AND m.isactive=1 JOIN operator_roles_mst r ON r.operator_id=m.operator_id AND r.role_key=m.role AND r.isactive=1 WHERE omt.operator_id=o.id AND omt.team_name=t.name AND omt.isactive=1 AND ('|'||r.permissions||'|') LIKE '%|REVIEW|%')",rs->rs.next()?rs.getObject(1,UUID.class):null,operatorId);
         String initialStatus = direct && configuredRoute.teamId()!=null ? "ACTION_ASSIGNED" : "REPORTED";
-        List<UUID> inserted=jdbc.query("INSERT INTO defects_dtl(id,operator_id,aircraft_id,reference,location,category,area_id,zone,row_number,seat_reference,component_id,component,condition_id,condition_name_snapshot,title,description,severity,severity_id,status,reported_by,reviewer_team_id,report_idempotency_key,report_payload_hash,workflow_version_id,assigned_team) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(operator_id,report_idempotency_key) WHERE report_idempotency_key IS NOT NULL DO NOTHING RETURNING id",
-            (rs,row)->rs.getObject(1,UUID.class),id, operatorId, aircraftId, reference, location, category, input.areaId(), input.zone().trim(), input.rowNumber(), input.seatReference(), input.componentId(), componentName, input.conditionId(), conditionName, input.title().trim(), input.description().trim(), severity, severityId, initialStatus, actorId, reviewerTeamId,idempotencyKey,payloadHash,workflowVersionId,direct&&configuredRoute.teamId()!=null?configuredRoute.teamName():null);
+        Map<String,Object> persistedValues=new java.util.HashMap<>();
+        persistedValues.put("id",id);persistedValues.put("operator_id",operatorId);persistedValues.put("aircraft_id",aircraftId);persistedValues.put("reference",reference);
+        persistedValues.put("location",location);persistedValues.put("category",category);persistedValues.put("area_id",input.areaId());persistedValues.put("zone",reportedZone);
+        persistedValues.put("row_number",input.rowNumber());persistedValues.put("seat_reference",input.seatReference());persistedValues.put("component_id",input.componentId());persistedValues.put("component",componentName);
+        persistedValues.put("condition_id",input.conditionId());persistedValues.put("condition_name_snapshot",conditionName);persistedValues.put("title",title);persistedValues.put("description",description);
+        persistedValues.put("severity",severity);persistedValues.put("severity_id",severityId);persistedValues.put("status",initialStatus);persistedValues.put("reported_by",actorId);
+        persistedValues.put("reviewer_team_id",reviewerTeamId);persistedValues.put("report_idempotency_key",idempotencyKey);persistedValues.put("report_payload_hash",payloadHash);
+        persistedValues.put("workflow_version_id",workflowVersionId);persistedValues.put("assigned_team",direct&&configuredRoute.teamId()!=null?configuredRoute.teamName():null);
+        persistenceRequirements.requireDatabaseRequiredValues(persistedValues);
+        String categorySql=category==null?"DEFAULT":"?";
+        String insertSql="INSERT INTO defects_dtl(id,operator_id,aircraft_id,reference,location,category,area_id,zone,row_number,seat_reference,component_id,component,condition_id,condition_name_snapshot,title,description,severity,severity_id,status,reported_by,reviewer_team_id,report_idempotency_key,report_payload_hash,workflow_version_id,assigned_team) VALUES(?,?,?,?,?,"+categorySql+",?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(operator_id,report_idempotency_key) WHERE report_idempotency_key IS NOT NULL DO NOTHING RETURNING id";
+        List<Object> insertArgs=new ArrayList<>(List.of(id,operatorId,aircraftId,reference,location));
+        if(category!=null)insertArgs.add(category);
+        insertArgs.addAll(java.util.Arrays.asList(input.areaId(),reportedZone,input.rowNumber(),input.seatReference(),input.componentId(),componentName,input.conditionId(),conditionName,title,description,severity,severityId,initialStatus,actorId,reviewerTeamId,idempotencyKey,payloadHash,workflowVersionId,direct&&configuredRoute.teamId()!=null?configuredRoute.teamName():null));
+        List<UUID> inserted=jdbc.query(insertSql,(rs,row)->rs.getObject(1,UUID.class),insertArgs.toArray());
         if(inserted.isEmpty()){
             var existing=jdbc.query("SELECT id,reported_by,report_payload_hash FROM defects_dtl WHERE operator_id=? AND report_idempotency_key=?",rs->rs.next()?new Object[]{rs.getObject("id",UUID.class),rs.getString("reported_by"),rs.getString("report_payload_hash")}:null,operatorId,idempotencyKey);
             if(existing==null||!actorId.equals(existing[1])||!payloadHash.equals(existing[2]))throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.CONFLICT,"This report retry key was already used for a different actor or report. Start a new report to submit changed details.");
@@ -515,6 +547,8 @@ public class DefectService {
             return java.util.HexFormat.of().formatHex(digest);
         }catch(java.security.NoSuchAlgorithmException ex){throw new IllegalStateException("SHA-256 is unavailable.",ex);}
     }
+
+    private String cleanOptionalText(String value){return value==null||value.isBlank()?null:value.trim();}
 
     @Transactional
     public DefectView transition(UUID operatorId, UUID id, String actorId, TransitionRequest input) {

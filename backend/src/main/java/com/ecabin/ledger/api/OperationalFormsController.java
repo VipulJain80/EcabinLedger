@@ -46,7 +46,7 @@ public class OperationalFormsController {
         AuthenticatedUser user=admin(auth); return forms.list(user.organizationId(),includeInactive);
     }
     @GetMapping("/configuration/form-field-bindings") @Operation(summary="List backend-approved form field bindings")
-    public List<FieldBindingDefinition> fieldBindings(JwtAuthenticationToken auth){admin(auth);return bindings.all();}
+    public List<FieldBindingDefinition> fieldBindings(JwtAuthenticationToken auth){admin(auth);return forms.fieldBindingDefinitions();}
     @GetMapping("/configuration/form-mappings") @Operation(summary="List supported tenant form mapping choices")
     public List<FormMappingOption> formMappings(JwtAuthenticationToken auth,@RequestParam(required=false) UUID formId,@RequestParam(required=false) List<UUID> areaIds){AuthenticatedUser u=admin(auth);return forms.mappingOptions(u.organizationId(),formId,areaIds);}
     public List<FormMappingOption> formMappings(JwtAuthenticationToken auth){return formMappings(auth,null,null);}
