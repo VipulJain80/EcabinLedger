@@ -449,9 +449,9 @@ public class OperationalFormService {
         for(FieldDefinition field:form.configuration().fields())if(field.binding()==DefectFieldBinding.AIRCRAFT_ID&&submitted.containsKey(field.key()))throw new IllegalArgumentException("Aircraft registration is selected separately and cannot be submitted as a form answer.");
         for(FieldDefinition field:form.configuration().fields())if(Boolean.TRUE.equals(field.readOnly())&&!blank(submitted.get(field.key())))throw new IllegalArgumentException("Read-only field "+field.label()+" cannot receive a submitted value.");
         Map<String,Object> result=new HashMap<>();
-        String areaCode=jdbc.queryForObject("SELECT code FROM cabin_areas_mst WHERE operator_id=? AND id=? AND isactive=1",String.class,operatorId,areaId);
-        DefectReportBindingRules.ProjectionProfile profile=DefectReportBindingRules.projectionProfile(areaCode,form.configuration().fields());
-        boolean generatedProjection=profile==DefectReportBindingRules.ProjectionProfile.LEGACY_GALLEY_V1;
+        String[] areaData=jdbc.query("SELECT code,name FROM cabin_areas_mst WHERE operator_id=? AND id=? AND isactive=1",rs->rs.next()?new String[]{rs.getString("code"),rs.getString("name")}:null,operatorId,areaId);
+        if(areaData==null)throw new IllegalArgumentException("Choose an active area belonging to this organization.");
+        String areaCode=areaData[0],areaName=areaData[1];
         Map<DefectFieldBinding,FieldDefinition> bindings=DefectReportBindingRules.requireComplete(form.configuration().fields());
         String persistenceIssue=persistenceRequirements.publicationIssue(areaCode,form.configuration().fields());
         if(!persistenceIssue.isBlank())throw new IllegalArgumentException(persistenceIssue);
@@ -462,28 +462,27 @@ public class OperationalFormService {
         if(conditionId!=null)result.put("conditionId",conditionId);
         String zone=optionalTextAnswer(bindings.get(DefectFieldBinding.ZONE),submitted);
         if(zone!=null)result.put("zone",zone);
-        if(generatedProjection) {
-            String category=jdbc.query("SELECT code FROM defect_categories_mst WHERE operator_id=? AND code='GALLEY' AND isactive=1",rs->{if(!rs.next())throw new IllegalArgumentException("Activate the Galley defect category before submitting this legacy Galley report.");return rs.getString(1);},operatorId);
-            String componentName=jdbc.query("SELECT name FROM cabin_components_mst WHERE operator_id=? AND id=? AND area_id=? AND isactive=1",rs->{if(!rs.next())throw new IllegalArgumentException("Choose an active Galley component.");return rs.getString(1);},operatorId,componentId,areaId);
-            String conditionName=jdbc.query("SELECT c.name FROM component_conditions_mst m JOIN defect_conditions_mst c ON c.operator_id=m.operator_id AND c.id=m.condition_id WHERE m.operator_id=? AND m.component_id=? AND m.condition_id=? AND m.isactive=1 AND c.isactive=1",rs->{if(!rs.next())throw new IllegalArgumentException("Choose an active condition mapped to this Galley component.");return rs.getString(1);},operatorId,componentId,conditionId);
-            String generatedZone=(String)result.get("zone");String title=("Galley — "+componentName+" — "+generatedZone).trim();
-            if(title.length()>160)title=title.substring(0,160);
-            FieldDefinition remarksField=bindings.get(DefectFieldBinding.REMARKS);
-            String remarks=remarksField!=null&&!blank(submitted.get(remarksField.key()))?textAnswer(remarksField,submitted):"";
-            String description="Condition: "+conditionName+(remarks.isBlank()?"":"\nRemarks: "+remarks);
-            if(description.length()>4000)throw new IllegalArgumentException("Condition and remarks must fit within 4000 characters.");
-            result.put("category",category);result.put("title",title);result.put("description",description);
-        } else {
-            FieldDefinition categoryField=bindings.get(DefectFieldBinding.DEFECT_CATEGORY);
-            if(categoryField!=null&&!blank(submitted.get(categoryField.key())))result.put("category",referenceCode(operatorId,areaId,categoryField,submitted,null));
-            String title=optionalTextAnswer(bindings.get(DefectFieldBinding.TITLE),submitted);
-            if(title!=null)result.put("title",title);
-            String description=optionalTextAnswer(bindings.get(DefectFieldBinding.DESCRIPTION),submitted);
-            FieldDefinition remarks=bindings.get(DefectFieldBinding.REMARKS);
-            if(remarks!=null&&!blank(submitted.get(remarks.key())))description=description==null
-                ?textAnswer(remarks,submitted):appendRemarks(description,textAnswer(remarks,submitted));
-            if(description!=null)result.put("description",description);
+        FieldDefinition categoryField=bindings.get(DefectFieldBinding.DEFECT_CATEGORY);
+        String category=optionalReferenceCode(operatorId,areaId,categoryField,submitted,null);
+        if(category!=null)result.put("category",category);
+        String title=optionalTextAnswer(bindings.get(DefectFieldBinding.TITLE),submitted);
+        if(title==null&&componentId!=null&&zone!=null){
+            String componentName=jdbc.query("SELECT name FROM cabin_components_mst WHERE operator_id=? AND id=? AND area_id=? AND isactive=1",rs->rs.next()?rs.getString(1):null,operatorId,componentId,areaId);
+            if(componentName==null)throw new IllegalArgumentException("Choose an active component in the selected area.");
+            title=generatedDefectTitle(areaName,componentName,zone);
         }
+        if(title!=null)result.put("title",title);
+        String description=optionalTextAnswer(bindings.get(DefectFieldBinding.DESCRIPTION),submitted);
+        FieldDefinition remarks=bindings.get(DefectFieldBinding.REMARKS);
+        String remarksValue=remarks!=null&&!blank(submitted.get(remarks.key()))?textAnswer(remarks,submitted):null;
+        if(description==null&&conditionId!=null&&componentId!=null){
+            String conditionName=jdbc.query("SELECT c.name FROM component_conditions_mst m JOIN defect_conditions_mst c ON c.operator_id=m.operator_id AND c.id=m.condition_id WHERE m.operator_id=? AND m.component_id=? AND m.condition_id=? AND m.isactive=1 AND c.isactive=1",rs->rs.next()?rs.getString(1):null,operatorId,componentId,conditionId);
+            if(conditionName==null)throw new IllegalArgumentException("Choose an active condition mapped to the selected component.");
+            description="Condition: "+conditionName;
+        }
+        if(remarksValue!=null)description=description==null?"Remarks: "+remarksValue:appendRemarks(description,remarksValue);
+        if(description!=null&&description.length()>4000)throw new IllegalArgumentException("Condition and remarks must fit within 4000 characters.");
+        if(description!=null)result.put("description",description);
         String severity=optionalReferenceCode(operatorId,areaId,bindings.get(DefectFieldBinding.SEVERITY),submitted,null);
         if(severity!=null)result.put("severity",severity);
         FieldDefinition row=bindings.get(DefectFieldBinding.ROW_NUMBER);
@@ -510,7 +509,7 @@ public class OperationalFormService {
         return optionsFor(operatorId,areaId,field,areaId,componentId).stream().filter(option->option.id().equals(id)).map(FormOption::code).findFirst()
             .orElseThrow(()->new IllegalArgumentException("Choose an active option belonging to this organization for "+field.label()+"."));
     }
-    private String optionalReferenceCode(UUID operatorId,UUID areaId,FieldDefinition field,Map<String,Object> answers,UUID componentId){return blank(answers.get(field.key()))?null:referenceCode(operatorId,areaId,field,answers,componentId);}
+    private String optionalReferenceCode(UUID operatorId,UUID areaId,FieldDefinition field,Map<String,Object> answers,UUID componentId){return field==null||blank(answers.get(field.key()))?null:referenceCode(operatorId,areaId,field,answers,componentId);}
     private UUID optionalReferenceId(FieldDefinition field,Map<String,Object> answers){if(field==null||blank(answers.get(field.key())))return null;try{return UUID.fromString(String.valueOf(answers.get(field.key())));}catch(RuntimeException ex){throw new IllegalArgumentException("Choose an authorized option for "+field.label()+".");}}
     private String textAnswer(FieldDefinition field,Map<String,Object> answers) {
         String value=answer(field,answers); validateText(field,value); return value.trim();
@@ -518,10 +517,15 @@ public class OperationalFormService {
     private String optionalTextAnswer(FieldDefinition field,Map<String,Object> answers) {
         return field==null||blank(answers.get(field.key()))?null:textAnswer(field,answers);
     }
-    private String appendRemarks(String description,String remarks) {
+    String appendRemarks(String description,String remarks) {
         String combined=description+"\nRemarks: "+remarks;
         if(combined.length()>4000)throw new IllegalArgumentException("Description and Remarks must fit within 4000 characters.");
         return combined;
+    }
+
+    static String generatedDefectTitle(String areaName,String componentName,String zone) {
+        String title=(areaName+" — "+componentName+" — "+zone).trim();
+        return title.length()>160?title.substring(0,160):title;
     }
     private String answer(FieldDefinition field,Map<String,Object> answers) {
         Object value=answers.get(field.key()); if(blank(value))throw new IllegalArgumentException(field.label()+" is required to create this defect. Enter a value before submitting."); return value.toString();
@@ -710,11 +714,11 @@ public class OperationalFormService {
                 }
             }
         }
+        ConditionalFieldRules.validate(config.fields());
         if(purpose==FormPurpose.REVIEW_DECISION)validateReviewerDecisionConfiguration(operatorId,formArea,config,publishing);
         if(purpose==FormPurpose.DEFECT_REPORT)validateDefectReportConfiguration(operatorId,formArea,config.fields(),publishing);
         if(purpose==FormPurpose.CLOSURE_APPROVAL)ClosureApprovalFormRules.requireValid(config);
         if(purpose==FormPurpose.CORRECTIVE_ACTION)MaintenanceActionFormRules.requireValid(config);
-        else if(config.fields().stream().anyMatch(field->field.visibleWhen()!=null)&&purpose!=FormPurpose.CLOSURE_APPROVAL)throw new IllegalArgumentException("Conditional visibility is currently supported only for approved Reviewer Decision fields.");
         for(FieldDefinition field:config.fields())if(field.requiredWhen()!=null){boolean closureRule=purpose==FormPurpose.CLOSURE_APPROVAL&&field.binding()==DefectFieldBinding.CLOSURE_REMARK&&!field.required()&&config.fields().stream().anyMatch(parent->parent.binding()==DefectFieldBinding.CLOSURE_DECISION&&parent.key().equals(field.requiredWhen().fieldKey()))&&"DECLINE".equals(field.requiredWhen().expectedValue());boolean maintenanceRule=purpose==FormPurpose.CORRECTIVE_ACTION&&field.binding()==DefectFieldBinding.EVIDENCE_ATTACHMENTS&&field.type()==FieldType.IMAGE_UPLOAD&&!field.required()&&field.fileRules()!=null&&Integer.valueOf(0).equals(field.fileRules().minCount())&&config.fields().stream().anyMatch(parent->parent.binding()==DefectFieldBinding.MAINTENANCE_STATUS&&parent.key().equals(field.requiredWhen().fieldKey()))&&"CLOSE_SUBMITTED".equals(field.requiredWhen().expectedValue());if(!closureRule&&!maintenanceRule)throw new IllegalArgumentException("Conditional requiredness is supported only for Closure Remarks on decline or Maintenance image evidence on Close Submitted.");}
         for(FieldDefinition f:config.fields()) {
             if(f.optionFilter()!=null) {
@@ -773,14 +777,18 @@ public class OperationalFormService {
         Map<String,FieldDefinition> fields=new LinkedHashMap<>(); for(FieldDefinition f:form.configuration().fields()) if(f.type()!=FieldType.SECTION) fields.put(f.key(),f);
         for(String key:answers.keySet()) if(!fields.containsKey(key)) throw new IllegalArgumentException("Unknown form field: "+key);
         for(FieldDefinition f:fields.values()) {
-            if(Boolean.FALSE.equals(f.visible())) {if(answers.containsKey(f.key()))throw new IllegalArgumentException("A hidden field cannot receive a submitted value.");continue;}
+            if(!ConditionalFieldRules.isVisible(f,fields,answers,new HashSet<>())) {if(answers.containsKey(f.key()))throw new IllegalArgumentException("A hidden field cannot receive a submitted value.");continue;}
             if(Boolean.TRUE.equals(f.readOnly())&&answers.containsKey(f.key()))throw new IllegalArgumentException("A read-only field cannot receive a submitted value.");
             if(f.binding()!=null){FieldBindingDefinition approved=bindingCatalog.require(f.binding());boolean legacySeverity=f.binding()==DefectFieldBinding.SEVERITY&&f.optionSource()==OptionSource.GALLEY_SEVERITIES;if(!approved.formPurposes().contains(form.purpose())||!approved.supportedFieldTypes().contains(f.type())||approved.referenceDataSource()!=f.optionSource()&&!legacySeverity)throw new IllegalArgumentException("The published field has an unsupported or mismatched backend binding.");}
             if(f.type()==FieldType.AIRCRAFT_SELECT){if(answers.containsKey(f.key()))throw new IllegalArgumentException("Aircraft registration is selected separately and cannot be submitted as a form answer.");if(!beforeDefectCreation&&jdbc.queryForObject("SELECT count(*) FROM defects_dtl WHERE operator_id=? AND id=? AND aircraft_id IS NOT NULL AND isactive=1",Integer.class,operatorId,defectId)!=1)throw new IllegalArgumentException("Select an active aircraft before submitting this report.");continue;}
             Object value=answers.get(f.key());
-            if(value==null || (value instanceof String s && s.isBlank())) {
+            boolean conditionRequired=f.requiredWhen()!=null
+                    &&ConditionalFieldRules.isVisible(fields.get(f.requiredWhen().fieldKey()),fields,answers,new HashSet<>())
+                    &&f.requiredWhen().expectedValue().equals(String.valueOf(answers.get(f.requiredWhen().fieldKey())==null?"":answers.get(f.requiredWhen().fieldKey())));
+            boolean required=f.required()||conditionRequired;
+            if(value==null || (value instanceof String s && s.isBlank()) || (value instanceof List<?> list&&list.isEmpty())) {
                 if(beforeDefectCreation&&(f.type()==FieldType.FILE_UPLOAD||f.type()==FieldType.IMAGE_UPLOAD))continue;
-                if(f.required()) throw new IllegalArgumentException("A value is required for "+f.label()+".");
+                if(required) throw new IllegalArgumentException("A value is required for "+f.label()+".");
                 if(f.type()==FieldType.FILE_UPLOAD || f.type()==FieldType.IMAGE_UPLOAD) validateAttachmentCount(f,List.of());
                 continue;
             }
@@ -789,9 +797,9 @@ public class OperationalFormService {
                 case TEXT, TEXTAREA -> validateText(f,value);
                 case NUMBER -> validateNumber(f,value);
                 case DATE -> validateDate(f,value);
-                case CHECKBOX -> { if(!(value instanceof Boolean)) throw new IllegalArgumentException(f.label()+" must be true or false."); if(f.required()&&!Boolean.TRUE.equals(value))throw new IllegalArgumentException(f.label()+" must be checked."); }
+                case CHECKBOX -> { if(!(value instanceof Boolean)) throw new IllegalArgumentException(f.label()+" must be true or false."); if(required&&!Boolean.TRUE.equals(value))throw new IllegalArgumentException(f.label()+" must be checked."); }
                 case DROPDOWN -> validateOption(operatorId,form.areaId(),f,value,answers);
-                case MULTI_SELECT -> { if(!(value instanceof List<?> list)) throw new IllegalArgumentException(f.label()+" must be a list of selections."); Set<Object> unique=new HashSet<>(); for(Object option:list){if(!unique.add(option))throw new IllegalArgumentException("Duplicate options are not allowed for "+f.label()+".");validateOption(operatorId,form.areaId(),f,option,answers);} if(f.required()&&list.isEmpty())throw new IllegalArgumentException("Choose at least one option for "+f.label()+"."); }
+                case MULTI_SELECT -> { if(!(value instanceof List<?> list)) throw new IllegalArgumentException(f.label()+" must be a list of selections."); Set<Object> unique=new HashSet<>(); for(Object option:list){if(!unique.add(option))throw new IllegalArgumentException("Duplicate options are not allowed for "+f.label()+".");validateOption(operatorId,form.areaId(),f,option,answers);} if(required&&list.isEmpty())throw new IllegalArgumentException("Choose at least one option for "+f.label()+"."); }
                 case FILE_UPLOAD, IMAGE_UPLOAD -> validateAttachmentCount(f,value);
                 case AIRCRAFT_SELECT -> {
                     if(answers.containsKey(f.key()))throw new IllegalArgumentException("Aircraft registration is selected separately and cannot be submitted as a form answer.");
@@ -804,17 +812,49 @@ public class OperationalFormService {
     }
 
     /** Validate Maintenance form evidence against the published field rules before Close Submitted is persisted. */
+    public void validateMaintenanceAnswers(FormForArea form,String maintenanceStatus,LocalDate slaTargetDate,String remark) {
+        Map<String,FieldDefinition> fields=new LinkedHashMap<>();
+        for(FieldDefinition field:form.configuration().fields())if(field.type()!=FieldType.SECTION)fields.put(field.key(),field);
+        Map<String,Object> answers=new HashMap<>();
+        for(FieldDefinition field:fields.values()){
+            Object value=switch(field.binding()==null?"":field.binding().name()){
+                case "MAINTENANCE_STATUS" -> maintenanceStatus;
+                case "SLA_TARGET_DATE" -> slaTargetDate;
+                case "MAINTENANCE_REMARK" -> remark;
+                default -> null;
+            };
+            if(value!=null)answers.put(field.key(),value);
+        }
+        for(FieldDefinition field:fields.values()){
+            if(field.type()==FieldType.FILE_UPLOAD||field.type()==FieldType.IMAGE_UPLOAD)continue;
+            Object value=answers.get(field.key());
+            if(!ConditionalFieldRules.isVisible(field,fields,answers,new HashSet<>())){
+                if(value!=null&&(!(value instanceof String text)||!text.isBlank()))throw new IllegalArgumentException("A hidden field cannot receive a submitted value.");
+            }
+        }
+    }
+
+    /** Validate Maintenance form evidence against the published field rules before Close Submitted is persisted. */
     public void validateMaintenanceEvidence(UUID operatorId,UUID defectId,FormForArea form,String maintenanceStatus,Map<String,List<UUID>> attachments) {
         Map<String,List<UUID>> supplied=attachments==null?Map.of():attachments;
         List<FieldDefinition> uploadFields=form.configuration().fields().stream()
             .filter(field->field.type()==FieldType.IMAGE_UPLOAD||field.type()==FieldType.FILE_UPLOAD).toList();
         Set<String> configuredKeys=uploadFields.stream().map(FieldDefinition::key).collect(java.util.stream.Collectors.toSet());
         for(String key:supplied.keySet())if(!configuredKeys.contains(key))throw new IllegalArgumentException("Unknown Maintenance evidence field: "+key);
+        Map<String,FieldDefinition> fieldsByKey=new LinkedHashMap<>();
+        for(FieldDefinition field:form.configuration().fields())if(field.type()!=FieldType.SECTION)fieldsByKey.put(field.key(),field);
+        Map<String,Object> conditionAnswers=new HashMap<>();
+        fieldsByKey.values().stream().filter(field->field.binding()==DefectFieldBinding.MAINTENANCE_STATUS).findFirst()
+            .ifPresent(field->conditionAnswers.put(field.key(),maintenanceStatus));
         for(FieldDefinition field:uploadFields){
             List<UUID> ids=supplied.getOrDefault(field.key(),List.of());
             if(ids==null)ids=List.of();
+            if(!ConditionalFieldRules.isVisible(field,fieldsByKey,conditionAnswers,new HashSet<>())){
+                if(!ids.isEmpty())throw new IllegalArgumentException("A hidden field cannot receive a submitted value.");
+                continue;
+            }
             if(new HashSet<>(ids).size()!=ids.size())throw new IllegalArgumentException("The same evidence file cannot be attached more than once.");
-            boolean conditionRequired=field.requiredWhen()!=null&&"CLOSE_SUBMITTED".equals(maintenanceStatus)&&"CLOSE_SUBMITTED".equals(field.requiredWhen().expectedValue());
+            boolean conditionRequired=field.requiredWhen()!=null&&ConditionalFieldRules.isVisible(fieldsByKey.get(field.requiredWhen().fieldKey()),fieldsByKey,conditionAnswers,new HashSet<>())&&String.valueOf(conditionAnswers.get(field.requiredWhen().fieldKey())==null?"":conditionAnswers.get(field.requiredWhen().fieldKey())).equals(field.requiredWhen().expectedValue());
             int configuredMinimum=field.fileRules()==null||field.fileRules().minCount()==null?0:field.fileRules().minCount();
             int minimum=field.required()||conditionRequired?Math.max(1,configuredMinimum):configuredMinimum;
             int maximum=field.fileRules()==null||field.fileRules().maxCount()==null?0:field.fileRules().maxCount();

@@ -26,7 +26,8 @@ public final class EvidenceFileValidator {
     public static final long MAX_IMAGE_BYTES = 20L * BYTES_PER_MEGABYTE;
     public static final long MAX_NON_IMAGE_BYTES = 20L * BYTES_PER_MEGABYTE;
     public static final long MAX_TOTAL_BYTES = 200L * BYTES_PER_MEGABYTE;
-    private static final long MAX_IMAGE_PIXELS = 12_000_000L;
+    // Covers common 12.2 MP phone photos (for example, 4032 × 3024) while keeping a bounded decode size.
+    private static final long MAX_IMAGE_PIXELS = 13_000_000L;
     private static final int MAX_IMAGE_DIMENSION = 12_000;
     private static final long MAX_ANIMATED_IMAGE_PIXELS = 40_000_000L;
     private static final int MAX_IMAGE_FRAMES = 100;

@@ -49,8 +49,16 @@ class EvidenceFileValidatorTest {
     @Test void decodesEverySupportedEvidenceFormatAsItsClaimedFormat() throws Exception {
         assertEquals("image/png", EvidenceFileValidator.validateContent(IMAGE, "png", image("png")));
         assertEquals("image/jpeg", EvidenceFileValidator.validateContent(IMAGE, "jpg", image("jpg")));
+        assertEquals("image/jpeg", EvidenceFileValidator.validateContent(IMAGE, "jpeg", image("jpeg")));
         assertEquals("image/webp", EvidenceFileValidator.validateContent(IMAGE, "webp", webpFixture()));
         assertEquals("application/pdf", EvidenceFileValidator.validateContent(FILE, "pdf", pdfFixture()));
+    }
+
+    @Test void acceptsCommonTwelveMegapixelPhoneJpegAt4032By3024() throws Exception {
+        byte[] jpeg = image("jpg", 4032, 3024);
+
+        assertEquals("image/jpeg", EvidenceFileValidator.validateContent(IMAGE, "jpg", jpeg));
+        assertEquals("image/jpeg", EvidenceFileValidator.validateContent(IMAGE, "jpeg", jpeg));
     }
 
     @Test void rejectsExecutableBytesRenamedToEveryAllowedEvidenceExtension() {
@@ -97,9 +105,14 @@ class EvidenceFileValidatorTest {
     }
 
     private static byte[] image(String format) throws Exception {
-        BufferedImage image = new BufferedImage(2, 2, BufferedImage.TYPE_INT_RGB);
+        return image(format, 2, 2);
+    }
+
+    private static byte[] image(String format, int width, int height) throws Exception {
+        BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_BYTE_GRAY);
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         assertTrue(ImageIO.write(image, format, output));
+        image.flush();
         return output.toByteArray();
     }
 

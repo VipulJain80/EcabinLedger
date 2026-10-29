@@ -1,3 +1,5 @@
+import { isFieldRequired, isFieldVisible } from "./conditionalFieldVisibility.mjs";
+
 export type DefectBinding = "DEFECT_CATEGORY" | "COMPONENT_ID" | "CONDITION_ID" | "ZONE" | "ROW_NUMBER" | "SEAT_REFERENCE" | "TITLE" | "DESCRIPTION" | "REMARKS" | "SEVERITY" | "EVIDENCE_ATTACHMENTS" | "AIRCRAFT_ID" | "REVIEW_DECISION" | "REVIEW_MAINTENANCE_TEAM" | "REVIEW_REJECTION_REASON" | "REVIEW_REMARK" | "MAINTENANCE_STATUS" | "SLA_TARGET_DATE" | "MAINTENANCE_REMARK" | "CLOSURE_DECISION" | "CLOSURE_REMARK";
 export type ReportField = { key: string; label: string; type: string; required: boolean; defaultValue?: string | null; visible?: boolean | null; readOnly?: boolean | null; visibleWhen?: { fieldKey: string; equals: string } | null; requiredWhen?: { fieldKey: string; equals: string } | null; optionSource?: string | null; binding?: DefectBinding | null; optionFilter?: { componentFieldKey?: string | null } | null; fileRules?: { minCount?: number; maxCount?: number; extensions?: string[]; mimeTypes?: string[]; maxFileSizeBytes?: number } | null };
 export function defectReportBindingIssue(fields: readonly ReportField[]): string {
@@ -28,17 +30,16 @@ export function defectReportBindingIssue(fields: readonly ReportField[]): string
 /** Client-side usability check against the selected version's field schema; the backend remains authoritative. */
 export function configuredAnswerIssue(fields: readonly ReportField[], answers: Record<string, unknown>): string {
   for (const field of fields) {
-    if (field.type === "SECTION" || field.type === "AIRCRAFT_SELECT" || field.visible === false) continue;
-    if (field.visibleWhen && String(answers[field.visibleWhen.fieldKey] ?? "") !== field.visibleWhen.equals) continue;
+    if (field.type === "SECTION" || field.type === "AIRCRAFT_SELECT" || !isFieldVisible(field, answers, fields)) continue;
+    const required = isFieldRequired(field, answers, fields);
     const value = answers[field.key];
     if (field.type === "FILE_UPLOAD" || field.type === "IMAGE_UPLOAD") {
-      const minimum = field.required ? Math.max(1, field.fileRules?.minCount ?? 0) : field.fileRules?.minCount ?? 0;
+      const minimum = required ? Math.max(1, field.fileRules?.minCount ?? 0) : field.fileRules?.minCount ?? 0;
       const count = Array.isArray(value) ? value.length : 0;
       if (count < minimum) return `Attach at least ${minimum} file(s) for ${field.label}.`;
       if (field.fileRules?.maxCount != null && count > field.fileRules.maxCount) return `Select no more than ${field.fileRules.maxCount} files for ${field.label}.`;
       continue;
     }
-    const required = field.required || Boolean(field.requiredWhen && String(answers[field.requiredWhen.fieldKey] ?? "") === field.requiredWhen.equals);
     if (!required) continue;
     const empty = value == null || (typeof value === "string" && value.trim() === "") || (Array.isArray(value) && value.length === 0) || (field.type === "CHECKBOX" && value !== true);
     if (empty) return `Complete ${field.label} before submitting the form.`;
@@ -64,6 +65,7 @@ export function initializeFormValues<T extends ReportField>(fields: readonly T[]
 export function answersWithoutUntouchedDefaults<T extends ReportField>(fields: readonly T[], answers: Record<string, unknown>, dirtyKeys: ReadonlySet<string>, initialAnswers: Record<string, unknown> = {}): Record<string, unknown> {
   const submitted = { ...answers };
   for (const field of fields) if (field.defaultValue != null && !dirtyKeys.has(field.key) && initialAnswers[field.key] == null) delete submitted[field.key];
+  for (const field of fields) if (!isFieldVisible(field, submitted, fields)) delete submitted[field.key];
   return submitted;
 }
 

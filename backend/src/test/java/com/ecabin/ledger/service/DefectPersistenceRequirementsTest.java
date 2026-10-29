@@ -34,6 +34,18 @@ class DefectPersistenceRequirementsTest {
         assertTrue(error.getMessage().contains("Defect title"));
     }
 
+    @Test void nullableTitleAndDescriptionDoNotBlockPublicationWhenOmittedFromTheForm() {
+        Set<DefectFieldBinding> required=requirements.requiredBindingsFor(Map.of(
+            "category",false,"component_id",false,"condition_id",false,"zone",true,
+            "title",false,"description",false,"severity",true,"severity_id",false));
+        List<FieldDefinition> compact=List.of(aircraft(),
+            field("zone",DefectFieldBinding.ZONE,FieldType.TEXT,true),
+            field("severity",DefectFieldBinding.SEVERITY,FieldType.DROPDOWN,true));
+
+        assertEquals(Set.of(DefectFieldBinding.ZONE,DefectFieldBinding.SEVERITY),required);
+        assertEquals("",requirements.publicationIssue("CABIN",compact,required));
+    }
+
     @Test void publicationRequiresOnlyBindingsNeededByCurrentDatabaseAndNotSynthesizedLegacyValues() {
         Set<DefectFieldBinding> required = Set.of(DefectFieldBinding.ZONE, DefectFieldBinding.TITLE,
             DefectFieldBinding.DESCRIPTION, DefectFieldBinding.SEVERITY);

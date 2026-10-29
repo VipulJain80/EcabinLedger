@@ -8,7 +8,7 @@ import { isPublishedFormForArea, orderedOperationalFields, unsupportedPublishedF
 import { answersWithoutUntouchedDefaults, defectReportBindingIssue, initializeFormValues } from "./defectReportMapping";
 import EvidenceUploadField from "./EvidenceUploadField";
 import { maxTotalBytesForField, partitionEvidenceSelection, validateEvidenceFile } from "./evidenceFileRules";
-import { isFieldRequired, isFieldVisible } from "./conditionalFieldVisibility";
+import { isFieldRequired, isFieldVisible } from "./conditionalFieldVisibility.mjs";
 import AttachmentPreviewDialog from "@/common/dialogs/AttachmentPreviewDialog";
 import AircraftRegistrationSelect from "./AircraftRegistrationSelect";
 import { SearchableMultiSelect, SearchableSelect } from "@/common/selects/SearchableSelect";
@@ -42,6 +42,8 @@ type AircraftOption = { id:string; tailNumber:string; msnNumber:string|null; air
 type Uploaded = { id: string; filename: string; sizeBytes?: number; scanStatus: string };
 type CaseEvidence = { id:string;formSubmissionId:string|null;fieldKey:string;filename:string;mimeType:string;sizeBytes:number;scanStatus:string;uploadedAt:string;source?:string|null;uploadedBy?:string|null };
 type EvidencePreview = { file:CaseEvidence; url?:string; error?:string };
+
+const EMPTY_FIELDS: Field[] = [];
 
 function evidenceSourceLabel(source?:string|null){
   if(source==="DEFECT_REPORT")return "Auditor report";
@@ -116,7 +118,19 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
   const selectedFormId = initialFormId || formId || (availableForms.length === 1 ? availableForms[0].id : "");
   const selected = reportSubmitted && purpose === "DEFECT_REPORT" ? undefined : initialFormId ? initialDefinition.data : availableForms.find(form => form.id === selectedFormId);
   const selectionContext = `${areaId}:${defectId || "new"}:${purpose}:${workflowStage}:${selectedFormId}:${selected?.versionId || ""}`;
-  const selectedFields = useMemo(() => orderedOperationalFields(selected?.configuration.fields || []).filter(field => isFieldVisible(field, values)), [selected, values]);
+  const allConfiguredFields=selected?.configuration.fields||EMPTY_FIELDS;
+  const conditionValues=useMemo(()=>{
+    const current={...values};
+    for(const field of allConfiguredFields)if(field.defaultValue!=null&&!dirtyFields.has(field.key)&&initialAnswers?.[field.key]==null)delete current[field.key];
+    const statusField=allConfiguredFields.find(field=>field.binding==="MAINTENANCE_STATUS");
+    if(purpose==="CORRECTIVE_ACTION"&&statusField){
+      const choices=options[`${selected?.versionId}:${statusField.key}:${areaId}:`]||[];
+      const selectedOption=choices.find(option=>option.id===String(values[statusField.key]||""));
+      if(selectedOption)current[statusField.key]=selectedOption.code;
+    }
+    return current;
+  },[allConfiguredFields,areaId,dirtyFields,initialAnswers,options,purpose,selected?.versionId,values]);
+  const selectedFields = useMemo(() => orderedOperationalFields(allConfiguredFields).filter(field => isFieldVisible(field, conditionValues, allConfiguredFields)), [allConfiguredFields, conditionValues]);
   const unsupportedField = unsupportedPublishedField(selectedFields);
   const maintenanceStatusField=selectedFields.find(field=>field.binding==="MAINTENANCE_STATUS");
   const maintenanceStatusChoices=maintenanceStatusField?options[`${selected?.versionId}:${maintenanceStatusField.key}:${areaId}:` ]||[]:[];
@@ -294,7 +308,7 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
     if (!selected || !defectId || submissionGuard.current || previewOnly) return;
     const untouchedRequiredDefault=selectedFields.find(field=>field.required&&field.defaultValue!=null&&!dirtyFields.has(field.key)&&initialAnswers?.[field.key]===undefined);
     if(untouchedRequiredDefault){setMessage(`Review and enter a value for ${untouchedRequiredDefault.label} before submitting.`);return;}
-    const explicitAnswers=answersWithoutUntouchedDefaults(selectedFields,values,dirtyFields,initialAnswers||{});
+    const explicitAnswers=answersWithoutUntouchedDefaults(selected?.configuration.fields||[],conditionValues,dirtyFields,initialAnswers||{});
     if(purpose==="CLOSURE_APPROVAL"){
       const decisionField=selectedFields.find(field=>field.binding==="CLOSURE_DECISION");
       const remarkField=selectedFields.find(field=>field.binding==="CLOSURE_REMARK");
@@ -338,7 +352,7 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
       const remark=String(explicitAnswers[remarkField?.key||""]||"");
       submissionGuard.current=true;setSubmitting(true);setMessage("");setSuccessMessage("");
       const attachments=Object.fromEntries(selectedFields.filter(field=>field.type==="IMAGE_UPLOAD"||field.type==="FILE_UPLOAD").map(field=>[field.key,(files[field.key]||[]).filter(file=>file.scanStatus!=="REJECTED").map(file=>file.id)]));
-      try{const response=await request(`/defects/${encodeURIComponent(defectId)}/actions/${encodeURIComponent(actionId)}/maintenance-form`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({formId:selected.id,formVersionId:selected.versionId,status:statusCode,slaTargetDate:targetDate||null,remark:remark||null,attachments})});if(!response.ok)throw new Error(await responseErrorMessage(response,"Maintenance update failed validation."));const confirmation="Maintenance action updated.";setSuccessMessage(confirmation);void alert.success(confirmation);setValues({});await available.refetch();onWorkflowComplete?.("");}
+      try{const response=await request(`/defects/${encodeURIComponent(defectId)}/actions/${encodeURIComponent(actionId)}/maintenance-form`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({formId:selected.id,formVersionId:selected.versionId,status:statusCode,slaTargetDate:targetDate||null,remark:remarkField&&isFieldVisible(remarkField,conditionValues,allConfiguredFields)?remark||null:null,attachments})});if(!response.ok)throw new Error(await responseErrorMessage(response,"Maintenance update failed validation."));const confirmation="Maintenance action updated.";setSuccessMessage(confirmation);void alert.success(confirmation);setValues({});await available.refetch();onWorkflowComplete?.("");}
       catch(error){const failure=error instanceof Error?error.message:"Maintenance update failed.";setMessage(failure);void alert.error(failure);}
       finally{submissionGuard.current=false;setSubmitting(false);}
       return;
@@ -398,7 +412,7 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
     const isSlaDate=field.binding==="SLA_TARGET_DATE";
     const datePolicy=slaPolicyQuery.data;
     const evidenceRequired=purpose==="CORRECTIVE_ACTION"&&field.binding==="EVIDENCE_ATTACHMENTS"&&field.requiredWhen?.equals==="CLOSE_SUBMITTED"&&selectedMaintenanceStatus==="CLOSE_SUBMITTED";
-    const fieldRequired=isSlaDate&&purpose==="CORRECTIVE_ACTION"?Boolean(datePolicy?.policy.dateRequired):evidenceRequired||isFieldRequired(field,values);
+    const fieldRequired=isSlaDate&&purpose==="CORRECTIVE_ACTION"?Boolean(datePolicy?.policy.dateRequired):evidenceRequired||isFieldRequired(field,conditionValues,allConfiguredFields);
     if (field.type === "SECTION") return <div className="operational-form-section" key={field.key}><h4>{field.label}</h4>{field.helpText && <p>{field.helpText}</p>}</div>;
     if(field.type==="AIRCRAFT_SELECT"){
       return <div className="dynamic-aircraft-select grid min-w-0 content-start gap-[7px] self-start" key={field.key}>
@@ -446,8 +460,8 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
     }
     return <label className="flex flex-col gap-[7px] my-[10px]" key={field.key} htmlFor={id}><span className="dynamic-form-field-label">{field.label}{fieldRequired && <span className="dynamic-form-required" aria-hidden="true">*</span>}</span>{field.helpText && <small>{field.helpText}</small>}
       {isSlaDate&&purpose==="CORRECTIVE_ACTION"&&slaPolicyQuery.isError&&<button type="button" className="button-secondary" onClick={()=>void slaPolicyQuery.refetch()}>Retry policy</button>}
-      {field.type === "TEXTAREA" ? <textarea id={id} form={preparationMode ? "defect-report-form" : undefined} required={field.required && !readOnly} disabled={disabled} value={String(values[field.key] || "")} minLength={field.textRules?.minLength ?? undefined} maxLength={field.textRules?.maxLength ?? undefined} onChange={event => changeValue(field, event.target.value)} />
-        : field.type === "DROPDOWN" || field.type === "MULTI_SELECT" ? <select id={id} form={preparationMode ? "defect-report-form" : undefined} required={field.required && !readOnly} disabled={disabled} multiple={field.type === "MULTI_SELECT"} value={field.type === "MULTI_SELECT" ? (Array.isArray(values[field.key]) ? values[field.key] as string[] : []) : String(values[field.key] || "")} onChange={event => changeValue(field, field.type === "MULTI_SELECT" ? Array.from(event.target.selectedOptions).map(option => option.value) : event.target.value)}><option value="">Choose…</option>{choices.map(option => <option key={option.id} value={option.id}>{option.label}</option>)}</select>
+      {field.type === "TEXTAREA" ? <textarea id={id} form={preparationMode ? "defect-report-form" : undefined} required={fieldRequired && !readOnly} disabled={disabled} value={String(values[field.key] || "")} minLength={field.textRules?.minLength ?? undefined} maxLength={field.textRules?.maxLength ?? undefined} onChange={event => changeValue(field, event.target.value)} />
+        : field.type === "DROPDOWN" || field.type === "MULTI_SELECT" ? <select id={id} form={preparationMode ? "defect-report-form" : undefined} required={fieldRequired && !readOnly} disabled={disabled} multiple={field.type === "MULTI_SELECT"} value={field.type === "MULTI_SELECT" ? (Array.isArray(values[field.key]) ? values[field.key] as string[] : []) : String(values[field.key] || "")} onChange={event => changeValue(field, field.type === "MULTI_SELECT" ? Array.from(event.target.selectedOptions).map(option => option.value) : event.target.value)}><option value="">Choose…</option>{choices.map(option => <option key={option.id} value={option.id}>{option.label}</option>)}</select>
           : field.type === "CHECKBOX" ? <input id={id} form={preparationMode ? "defect-report-form" : undefined} type="checkbox" disabled={disabled} checked={Boolean(values[field.key])} onChange={event => changeValue(field, event.target.checked)} />
             : <input id={id} form={preparationMode ? "defect-report-form" : undefined} type={field.type === "NUMBER" ? "number" : field.type === "DATE" ? "date" : "text"} required={fieldRequired && !readOnly} disabled={disabled||(isSlaDate&&purpose==="CORRECTIVE_ACTION"&&(!selectedMaintenanceStatus||slaPolicyQuery.isPending||slaPolicyQuery.isError))} value={String(values[field.key] ?? "")} min={isSlaDate&&purpose==="CORRECTIVE_ACTION"?datePolicy?.minDate:field.type === "NUMBER" ? field.numericRules?.min ?? undefined : field.type === "DATE" ? field.dateRules?.minDate ?? undefined : undefined} max={isSlaDate&&purpose==="CORRECTIVE_ACTION"?datePolicy?.maxDate:field.type === "NUMBER" ? field.numericRules?.max ?? undefined : field.type === "DATE" ? field.dateRules?.maxDate ?? undefined : undefined} step={field.type === "NUMBER" ? 1 / 10 ** (field.numericRules?.precision ?? 0) : undefined} minLength={field.type === "TEXT" ? field.textRules?.minLength ?? undefined : undefined} maxLength={field.type === "TEXT" ? field.textRules?.maxLength ?? undefined : field.type==="TEXTAREA"?field.textRules?.maxLength??undefined:undefined} pattern={field.type === "TEXT" ? field.textRules?.pattern || undefined : undefined} onChange={event => changeValue(field, event.target.value)} />}
     </label>;

@@ -122,7 +122,8 @@ public class AreaMaintenanceRoutingService {
         if(actions!=null&&actions>0)return true;
         UUID action=UUID.randomUUID();
         String priority=switch(severity){case "CRITICAL"->"CRITICAL";case "MAJOR"->"HIGH";case "MINOR"->"MEDIUM";default->"LOW";};
-        jdbc.update("INSERT INTO corrective_actions_dtl(id,operator_id,defect_id,created_by_user_id,assigned_team,description,priority,status) VALUES(?,?,?,?,?,?,?,'ASSIGNED')",action,tenant,defectId,actor,teamName,"Investigate reported defect: "+title,priority);
+        String actionDescription=title==null||title.isBlank()?"Investigate reported defect.":"Investigate reported defect: "+title.trim();
+        jdbc.update("INSERT INTO corrective_actions_dtl(id,operator_id,defect_id,created_by_user_id,assigned_team,description,priority,status) VALUES(?,?,?,?,?,?,?,'ASSIGNED')",action,tenant,defectId,actor,teamName,actionDescription,priority);
         jdbc.update("UPDATE defects_dtl SET status='ACTION_ASSIGNED',assigned_team=?,updated_at=now(),version=version+1 WHERE operator_id=? AND id=?",teamName,tenant,defectId);
         UUID event=jdbc.query("INSERT INTO defect_events_dtl(operator_id,defect_id,event_type,from_status,to_status,note,actor_id,entity_type,entity_id,new_state,request_id) VALUES(?,?,'AREA_MAINTENANCE_ROUTED','REPORTED','ACTION_ASSIGNED','Defect directly assigned using the active cabin-area mapping.',?,'DEFECT',?,jsonb_build_object('mappingId',CAST(? AS text),'teamName',?,'correctiveActionId',CAST(? AS text)),?) RETURNING id",(rs,row)->rs.getObject(1,UUID.class),tenant,defectId,actor,defectId,mappingId.toString(),teamName,action,MDC.get("request_id")).get(0);
         if(notifications!=null)notifications.notifyMaintenance(tenant,defectId,event,actor,teamName,null,"ACTION_ASSIGNED","A new defect was assigned to your maintenance team.");
@@ -136,12 +137,12 @@ public class AreaMaintenanceRoutingService {
 
     @Transactional
     public boolean retry(UUID tenant,UUID defectId,String actor) {
-        Map<String,Object> defect=jdbc.query("SELECT d.area_id,d.title,d.severity,d.status,v.assignment_mode FROM defects_dtl d JOIN defect_workflow_versions_dtl v ON v.operator_id=d.operator_id AND v.id=d.workflow_version_id WHERE d.operator_id=? AND d.id=? AND d.isactive=1 FOR UPDATE OF d",rs->rs.next()?Map.of("areaId",rs.getObject("area_id",UUID.class),"title",rs.getString("title"),"severity",rs.getString("severity"),"status",rs.getString("status"),"mode",rs.getString("assignment_mode")):null,tenant,defectId);
+        Map<String,Object> defect=jdbc.query("SELECT d.area_id,d.title,d.severity,d.status,v.assignment_mode FROM defects_dtl d JOIN defect_workflow_versions_dtl v ON v.operator_id=d.operator_id AND v.id=d.workflow_version_id WHERE d.operator_id=? AND d.id=? AND d.isactive=1 FOR UPDATE OF d",rs->{if(!rs.next())return null;Map<String,Object> row=new java.util.HashMap<>();row.put("areaId",rs.getObject("area_id",UUID.class));row.put("title",rs.getString("title"));row.put("severity",rs.getString("severity"));row.put("status",rs.getString("status"));row.put("mode",rs.getString("assignment_mode"));return row;},tenant,defectId);
         if(defect==null)throw new ResponseStatusException(HttpStatus.NOT_FOUND,"Defect not found.");
         if(!"DIRECT_MAINTENANCE".equals(defect.get("mode"))||!"REPORTED".equals(defect.get("status")))throw new ResponseStatusException(HttpStatus.CONFLICT,"This defect is not awaiting direct maintenance routing.");
         Route route=route(tenant,(UUID)defect.get("areaId"));
         if(route==null||route.teamId()==null){jdbc.update("INSERT INTO defect_events_dtl(operator_id,defect_id,event_type,note,actor_id,entity_type,entity_id,new_state,request_id) VALUES(?,? ,'AREA_MAINTENANCE_ROUTING_FAILED','No active eligible Maintenance team is mapped to this area.',?,'DEFECT',?,jsonb_build_object('actionable','Configure an eligible area mapping and retry.'),?)",tenant,defectId,actor,defectId,MDC.get("request_id"));return false;}
-        return assignForDirectMode(tenant,defectId,actor,route.mappingId(),route.teamName(),String.valueOf(defect.get("title")),String.valueOf(defect.get("severity")));
+        return assignForDirectMode(tenant,defectId,actor,route.mappingId(),route.teamName(),(String)defect.get("title"),(String)defect.get("severity"));
     }
 
     private void ensureWorkflow(UUID tenant) {

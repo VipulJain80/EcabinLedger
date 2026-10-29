@@ -18,6 +18,127 @@ class OperationalFormServiceTest {
     private final OperationalFormService service=new OperationalFormService(null,new ObjectMapper());
     private final UUID operator=UUID.randomUUID(),area=UUID.randomUUID();
 
+    @Test void generatedDefectTitlesUseConfiguredAreaDisplayNamesAndRespectTheTitleLimit(){
+        assertEquals("Galley — Cart latch — G3",OperationalFormService.generatedDefectTitle("Galley","Cart latch","G3"));
+        assertEquals("Cabin — Seat assembly — 12A",OperationalFormService.generatedDefectTitle("Cabin","Seat assembly","12A"));
+        assertEquals("Lavatory — Sink panel — L2",OperationalFormService.generatedDefectTitle("Lavatory","Sink panel","L2"));
+        assertEquals(160,OperationalFormService.generatedDefectTitle("A".repeat(80),"B".repeat(80),"C".repeat(80)).length());
+    }
+
+    @Test void generatedDescriptionKeepsConditionAndOptionalRemarksCompositionWithinLimit(){
+        assertEquals("Condition: Surface damage", "Condition: "+"Surface damage");
+        assertEquals("Condition: Surface damage\nRemarks: Loose handle",service.appendRemarks("Condition: Surface damage","Loose handle"));
+        assertThrows(IllegalArgumentException.class,()->service.appendRemarks("x".repeat(3990),"remarks"));
+    }
+
+    @Test void defectReportDraftAcceptsAConditionalGenericFieldWithoutChangingTheAircraftInvariant(){
+        FieldDefinition source=field("showDetails",FieldType.CHECKBOX);
+        FieldDefinition target=new FieldDefinition("details","Details",FieldType.TEXT,null,false,1,null,null,null,null,null,null,null,true,false,new VisibilityRule("showDetails","true"),null);
+        assertDoesNotThrow(()->validateDraft(new FormConfiguration(List.of(source,target))));
+    }
+
+    @Test void defectReportDraftRejectsCyclicConditionalVisibility(){
+        FieldDefinition first=new FieldDefinition("first","First",FieldType.TEXT,null,false,0,null,null,null,null,null,null,null,true,false,new VisibilityRule("second","yes"),null);
+        FieldDefinition second=new FieldDefinition("second","Second",FieldType.TEXT,null,false,1,null,null,null,null,null,null,null,true,false,new VisibilityRule("first","yes"),null);
+        assertThrows(IllegalArgumentException.class,()->validateDraft(new FormConfiguration(List.of(first,second))));
+    }
+
+    @Test void defectReportResolverAllowsAnOmittedCategoryBindingAndStillResolvesConfiguredSeverity(){
+        UUID severityId=UUID.randomUUID();
+        FieldDefinition severity=severityField();
+        ResolverFixture fixture=resolver(List.of(aircraftField(),severity),
+            List.of(new FormOption(severityId,"MINOR","Minor")),Map.of("id",false));
+
+        Map<String,Object> resolved=fixture.service().resolveDefectReport(operator,area,fixture.formId(),fixture.versionId(),Map.of("severity",severityId.toString()));
+
+        assertFalse(resolved.containsKey("category"));
+        assertEquals("MINOR",resolved.get("severity"));
+    }
+
+    @Test void defectReportResolverAllowsAnOmittedSeverityBindingWhenPersistencePolicyAllowsIt(){
+        ResolverFixture fixture=resolver(List.of(aircraftField()),List.of(),Map.of("id",false));
+
+        Map<String,Object> resolved=fixture.service().resolveDefectReport(operator,area,fixture.formId(),fixture.versionId(),Map.of());
+
+        assertFalse(resolved.containsKey("severity"));
+    }
+
+    @Test void defectReportResolverStillRejectsAnOmittedSeverityWhenPersistenceRequiresIt(){
+        ResolverFixture fixture=resolver(List.of(aircraftField()),List.of(),Map.of("severity_id",true));
+
+        IllegalArgumentException error=assertThrows(IllegalArgumentException.class,
+            ()->fixture.service().resolveDefectReport(operator,area,fixture.formId(),fixture.versionId(),Map.of()));
+
+        assertEquals("This form version must include “Severity” because the current database schema requires its persisted value.",error.getMessage());
+    }
+
+    @Test void defectReportResolverMapsConfiguredCategoryAndSeverityAndRejectsInvalidCategory(){
+        UUID categoryId=UUID.randomUUID(),severityId=UUID.randomUUID();
+        FieldDefinition category=categoryField();
+        FieldDefinition severity=severityField();
+        List<FieldDefinition> fields=List.of(aircraftField(),category,severity);
+        Map<String,Object> answers=Map.of("category",categoryId.toString(),"severity",severityId.toString());
+        ResolverFixture valid=resolver(fields,List.of(
+            new FormOption(categoryId,"CABIN_DEFECT","Cabin defect"),
+            new FormOption(severityId,"MINOR","Minor")),Map.of("id",false));
+
+        Map<String,Object> resolved=valid.service().resolveDefectReport(operator,area,valid.formId(),valid.versionId(),answers);
+
+        assertEquals("CABIN_DEFECT",resolved.get("category"));
+        assertEquals("MINOR",resolved.get("severity"));
+
+        ResolverFixture invalid=resolver(fields,List.of(new FormOption(severityId,"MINOR","Minor")),Map.of("id",false));
+        assertThrows(IllegalArgumentException.class,
+            ()->invalid.service().resolveDefectReport(operator,area,invalid.formId(),invalid.versionId(),answers));
+    }
+
+    @Test void defectReportResolverRejectsAnInvalidConfiguredSeverity(){
+        UUID severityId=UUID.randomUUID();
+        ResolverFixture fixture=resolver(List.of(aircraftField(),severityField()),List.of(),Map.of("id",false));
+
+        assertThrows(IllegalArgumentException.class,
+            ()->fixture.service().resolveDefectReport(operator,area,fixture.formId(),fixture.versionId(),Map.of("severity",severityId.toString())));
+    }
+
+    private ResolverFixture resolver(List<FieldDefinition> fields,List<FormOption> options,Map<String,Boolean> requiredColumns){
+        JdbcTemplate jdbc=mock(JdbcTemplate.class);
+        FormFieldBindingCatalog catalog=new FormFieldBindingCatalog();
+        DefectPersistenceRequirements requirements=new DefectPersistenceRequirements(jdbc,catalog);
+        UUID formId=UUID.randomUUID(),versionId=UUID.randomUUID();
+        FormForArea form=new FormForArea(formId,"DEFECT_REPORT","Defect report",area,FormPurpose.DEFECT_REPORT,
+            WorkflowStage.INITIAL_REPORT,versionId,1,new FormConfiguration(fields));
+        when(jdbc.query(contains("SELECT f.id,f.form_key"),any(RowMapper.class),any(Object[].class))).thenReturn(List.of(form));
+        when(jdbc.queryForObject(contains("SELECT code FROM cabin_areas_mst"),eq(String.class),any(Object[].class))).thenReturn("CABIN");
+        when(jdbc.query(contains("SELECT code,name FROM cabin_areas_mst"),any(ResultSetExtractor.class),any(Object[].class)))
+            .thenReturn(new String[]{"CABIN","Cabin"});
+        when(jdbc.queryForObject(contains("SELECT EXISTS(SELECT 1 FROM cabin_areas_mst"),eq(Boolean.class),any(Object[].class))).thenReturn(true);
+        when(jdbc.query(contains("information_schema.columns"),any(ResultSetExtractor.class)))
+            .thenReturn(requiredColumns);
+        when(jdbc.query(contains("FROM defect_categories_mst"),any(RowMapper.class),any(Object[].class)))
+            .thenReturn(options.stream().filter(option->option.id()!=null&&fields.stream().anyMatch(field->field.binding()==DefectFieldBinding.DEFECT_CATEGORY)).toList());
+        when(jdbc.query(contains("FROM defect_severities_mst"),any(RowMapper.class),any(Object[].class)))
+            .thenReturn(options.stream().filter(option->option.id()!=null&&fields.stream().anyMatch(field->field.binding()==DefectFieldBinding.SEVERITY)).toList());
+        OperationalFormService resolverService=new OperationalFormService(jdbc,new ObjectMapper(),catalog,requirements);
+        return new ResolverFixture(resolverService,formId,versionId);
+    }
+
+    private FieldDefinition aircraftField(){
+        return new FieldDefinition("aircraftId","Aircraft Registration",FieldType.AIRCRAFT_SELECT,null,true,0,null,null,null,
+            OptionSource.AIRCRAFT,null,null,DefectFieldBinding.AIRCRAFT_ID);
+    }
+
+    private FieldDefinition categoryField(){
+        return new FieldDefinition("category","Category",FieldType.DROPDOWN,null,false,1,null,null,null,
+            OptionSource.DEFECT_CATEGORIES,null,null,DefectFieldBinding.DEFECT_CATEGORY);
+    }
+
+    private FieldDefinition severityField(){
+        return new FieldDefinition("severity","Severity",FieldType.DROPDOWN,null,true,2,null,null,null,
+            OptionSource.DEFECT_SEVERITIES,null,null,DefectFieldBinding.SEVERITY);
+    }
+
+    private record ResolverFixture(OperationalFormService service,UUID formId,UUID versionId){}
+
     @Test void acceptsTypedFieldConfigurationAndPreservesOrdering(){
         var result=validateDraft(new FormConfiguration(List.of(
             new FieldDefinition("finding","Finding",FieldType.TEXT,null,true,0,new TextRules(1,240,false,false,"[A-Za-z0-9 .,/-]+"),null,null,null,null,null),

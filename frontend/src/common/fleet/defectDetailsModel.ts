@@ -44,6 +44,12 @@ export function formatHistoryDate(value: string | null | undefined, emptyLabel =
   return value;
 }
 
+/** Display persisted zone and seat-reference values together without deriving either from the title. */
+export function zoneLocationSeatValue(zone: string | null | undefined, seatReference: string | null | undefined): string {
+  const values = [zone, seatReference].map(value => value?.trim()).filter((value): value is string => Boolean(value));
+  return [...new Set(values)].join(" · ") || "Not recorded";
+}
+
 export type ReportSnapshot = {
   defectCategory: string | null;
   componentId: string | null;

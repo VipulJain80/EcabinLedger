@@ -70,7 +70,7 @@ class PostgresMigrationSmokeTest {
                 assertTrue(!actual.contains("legacy_cabin_zones_archive"), "The retired cabin-zones table and its temporary archive must be removed.");
                 assertTrue(!actual.contains("cabin_zones_mst"), "The retired cabin-zones master must not remain under its application name.");
                 assertTrue(actual.stream().noneMatch(name -> name.endsWith("_mst_mst") || name.endsWith("_dtl_dtl") || name.endsWith("_mst_dtl") || name.endsWith("_dtl_mst")), "No table may have a duplicated or conflicting suffix.");
-                assertEquals(72, appliedMigrationCount(connection), "All versioned migrations, including V72, must be recorded as applied.");
+                assertEquals(73, appliedMigrationCount(connection), "All versioned migrations, including V73, must be recorded as applied.");
                 try (var formAnswerColumn=connection.prepareStatement("SELECT count(*) FROM information_schema.columns WHERE table_schema=? AND table_name='operational_form_submissions_dtl' AND column_name='submitted_answers_json' AND data_type='jsonb' AND is_nullable='YES'")) {
                     formAnswerColumn.setString(1,SCHEMA);
                     try(var formAnswerRows=formAnswerColumn.executeQuery()){formAnswerRows.next();assertEquals(1,formAnswerRows.getInt(1),"V71 must add a nullable generic answer snapshot without rewriting old rows.");}
@@ -78,6 +78,14 @@ class PostgresMigrationSmokeTest {
                 try (var optionalSnapshots=connection.prepareStatement("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid=?::regclass AND conname='operational_form_submission_snapshot_report_check'")) {
                     optionalSnapshots.setString(1,SCHEMA+".operational_form_submissions_dtl");
                     try(var snapshotRows=optionalSnapshots.executeQuery()) { assertTrue(snapshotRows.next()); String definition=snapshotRows.getString(1); assertFalse(definition.contains("snapshot_component_id IS NOT NULL")); assertFalse(definition.contains("snapshot_condition_id IS NOT NULL")); }
+                }
+                try (var optionalDefectText=connection.prepareStatement("SELECT count(*) FROM information_schema.columns WHERE table_schema=? AND table_name='defects_dtl' AND column_name IN ('title','description') AND is_nullable='YES'")) {
+                    optionalDefectText.setString(1,SCHEMA);
+                    try(var columns=optionalDefectText.executeQuery()){columns.next();assertEquals(2,columns.getInt(1),"V73 must make defect title and description nullable.");}
+                }
+                try (var optionalTextSnapshots=connection.prepareStatement("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid=?::regclass AND conname='operational_form_submission_snapshot_report_check'")) {
+                    optionalTextSnapshots.setString(1,SCHEMA+".operational_form_submissions_dtl");
+                    try(var textSnapshotRows=optionalTextSnapshots.executeQuery()){assertTrue(textSnapshotRows.next());String definition=textSnapshotRows.getString(1);assertTrue(definition.contains("snapshot_title IS NULL"));assertTrue(definition.contains("snapshot_description IS NULL"));}
                 }
                 try (var emailObjects = connection.prepareStatement("SELECT (SELECT count(*) FROM pg_constraint WHERE conrelid=?::regclass AND conname='defect_events_operator_id_id_uq' AND contype='u'),(SELECT count(*) FROM pg_constraint WHERE conrelid=?::regclass AND conname='email_outbox_source_event_fk' AND contype='f'),(SELECT count(*) FROM pg_constraint WHERE conrelid=?::regclass AND conname='email_outbox_idempotency_uq' AND contype='u'),(SELECT count(*) FROM pg_indexes WHERE schemaname=? AND indexname IN ('email_outbox_due_idx','email_outbox_expired_lease_idx','email_outbox_tenant_status_idx','email_outbox_event_idx')),(SELECT count(DISTINCT trigger_name) FROM information_schema.triggers WHERE trigger_schema=? AND event_object_table IN ('email_notification_settings_mst','email_notification_event_settings_mst','email_outbox_dtl','email_outbox_attempts_dtl') AND trigger_name LIKE 'audit_email_%'),(SELECT count(DISTINCT trigger_name) FROM information_schema.triggers WHERE trigger_schema=? AND trigger_name IN ('email_global_setting_audit','email_event_setting_audit'))")) {
                     emailObjects.setString(1, SCHEMA + ".defect_events_dtl"); emailObjects.setString(2, SCHEMA + ".email_outbox_dtl"); emailObjects.setString(3, SCHEMA + ".email_outbox_dtl"); emailObjects.setString(4, SCHEMA); emailObjects.setString(5, SCHEMA); emailObjects.setString(6, SCHEMA);

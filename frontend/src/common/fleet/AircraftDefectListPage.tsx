@@ -11,7 +11,7 @@ import { areaFormSelection, selectableCabinAreas, shouldShowCabinAreaChooser, si
 import { useDefectWorkflowStatuses, useDefectSeverities, workflowStatusLabel, WorkflowStatusBadge, SeverityBadge } from "@/common/workflow/workflowStatuses";
 
 type Request = (path: string, init?: RequestInit) => Promise<Response>;
-type DefectRow = { id: string; reference: string; title: string; location: string; zone: string; component: string; conditionName?: string | null; severity: string; severityName?: string; status: string; reportedAt: string; closedAt?: string | null };
+type DefectRow = { id: string; reference: string; title: string | null; location: string; zone: string; component: string; conditionName?: string | null; severity: string; severityName?: string; status: string; reportedAt: string; closedAt?: string | null };
 type AreaOption = { id: string; code: string; name: string; isactive?: number };
 type PublishedForm = { id: string; name: string; versionId: string; versionNumber: number; configuration: { fields: import("@/common/forms/defectReportMapping").ReportField[] } };
 

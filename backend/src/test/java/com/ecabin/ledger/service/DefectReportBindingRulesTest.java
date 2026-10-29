@@ -65,7 +65,7 @@ class DefectReportBindingRulesTest {
         assertThrows(IllegalArgumentException.class,()->DefectReportBindingRules.requireComplete(duplicate));
     }
 
-    @Test void legacyCompactGalleyDesignRemainsReadableWithoutUniversalEvidenceRequirement() {
+    @Test void compactAreaReportDesignUsesTheSameGenericBindingValidation() {
         var fields=List.of(
             field("aircraftId","Aircraft Registration",FieldType.AIRCRAFT_SELECT,OptionSource.AIRCRAFT,null,DefectFieldBinding.AIRCRAFT_ID,true),
             field("galley_location","Galley Number / Location",FieldType.TEXT,null,null,DefectFieldBinding.ZONE,true),
@@ -74,15 +74,13 @@ class DefectReportBindingRulesTest {
             field("severity","Severity",FieldType.DROPDOWN,OptionSource.GALLEY_SEVERITIES,null,DefectFieldBinding.SEVERITY,true),
             field("remarks","Remarks",FieldType.TEXTAREA,null,null,DefectFieldBinding.REMARKS,false),
             new FieldDefinition("evidence","Evidence Image Upload",FieldType.IMAGE_UPLOAD,null,true,5,null,null,null,null,null,new FileRules(List.of("jpg","jpeg","png","webp"),List.of("image/jpeg","image/png","image/webp"),5_242_880L,1,1),DefectFieldBinding.EVIDENCE_ATTACHMENTS));
-        var mapped=DefectReportBindingRules.requireGalleyReport(fields);
+        var mapped=DefectReportBindingRules.requireComplete(fields);
         assertEquals(7,mapped.size());
         assertFalse(mapped.get(DefectFieldBinding.REMARKS).required());
         var smaller=fields.stream().filter(field->Set.of(DefectFieldBinding.AIRCRAFT_ID,DefectFieldBinding.REMARKS).contains(field.binding())).toList();
-        assertDoesNotThrow(()->DefectReportBindingRules.requireGalleyReport(smaller));
-        assertTrue(DefectReportBindingRules.isLegacyGalleyProjection("GALLEY",fields));
-        assertFalse(DefectReportBindingRules.isLegacyGalleyProjection("CABIN",fields));
+        assertDoesNotThrow(()->DefectReportBindingRules.requireComplete(smaller));
         var requiredRemarks=fields.stream().map(field->field.binding()==DefectFieldBinding.REMARKS?new FieldDefinition(field.key(),field.label(),field.type(),field.helpText(),true,field.order(),field.textRules(),field.numericRules(),field.dateRules(),field.optionSource(),field.optionFilter(),field.fileRules(),field.binding()):field).toList();
-        assertDoesNotThrow(()->DefectReportBindingRules.requireGalleyReport(requiredRemarks));
+        assertDoesNotThrow(()->DefectReportBindingRules.requireComplete(requiredRemarks));
     }
 
     @Test void severityBindingAcceptsCanonicalSourceAndLegacyPublishedAlias() {
@@ -102,7 +100,7 @@ class DefectReportBindingRulesTest {
             field("severity","Severity",FieldType.DROPDOWN,OptionSource.GALLEY_SEVERITIES,null,DefectFieldBinding.SEVERITY,true),
             field("remarks","Remarks",FieldType.TEXTAREA,null,null,DefectFieldBinding.REMARKS,false),
             new FieldDefinition("evidence","Evidence Image Upload",FieldType.IMAGE_UPLOAD,null,true,5,null,null,null,null,null,new FileRules(List.of("jpg"),List.of("image/jpeg"),5_242_880L,1,1),DefectFieldBinding.EVIDENCE_ATTACHMENTS));
-        var error=assertThrows(IllegalArgumentException.class,()->DefectReportBindingRules.requireGalleyReport(missingAircraft));
+        var error=assertThrows(IllegalArgumentException.class,()->DefectReportBindingRules.requireComplete(missingAircraft));
         assertTrue(error.getMessage().contains("Aircraft Registration selector"));
         assertTrue(error.getMessage().contains("AIRCRAFT_SELECT"));
     }

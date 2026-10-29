@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { answersFromReportSnapshot, canReassignMaintenance, defectDetailsRequestPath, formatHistoryDate, newestFirst, safeReturnPath } from "./defectDetailsModel.ts";
+import { answersFromReportSnapshot, canReassignMaintenance, defectDetailsRequestPath, formatHistoryDate, newestFirst, safeReturnPath, zoneLocationSeatValue } from "./defectDetailsModel.ts";
 
 test("maintenance reassignment is offered only with permission, an active action id, and a supported workflow state", () => {
   assert.equal(canReassignMaintenance(["ASSIGN_ACTION"], "action-1", "ACTION_ASSIGNED"), true);
@@ -35,6 +35,21 @@ test("back links accept only same-app relative paths", () => {
 test("detail requests keep the aircraft-list visibility policy scoped to its originating aircraft", () => {
   assert.equal(defectDetailsRequestPath("defect/1", "aircraft 1"), "/aircraft/aircraft%201/defects/defect%2F1");
   assert.equal(defectDetailsRequestPath("defect/1"), "/defects/defect%2F1");
+});
+
+test("defect detail and original report use the requested label with persisted zone and seat values", async () => {
+  const detailPage = await readFile(new URL("./DefectDetailsPage.tsx", import.meta.url), "utf8");
+  assert.match(detailPage, /\[\["Aircraft registration",defect\.tailNumber\][\s\S]*?\["Zone \/ Location\/Seat",zoneLocationSeatValue\(defect\.zone,defect\.seatReference\)\]/);
+  assert.match(detailPage, /\["Zone \/ Location\/Seat",zoneLocationSeatValue\(defect\.zone,defect\.seatReference\)\]/);
+  assert.match(detailPage, /type Defect = \{[^}]*zone:string;[^}]*seatReference:string\|null/);
+});
+
+test("zone and historical seat reference display together and handle missing or blank values", () => {
+  assert.equal(zoneLocationSeatValue("12A", null), "12A");
+  assert.equal(zoneLocationSeatValue(null, "Seat 12A"), "Seat 12A");
+  assert.equal(zoneLocationSeatValue(" 12A ", "Seat 12A"), "12A · Seat 12A");
+  assert.equal(zoneLocationSeatValue("12A", "12A"), "12A");
+  assert.equal(zoneLocationSeatValue("  ", null), "Not recorded");
 });
 
 test("only the aircraft-specific Defect List passes aircraft visibility context into details", async () => {

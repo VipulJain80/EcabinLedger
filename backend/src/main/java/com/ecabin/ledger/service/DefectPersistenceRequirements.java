@@ -101,10 +101,6 @@ public final class DefectPersistenceRequirements {
             .filter(field -> field.binding() != null)
             .collect(java.util.stream.Collectors.toMap(com.ecabin.ledger.api.FormModels.FieldDefinition::binding, field -> field, (first, ignored) -> first));
         Set<DefectFieldBinding> required = new LinkedHashSet<>(requiredBindings);
-        if (DefectReportBindingRules.isLegacyGalleyProjection(areaCode, fields)) {
-            required.remove(DefectFieldBinding.TITLE);
-            required.remove(DefectFieldBinding.DESCRIPTION);
-        }
         for (DefectFieldBinding binding : required) {
             com.ecabin.ledger.api.FormModels.FieldDefinition field = configured.get(binding);
             String name = catalog.require(binding).name();

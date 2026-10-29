@@ -48,6 +48,7 @@ public class MaintenanceActionService {
         boolean eligible=forms.publishedForDefect(tenant,defectId,FormPurpose.CORRECTIVE_ACTION).stream().anyMatch(candidate->candidate.id().equals(form.id())&&candidate.versionId().equals(form.versionId()));
         if(!eligible)throw new ResponseStatusException(HttpStatus.CONFLICT,"The selected maintenance form is not eligible for the case's current workflow state.");
         MaintenanceActionFormRules.requireValid(form.configuration());
+        forms.validateMaintenanceAnswers(form,statusKey,request.slaTargetDate(),request.remark());
         forms.validateMaintenanceEvidence(tenant,defectId,form,statusKey,request.attachments());
         LocalDate date=policies.validateDate(tenant,statusKey,request.slaTargetDate());
         if(request.remark()!=null&&request.remark().codePointCount(0,request.remark().length())>2000)throw new IllegalArgumentException("Remarks must be 2,000 characters or fewer.");

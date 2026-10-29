@@ -522,11 +522,12 @@ public class DefectService {
             if(existing==null||!actorId.equals(existing[1])||!payloadHash.equals(existing[2]))throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.CONFLICT,"This report retry key was already used for a different actor or report. Start a new report to submit changed details.");
             return get(operatorId,(UUID)existing[0]);
         }
-        UUID reportEventId = jdbc.query("INSERT INTO defect_events_dtl(operator_id,defect_id,event_type,to_status,note,actor_id,entity_type,entity_id,new_state,request_id) VALUES(?,?,'REPORTED','REPORTED',? ,?,'DEFECT',?,jsonb_build_object('status','REPORTED','reference',?,'conditionId',?,'condition',?,'reviewerTeamId',CAST(? AS text),'workflowVersionId',CAST(? AS text)),?) RETURNING id", (rs, row) -> rs.getObject(1, UUID.class), operatorId, id, "Defect reported: " + input.title().trim(), actorId, id, reference, input.conditionId(), conditionName, reviewerTeamId == null ? null : reviewerTeamId.toString(),workflowVersionId==null?null:workflowVersionId.toString(), safeRequestId()).get(0);
+        String reportEventNote=title==null?"Defect reported.":"Defect reported: "+title;
+        UUID reportEventId = jdbc.query("INSERT INTO defect_events_dtl(operator_id,defect_id,event_type,to_status,note,actor_id,entity_type,entity_id,new_state,request_id) VALUES(?,?,'REPORTED','REPORTED',? ,?,'DEFECT',?,jsonb_build_object('status','REPORTED','reference',?,'conditionId',?,'condition',?,'reviewerTeamId',CAST(? AS text),'workflowVersionId',CAST(? AS text)),?) RETURNING id", (rs, row) -> rs.getObject(1, UUID.class), operatorId, id, reportEventNote, actorId, id, reference, input.conditionId(), conditionName, reviewerTeamId == null ? null : reviewerTeamId.toString(),workflowVersionId==null?null:workflowVersionId.toString(), safeRequestId()).get(0);
         if(direct){
             if(configuredRoute.teamId()==null){
                 jdbc.update("INSERT INTO defect_events_dtl(operator_id,defect_id,event_type,note,actor_id,entity_type,entity_id,new_state,request_id) VALUES(?,?,'AREA_MAINTENANCE_ROUTING_FAILED','No active eligible Maintenance team is mapped to this cabin area.',?,'DEFECT',?,jsonb_build_object('actionable','Configure an active area-to-team mapping and retry.'),?)",operatorId,id,actorId,id,safeRequestId());
-            } else areaRouting.assignForDirectMode(operatorId,id,actorId,configuredRoute.mappingId(),configuredRoute.teamName(),input.title().trim(),severity);
+            } else areaRouting.assignForDirectMode(operatorId,id,actorId,configuredRoute.mappingId(),configuredRoute.teamName(),title,severity);
         } else {
             if (notifications != null) notifications.notifyReviewers(operatorId, id, reportEventId, actorId, "DEFECT_REPORTED", "A new cabin defect is waiting for Reviewer assessment.");
             if (emailOutbox != null) emailOutbox.enqueue(operatorId, id, reportEventId, actorId, "DEFECT_REPORTED", null, null);
@@ -623,7 +624,7 @@ public class DefectService {
             addSubmitted(submitted, "Cabin zone", rs.getString("snapshot_zone"));
             int rowNumber = rs.getInt("snapshot_row_number");
             if (!rs.wasNull()) addSubmitted(submitted, "Row", Integer.toString(rowNumber));
-            addSubmitted(submitted, "Seat / reference", rs.getString("snapshot_seat_reference"));
+            addSubmitted(submitted, "Zone / Location/Seat", rs.getString("snapshot_seat_reference"));
             addSubmitted(submitted, "Title", rs.getString("snapshot_title"));
             addSubmitted(submitted, "Description", rs.getString("snapshot_description"));
             addSubmitted(submitted, "Severity", rs.getString("severity_name"));

@@ -15,35 +15,6 @@ import java.util.Set;
 final class DefectReportBindingRules {
     private DefectReportBindingRules() {}
 
-    enum ProjectionProfile { STANDARD_TYPED, LEGACY_GALLEY_V1 }
-
-    /** Legacy Galley forms omit these typed fields and use the established generated projection. */
-    static boolean isLegacyGalleyProjection(String areaCode,List<FieldDefinition> fields) {
-        if (!"GALLEY".equals(areaCode)) return false;
-        Map<DefectFieldBinding,FieldDefinition> mapped=validateConfigured(fields);
-        Set<DefectFieldBinding> expected=EnumSet.of(DefectFieldBinding.AIRCRAFT_ID,DefectFieldBinding.ZONE,
-            DefectFieldBinding.COMPONENT_ID,DefectFieldBinding.CONDITION_ID,DefectFieldBinding.SEVERITY,
-            DefectFieldBinding.REMARKS,DefectFieldBinding.EVIDENCE_ATTACHMENTS);
-        if(!mapped.keySet().equals(expected))return false;
-        Map<String,DefectFieldBinding> legacyKeys=Map.of("aircraftId",DefectFieldBinding.AIRCRAFT_ID,
-            "galley_location",DefectFieldBinding.ZONE,"component",DefectFieldBinding.COMPONENT_ID,
-            "condition",DefectFieldBinding.CONDITION_ID,"severity",DefectFieldBinding.SEVERITY,
-            "remarks",DefectFieldBinding.REMARKS,"evidence",DefectFieldBinding.EVIDENCE_ATTACHMENTS);
-        if(fields.size()!=legacyKeys.size())return false;
-        for(FieldDefinition field:fields)if(legacyKeys.get(field.key())!=field.binding())return false;
-        return mapped.get(DefectFieldBinding.AIRCRAFT_ID).type()==FieldType.AIRCRAFT_SELECT
-            &&mapped.get(DefectFieldBinding.ZONE).type()==FieldType.TEXT
-            &&mapped.get(DefectFieldBinding.COMPONENT_ID).type()==FieldType.DROPDOWN
-            &&mapped.get(DefectFieldBinding.CONDITION_ID).type()==FieldType.DROPDOWN
-            &&mapped.get(DefectFieldBinding.SEVERITY).type()==FieldType.DROPDOWN
-            &&mapped.get(DefectFieldBinding.REMARKS).type()==FieldType.TEXTAREA
-            &&mapped.get(DefectFieldBinding.EVIDENCE_ATTACHMENTS).type()==FieldType.IMAGE_UPLOAD;
-    }
-
-    static ProjectionProfile projectionProfile(String areaCode,List<FieldDefinition> fields) {
-        return isLegacyGalleyProjection(areaCode,fields)?ProjectionProfile.LEGACY_GALLEY_V1:ProjectionProfile.STANDARD_TYPED;
-    }
-
     /** The only universally required defect-report binding is Aircraft Registration. */
     static Map<DefectFieldBinding,FieldDefinition> requireComplete(List<FieldDefinition> fields) {
         Map<DefectFieldBinding,FieldDefinition> mapped=validateConfigured(fields);
@@ -70,11 +41,6 @@ final class DefectReportBindingRules {
             case "ATTENDANT_SEAT" -> "ATTENDANT_SEAT";
             default -> throw new IllegalArgumentException("This area has no supported defect-location mapping. Configure a domain location mapping before publishing a defect-report form.");
         };
-    }
-
-    /** Compatibility name retained for callers; it no longer imposes Galley-only field or evidence requirements. */
-    static Map<DefectFieldBinding,FieldDefinition> requireGalleyReport(List<FieldDefinition> fields) {
-        return requireComplete(fields);
     }
 
     private static Map<DefectFieldBinding,FieldDefinition> validateConfigured(List<FieldDefinition> fields) {

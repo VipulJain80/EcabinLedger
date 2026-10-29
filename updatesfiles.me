@@ -2928,3 +2928,170 @@ Verification:
 - `pnpm lint` — 0 errors, 1 existing `<img>` warning in `AttachmentPreviewDialog.tsx`.
 - `git diff --check` — passed.
 - PostgreSQL migration/integration tests were not run; V72 was not applied.
+
+2026-10-29 — Make defect title and description optional
+
+Added forward-only migration V73 to drop the NOT NULL constraints on `defects_dtl.title` and `defects_dtl.description`, and to allow null values for these fields in new defect submission snapshots while retaining the existing category, location, severity, and length validations. Published form metadata now naturally reflects these columns as optional through the existing schema-derived persistence capability.
+
+Null title values are handled safely in report event notes and direct Maintenance assignment descriptions. Maintenance routing retry now reads nullable defect text without constructing a null-rejecting map. No existing defect or published snapshot rows are rewritten.
+
+Files changed:
+- `backend/src/main/resources/db/migration/V73__allow_optional_defect_title_and_description.sql` — nullable domain columns and snapshot constraint update.
+- `backend/src/main/java/com/ecabin/ledger/service/DefectService.java` — avoid requiring a title in report audit notes and routing calls.
+- `backend/src/main/java/com/ecabin/ledger/service/ReviewerQueueService.java` — use a neutral corrective-action description when an optional title is absent.
+- `backend/src/main/java/com/ecabin/ledger/service/AreaMaintenanceRoutingService.java` — safe generic action description and retry lookup when title is null.
+- `backend/src/test/java/com/ecabin/ledger/service/DefectPersistenceRequirementsTest.java` — verify nullable title/description no longer block form publication.
+- `backend/src/test/java/com/ecabin/ledger/service/AreaMaintenanceRoutingServiceTest.java` — verify direct assignment works without a title.
+- `backend/src/test/java/com/ecabin/ledger/service/PostgresMigrationSmokeTest.java` — verify V73 schema and snapshot constraints.
+- `frontend/src/app/loginhome/page.tsx`, `frontend/src/common/fleet/DefectDetailsPage.tsx`, `frontend/src/common/fleet/ReviewerDecisionForm.tsx`, `frontend/src/common/fleet/AircraftDefectListPage.tsx`, and `frontend/src/common/configuration/AreaTeamRoutingPage.tsx` — reflect nullable title/description API values and display safe fallbacks.
+- `updatesfiles.me` — record this change and verification.
+
+Verification:
+- `mvn -f backend/pom.xml '-Dtest=AreaMaintenanceRoutingServiceTest,DefectPersistenceRequirementsTest,OperationalFormServiceTest,DefectReportBindingRulesTest' test` — 37 passed, 0 failures, 0 errors, 0 skipped.
+- `pnpm exec tsc --noEmit` — passed.
+- `pnpm lint` — 0 errors, 1 existing `<img>` warning in `AttachmentPreviewDialog.tsx`.
+- `git diff --check` — passed.
+- PostgreSQL migration/integration tests were not run; V73 was not applied.
+
+2026-10-29 — Remove legacy Galley defect-report projection
+
+Removed the Galley-specific projection profile and resolver branch. DEFECT_REPORT resolution now maps category, title, description, and remarks uniformly from configured field bindings; existing tenant-scoped reference validation, persistence compatibility checks, read-only checks, numeric validation, and text bounds remain in place. Removed the matching persistence-publication exception so schema-required fields are handled uniformly rather than implicitly supplied by the old Galley projection. Existing stored form definitions remain untouched; a legacy form that lacks a currently required binding must be updated in Form Master before it can be submitted.
+
+Files changed for this increment:
+- `backend/src/main/java/com/ecabin/ledger/service/OperationalFormService.java` — generic configured field projection.
+- `backend/src/main/java/com/ecabin/ledger/service/DefectReportBindingRules.java` — remove profile detection and Galley compatibility alias.
+- `backend/src/main/java/com/ecabin/ledger/service/DefectPersistenceRequirements.java` — remove the special publication requirement bypass.
+- `backend/src/test/java/com/ecabin/ledger/service/DefectReportBindingRulesTest.java` — use generic validation for compact configurations.
+- `updatesfiles.me` — record this increment.
+
+Verification:
+- Focused tests: `mvn -f backend/pom.xml '-Dtest=DefectReportBindingRulesTest,DefectPersistenceRequirementsTest,OperationalFormServiceTest' test` — 33 passed, 0 failures, 0 errors, 0 skipped.
+- Full backend tests: `mvn -f backend/pom.xml test` — 224 tests, 0 failures, 0 errors, 55 skipped.
+- Backend package: `mvn -f backend/pom.xml -DskipTests package` — passed; tests were skipped for this package command.
+- `git diff --check` — passed.
+- Search confirms no legacy profile or generated projection symbols in backend main/test source. Two integration-test create requests still contain literal Galley-like sample values as direct request data; they do not use resolver generation.
+
+2026-10-29 — Generate defect title and description from tenant configuration
+
+When configured Title or Description answers are absent, the generic defect-report resolver now generates a title from the selected active tenant area display name, validated component name, and zone. It generates the description from the validated component-condition mapping and appends configured remarks on a new line. Configured answers take precedence. Area lookup uses the existing `cabin_areas_mst.name` column with both operator and area IDs and `isactive=1`; no area names or area-specific branches are hardcoded. Generated titles are capped at 160 characters and descriptions retain the 4,000-character bound.
+
+Files changed:
+- `backend/src/main/java/com/ecabin/ledger/service/OperationalFormService.java` — tenant-scoped area display name, validation-backed component/condition lookups, and generated-value fallback.
+- `backend/src/test/java/com/ecabin/ledger/service/OperationalFormServiceTest.java` — title examples for Galley, Cabin, and Lavatory; title/description boundaries and remarks formatting.
+- `updatesfiles.me` — record this change.
+
+Verification:
+- `mvn -f backend/pom.xml '-Dtest=OperationalFormServiceTest' test` — 22 passed, 0 failures, 0 errors, 0 skipped.
+- A first run exposed an escaped-newline test expectation mismatch; corrected the test and reran successfully.
+- Full backend tests/build were not rerun for this follow-up.
+- `git diff --check` — pending final review.
+
+2026-10-29 — Handle omitted optional defect reference bindings safely
+
+The defect-report resolver now returns no projected value when an optional reference binding is absent, rather than dereferencing a missing field definition. Configured category and severity fields still validate submitted option IDs through the existing tenant-scoped, active-reference lookup. Severity omission continues to follow the current schema-derived persistence requirement; this change does not make it universally required or bypass schema constraints.
+
+Files changed for this increment:
+- `backend/src/main/java/com/ecabin/ledger/service/OperationalFormService.java` — make the optional reference-code helper null-safe for absent bindings.
+- `backend/src/test/java/com/ecabin/ledger/service/OperationalFormServiceTest.java` — cover absent category/severity bindings, schema-required severity, configured valid values, and invalid category/severity values.
+- `updatesfiles.me` — record this increment.
+
+Verification:
+- `mvn -f backend/pom.xml -Dtest=OperationalFormServiceTest test` — 27 passed, 0 failures, 0 errors, 0 skipped.
+- `mvn -f backend/pom.xml '-Dtest=OperationalFormServiceTest,DefectReportBindingRulesTest,DefectPersistenceRequirementsTest,AreaMaintenanceRoutingServiceTest' test` — 44 passed, 0 failures, 0 errors, 0 skipped.
+- `mvn -f backend/pom.xml -DskipTests package` — passed; tests were skipped for this package command.
+- PostgreSQL integration tests were not run. No migration or database change was made.
+
+2026-10-29 — Accept common 12.2 MP phone JPEG images
+
+Investigated the supplied `IMG_0424.JPG` file: it is a valid baseline JPEG at 4032 × 3024 pixels (12,192,768 pixels). The backend rejected it because the decoded-image limit was 12,000,000 pixels, slightly below this common iPhone image size. Raised the bounded per-image pixel ceiling to 13,000,000; extension, content decoding, dimension, frame-count, tenant, and file-size validations remain in force. Both `.jpg` and `.jpeg` are covered by regression tests using a generated 4032 × 3024 JPEG fixture.
+
+Files changed:
+- `backend/src/main/java/com/ecabin/ledger/storage/EvidenceFileValidator.java` — raise the decoded pixel limit to 13 million, enough for the supplied image.
+- `backend/src/test/java/com/ecabin/ledger/storage/EvidenceFileValidatorTest.java` — verify 4032 × 3024 JPEG acceptance for both extension spellings.
+- `updatesfiles.me` — record this fix and verification.
+
+Verification:
+- `mvn -f backend/pom.xml '-Dtest=EvidenceFileValidatorTest,AttachmentServiceValidationTest' test` — 17 passed, 0 failures, 0 errors, 0 skipped.
+- `git diff --check` — passed.
+- No database change or migration was made. The backend must be rebuilt and restarted/deployed before the upload behavior changes in the running application.
+
+2026-10-29 — Show defect zone and seat reference consistently
+
+Renamed the two Defect Details labels to `Zone / Location/Seat`. The summary continues to show the persisted `zone` value, and Original defect report continues to show the separate persisted `seatReference` value, preserving historical seat references. The defect response already selected `d.*` and mapped both properties through `DefectView`, so no backend API contract or database change was needed. Updated the original report submission-history projection label as well.
+
+Files changed:
+- `frontend/src/common/fleet/DefectDetailsPage.tsx` — update both labels while retaining their existing value bindings and empty fallbacks.
+- `backend/src/main/java/com/ecabin/ledger/service/DefectService.java` — use the updated label for the immutable submitted seat-reference snapshot in form-event details.
+- `frontend/src/common/fleet/defectDetailsModel.test.mjs` — verify both labels bind to the persisted zone and seat-reference properties.
+- `backend/src/test/java/com/ecabin/ledger/api/DefectViewSerializationTest.java` — verify the detail response serializes both properties.
+- `updatesfiles.me` — record this change.
+
+Verification:
+- `node --test src/common/fleet/defectDetailsModel.test.mjs` — 8 passed, 0 failed.
+- `mvn -f backend/pom.xml -Dtest=DefectViewSerializationTest test` — 1 passed, 0 failures, 0 errors, 0 skipped.
+- `pnpm exec tsc --noEmit` — passed.
+- `NEXT_PUBLIC_API_BASE_URL=https://api.example.test/api/v1 pnpm exec next build --webpack` — passed. The first build attempt was blocked because this environment variable is required by the production CSP configuration; rerunning with a temporary valid build value succeeded.
+- `mvn -f backend/pom.xml -DskipTests package` — passed; tests were skipped for this package command.
+- `pnpm lint` — 0 errors and 1 existing `<img>` warning in `AttachmentPreviewDialog.tsx`.
+- No database migration or records were changed.
+
+2026-10-29 — Include the zone value in the original-report location display
+
+Follow-up: for forms that store the location answer in `zone` and leave `seatReference` empty, Original defect report now displays the persisted zone instead of `Not recorded`. Both location displays use one formatter: it shows either value when only one exists, both values when both exist, removes duplicate identical values, and uses the existing empty fallback when neither exists. Values are never derived from the defect title.
+
+Files changed:
+- `frontend/src/common/fleet/defectDetailsModel.ts` — add the shared null-safe zone/seat display formatter.
+- `frontend/src/common/fleet/DefectDetailsPage.tsx` — display both persisted values in the summary and original-report locations.
+- `frontend/src/common/fleet/defectDetailsModel.test.mjs` — cover zone-only, seat-only, both, duplicate, and empty cases.
+- `updatesfiles.me` — record this follow-up.
+
+Verification:
+- `node --test src/common/fleet/defectDetailsModel.test.mjs` — 9 passed, 0 failed.
+- `pnpm exec tsc --noEmit` — passed.
+- No backend or database change was needed.
+
+2026-10-29 — Extend conditional field visibility across operational forms
+
+Conditional visibility is now evaluated by shared frontend and backend rules for supported form purposes, including defect reports, corrective-action forms, closure forms, and reviewer decisions. Form Master accepts configured exact-answer conditions for eligible fields and previews them interactively. Runtime rendering re-evaluates conditions as answers change; hidden field values are omitted from submissions, and the backend rejects submitted answers for hidden fields. Conditional requiredness continues to use the existing explicitly approved workflow rules. Aircraft/persistence-protected fields and required Maintenance status/date controls cannot be hidden. The existing versioned JSON stores the rule, so no migration or database modification was needed.
+
+Files changed for this increment:
+- `backend/src/main/java/com/ecabin/ledger/service/ConditionalFieldRules.java` — shared server validation/evaluation for references, exact matches, and cycles.
+- `backend/src/main/java/com/ecabin/ledger/service/OperationalFormService.java` — validate rules when configuring forms, enforce conditional visibility/requiredness for normal submissions, and validate typed Maintenance answers/evidence.
+- `backend/src/main/java/com/ecabin/ledger/service/MaintenanceActionService.java` — apply published visibility rules before persisting Maintenance actions.
+- `backend/src/main/java/com/ecabin/ledger/service/MaintenanceActionFormRules.java` — preserve required visible status/date controls while allowing optional Maintenance remarks to be conditional.
+- `backend/src/test/java/com/ecabin/ledger/service/ConditionalFieldRulesTest.java`, `OperationalFormServiceTest.java`, and `MaintenanceActionFormRulesTest.java` — add backend regression coverage.
+- `frontend/src/common/forms/conditionalFieldVisibility.mjs` and `conditionalFieldVisibility.d.mts` — shared browser evaluator and types.
+- `frontend/src/common/forms/conditionalFieldVisibility.test.mjs` — cover supported values, validation, hidden sources, cycle rejection, hidden required fields, and answer omission.
+- `frontend/src/common/configuration/FormMasterPage.tsx` — generic visibility controls and interactive preview.
+- `frontend/src/common/forms/OperationalFormRenderer.tsx`, `defectReportMapping.ts`, and `frontend/src/common/fleet/ReviewerDecisionForm.tsx` — consistent runtime rendering, client validation, and hidden-answer omission across operational forms.
+- `updatesfiles.me` — record this implementation.
+
+Rule semantics and limits:
+- A field can be shown when one other submitted field equals one exact configured value. Multi-select sources match if any selected value equals it; booleans use `true`/`false`; hidden/unavailable sources fail closed.
+- Missing sources, self-reference, cycles, section/aircraft-selector sources, and read-only sources are rejected. Hidden answers are omitted by the UI and rejected by the server if supplied.
+- The current persisted model supports one equality condition per field. AND/OR groups and other operators are not implemented because no existing contract defines them; no new condition language was introduced.
+- Existing published versions are not rewritten. No migration or database records were changed.
+
+Verification:
+- `mvn -f backend/pom.xml '-Dtest=ConditionalFieldRulesTest,OperationalFormServiceTest,MaintenanceActionFormRulesTest,ReviewerDecisionFormRulesTest' test` — 41 passed, 0 failures, 0 errors, 0 skipped.
+- `node --test src/common/forms/conditionalFieldVisibility.test.mjs src/common/forms/defectReportMapping.test.mjs` — 17 passed, 0 failures, 0 skipped. Node emitted the existing module-type warning for importing the TypeScript mapping module in tests.
+- `pnpm exec tsc --noEmit` — passed.
+- `pnpm lint` — passed with 0 errors and 1 existing `<img>` optimization warning in `AttachmentPreviewDialog.tsx`.
+- `NEXT_PUBLIC_API_BASE_URL=https://api.example.test/api/v1 pnpm exec next build --webpack` — passed.
+- `mvn -f backend/pom.xml -DskipTests package` — passed; tests were skipped for this package command.
+- PostgreSQL migration/integration tests were not run; this change has no schema or data migration.
+- `git diff --check` — passed after final whitespace cleanup.
+
+2026-10-29 — Fix Reviewer rejection audit insert parameter types
+
+The Reviewer rejection path now casts nullable prior assignment values to PostgreSQL `text` before passing them to `jsonb_build_object`. This resolves PostgreSQL's inability to infer a prepared parameter type for the `previous_state` JSON values. New-state textual values are also explicitly typed. The existing PostgreSQL workflow integration test now asserts that null prior assignment values are preserved as JSON nulls in the immutable rejection event.
+
+Files changed for this fix:
+- `backend/src/main/java/com/ecabin/ledger/service/ReviewerQueueService.java` — type nullable values in the `REVIEW_REJECTED` event insert; preserved the pre-existing approval-description edit.
+- `backend/src/test/java/com/ecabin/ledger/service/LocalPostgresOperationalIntegrationTest.java` — strengthen the rejection assertion for null prior assignment state.
+- `updatesfiles.me` — record this fix.
+
+Verification:
+- `mvn -f backend/pom.xml -DskipTests test-compile` — passed; main and test sources compile.
+- The PostgreSQL integration test requires `ECABIN_DB_VERIFY=true` and the configured `ecabin_ledger` database. It was not run because this session has no confirmed disposable PostgreSQL target; no migrations or database writes were run.
+- `git diff --check` — passed.
