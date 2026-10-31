@@ -130,6 +130,12 @@ public class ConfigurationController {
         return configuration.save(user.organizationId(), user.externalUserId(), resource, request);
     }
 
+    @PostMapping("/severities/{id}/default")
+    public Map<String,Object> setDefaultSeverity(JwtAuthenticationToken auth, @PathVariable String id) {
+        AuthenticatedUser user = requireAdmin(auth);
+        return configuration.setDefaultSeverity(user.organizationId(), user.externalUserId(), id);
+    }
+
     @PostMapping("/{resource}/{id}/deactivate")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void deactivate(JwtAuthenticationToken auth, @PathVariable String resource, @PathVariable String id,

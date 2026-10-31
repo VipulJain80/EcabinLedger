@@ -46,7 +46,7 @@ public class ConfigurationService {
         USERS("users", "Users and roles", "operator_memberships_mst", "external_user_id AS id,external_user_id AS \"externalUserId\",display_name AS \"displayName\",role,(SELECT COALESCE(string_agg(DISTINCT omt.team_name,'|' ORDER BY omt.team_name),'') FROM operator_membership_teams_mst omt JOIN maintenance_teams_mst mt ON mt.operator_id=omt.operator_id AND mt.name=omt.team_name AND mt.isactive=1 WHERE omt.operator_id=operator_memberships_mst.operator_id AND omt.external_user_id=operator_memberships_mst.external_user_id AND omt.isactive=1) AS \"teamNames\",(SELECT COALESCE(string_agg(DISTINCT mt.id::text,'|' ORDER BY mt.id::text),'') FROM operator_membership_teams_mst omt JOIN maintenance_teams_mst mt ON mt.operator_id=omt.operator_id AND mt.name=omt.team_name AND mt.isactive=1 WHERE omt.operator_id=operator_memberships_mst.operator_id AND omt.external_user_id=operator_memberships_mst.external_user_id AND omt.isactive=1) AS \"teamIds\",isactive,created_at,updated_at", Map.of("externalUserId", "external_user_id", "displayName", "display_name", "role", "role"), true),
         NAVIGATION("menu-items", "Menus & submenus", "navigation_menu_items_mst", "id,menu_key AS key,label,parent_id AS \"parentId\",required_permissions AS \"requiredPermissions\",icon,route_key AS \"routeKey\",display_order AS \"displayOrder\",isactive,created_at,updated_at", Map.of("key", "menu_key", "label", "label", "parentId", "parent_id", "requiredPermissions", "required_permissions", "icon", "icon", "routeKey", "route_key", "displayOrder", "display_order"), true),
         ROLES("roles", "Roles", "operator_roles_mst", "id,role_key AS \"roleKey\",name,description,permissions,isactive,system_role AS \"systemRole\",created_at,updated_at", Map.of("roleKey", "role_key", "name", "name", "description", "description", "permissions", "permissions"), true),
-        SEVERITIES("severities", "Severity Master", "defect_severities_mst", "id,severity_code AS code,severity_name AS name,description,sort_order AS \"sortOrder\",background_color AS \"backgroundColor\",text_color AS \"textColor\",border_color AS \"borderColor\",icon,display_style AS \"displayStyle\",isactive,created_at,updated_at", Map.of("code", "severity_code", "name", "severity_name", "description", "description", "sortOrder", "sort_order", "backgroundColor", "background_color", "textColor", "text_color", "borderColor", "border_color", "icon", "icon", "displayStyle", "display_style"), true),
+        SEVERITIES("severities", "Severity Master", "defect_severities_mst", "id,severity_code AS code,severity_name AS name,description,sort_order AS \"sortOrder\",background_color AS \"backgroundColor\",text_color AS \"textColor\",border_color AS \"borderColor\",icon,display_style AS \"displayStyle\",isactive,is_default AS \"isDefault\",created_at,updated_at", Map.of("code", "severity_code", "name", "severity_name", "description", "description", "sortOrder", "sort_order", "backgroundColor", "background_color", "textColor", "text_color", "borderColor", "border_color", "icon", "icon", "displayStyle", "display_style"), true),
         PERMISSIONS("permissions", "Permission Master", "permissions_mst", "permission_id AS id,permission_code AS code,permission_name AS name,description,module,is_system_permission AS \"systemPermission\",(permission_code<>'ADMINISTER_ORGANIZATION') AS \"organizationAssignable\",isactive,created_at,updated_at", Map.of(), false),
         ROLE_MAPPINGS("role-permissions", "Role-Permission Mapping", "operator_roles_mst", "id,role_key AS \"roleKey\",name,description,permissions,isactive,system_role AS \"systemRole\",created_at,updated_at", Map.of(), true);
 
@@ -67,8 +67,11 @@ public class ConfigurationService {
     private static final Set<String> NAVIGATION_ROUTE_KEYS = Set.of("home","operations","reports","audit","configuration","defects","fleet","quality","organizations","fleets","aircraft","areas","defect-categories","defect-conditions","components","maintenance-teams","reviewer-routing","area-team-mapping","maintenance-sla-policies","review-queue","users","menu-items","roles","severities","permissions","role-permissions","api-rate-limits","user-login-monitoring","report-defect","report-master","email-notifications","workflow-statuses");
     private final JdbcTemplate jdbc;
     private final ObjectMapper mapper;
+    private TenantReferenceCache referenceCache;
 
     public ConfigurationService(JdbcTemplate jdbc, ObjectMapper mapper) { this.jdbc = jdbc; this.mapper = mapper; }
+    @org.springframework.beans.factory.annotation.Autowired
+    public void setReferenceCache(TenantReferenceCache referenceCache) { this.referenceCache = referenceCache; }
 
     static boolean isSupportedNavigationRoute(String routeKey) { return NAVIGATION_ROUTE_KEYS.contains(routeKey); }
     static boolean isDefectViewAllNavigationRoute(String routeKey) { return DEFECT_VIEW_ALL_NAVIGATION_ROUTES.contains(routeKey); }
@@ -135,17 +138,63 @@ public class ConfigurationService {
     }
 
     public List<String> aircraftTypes(UUID operatorId) {
-        return jdbc.queryForList("SELECT DISTINCT aircraft_type FROM aircraft_mst WHERE operator_id=? AND isactive=1 ORDER BY aircraft_type LIMIT 100", String.class, operatorId);
+        java.util.function.Supplier<List<String>> load = () -> jdbc.queryForList("SELECT DISTINCT aircraft_type FROM aircraft_mst WHERE operator_id=? AND isactive=1 ORDER BY aircraft_type LIMIT 100", String.class, operatorId);
+        return referenceCache == null ? load.get() : referenceCache.get(TenantReferenceCache.Resource.AIRCRAFT_TYPES, operatorId, "active", load);
+    }
+    public List<String> refreshAircraftTypes(UUID operatorId) {
+        java.util.function.Supplier<List<String>> load=()->jdbc.queryForList("SELECT DISTINCT aircraft_type FROM aircraft_mst WHERE operator_id=? AND isactive=1 ORDER BY aircraft_type LIMIT 100",String.class,operatorId);
+        return referenceCache==null?load.get():referenceCache.refresh(TenantReferenceCache.Resource.AIRCRAFT_TYPES,operatorId,"active",load);
+    }
+
+    /** Includes inactive codes needed to render historical severity badges; access is authorized by the API controller. */
+    public List<Map<String,Object>> severityBadges(UUID operatorId) {
+        java.util.function.Supplier<List<Map<String,Object>>> load=()->listUncached(operatorId,"severities",true);
+        return referenceCache==null?load.get():referenceCache.get(TenantReferenceCache.Resource.SEVERITIES,operatorId,"all",load);
+    }
+
+    /** The refresh resource covers both selectable active options and historical badge definitions. */
+    public void refreshSeverities(UUID operatorId) {
+        refreshList(operatorId,"severities");
+        if(referenceCache!=null)referenceCache.refresh(TenantReferenceCache.Resource.SEVERITIES,operatorId,"all",()->listUncached(operatorId,"severities",true));
     }
 
     /** Only returns active conditions mapped to the selected active tenant-owned component. */
     public List<ConditionOption> conditionsForComponent(UUID operatorId, UUID componentId) {
-        if (!exists("SELECT 1 FROM cabin_components_mst WHERE operator_id=? AND id=? AND isactive=1", operatorId, componentId))
-            throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.NOT_FOUND, "Active component was not found for this organization.");
-        return jdbc.query("SELECT c.id,c.code,c.name,c.description FROM component_conditions_mst m JOIN defect_conditions_mst c ON c.operator_id=m.operator_id AND c.id=m.condition_id AND c.isactive=1 WHERE m.operator_id=? AND m.component_id=? AND m.isactive=1 ORDER BY c.name,c.code", (rs,row) -> new ConditionOption(rs.getObject("id", UUID.class),rs.getString("code"),rs.getString("name"),rs.getString("description")),operatorId,componentId);
+        java.util.function.Supplier<List<ConditionOption>> load = () -> {
+            if (!exists("SELECT 1 FROM cabin_components_mst WHERE operator_id=? AND id=? AND isactive=1", operatorId, componentId))
+                throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.NOT_FOUND, "Active component was not found for this organization.");
+            return jdbc.query("SELECT c.id,c.code,c.name,c.description FROM component_conditions_mst m JOIN defect_conditions_mst c ON c.operator_id=m.operator_id AND c.id=m.condition_id AND c.isactive=1 WHERE m.operator_id=? AND m.component_id=? AND m.isactive=1 ORDER BY c.name,c.code", (rs,row) -> new ConditionOption(rs.getObject("id", UUID.class),rs.getString("code"),rs.getString("name"),rs.getString("description")),operatorId,componentId);
+        };
+        return referenceCache == null ? load.get() : referenceCache.get(TenantReferenceCache.Resource.CONDITIONS, operatorId, "component:" + componentId, load);
+    }
+
+    public List<ConditionOption> refreshConditionsForComponent(UUID operatorId, UUID componentId) {
+        if(referenceCache==null)return conditionsForComponentUncached(operatorId,componentId);
+        return referenceCache.refresh(TenantReferenceCache.Resource.CONDITIONS,operatorId,"component:"+componentId,()->conditionsForComponentUncached(operatorId,componentId));
+    }
+
+    private List<ConditionOption> conditionsForComponentUncached(UUID operatorId,UUID componentId) {
+        if(!exists("SELECT 1 FROM cabin_components_mst WHERE operator_id=? AND id=? AND isactive=1",operatorId,componentId))throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.NOT_FOUND,"Active component was not found for this organization.");
+        return jdbc.query("SELECT c.id,c.code,c.name,c.description FROM component_conditions_mst m JOIN defect_conditions_mst c ON c.operator_id=m.operator_id AND c.id=m.condition_id AND c.isactive=1 WHERE m.operator_id=? AND m.component_id=? AND m.isactive=1 ORDER BY c.name,c.code",(rs,row)->new ConditionOption(rs.getObject("id",UUID.class),rs.getString("code"),rs.getString("name"),rs.getString("description")),operatorId,componentId);
     }
 
     public List<Map<String, Object>> list(UUID operatorId, String key, boolean includeInactive) {
+        Resource resource = Resource.parse(key);
+        TenantReferenceCache.Resource cacheResource = cacheResource(resource);
+        if (!includeInactive && referenceCache != null && cacheResource != null)
+            return referenceCache.get(cacheResource, operatorId, "active", () -> listUncached(operatorId, key, false));
+        return listUncached(operatorId, key, includeInactive);
+    }
+
+    public List<Map<String,Object>> refreshList(UUID operatorId, String key) {
+        Resource resource = Resource.parse(key);
+        TenantReferenceCache.Resource cacheResource = cacheResource(resource);
+        if (cacheResource == null) throw new IllegalArgumentException("This configuration resource cannot be manually refreshed.");
+        return referenceCache == null ? listUncached(operatorId,key,false)
+            : referenceCache.refresh(cacheResource,operatorId,"active",() -> listUncached(operatorId,key,false));
+    }
+
+    private List<Map<String,Object>> listUncached(UUID operatorId, String key, boolean includeInactive) {
         Resource resource = Resource.parse(key);
         if (resource == Resource.PERMISSIONS) return jdbc.query("SELECT " + resource.columns + " FROM permissions_mst WHERE (isactive=1 OR ?=true) ORDER BY module,permission_code", new ColumnMapRowMapper(), includeInactive);
         if (resource == Resource.ROLE_MAPPINGS) return rolePermissionRows(operatorId, includeInactive);
@@ -171,6 +220,32 @@ public class ConfigurationService {
         sql = "SELECT " + resource.columns + " FROM " + resource.table + " WHERE operator_id=?" +
             (includeInactive ? "" : " AND isactive=1") + " ORDER BY " + orderBy(resource) + " LIMIT 200";
         return jdbc.query(sql, new ColumnMapRowMapper(), operatorId);
+    }
+
+    private TenantReferenceCache.Resource cacheResource(Resource resource) {
+        return switch (resource) {
+            case CATEGORIES -> TenantReferenceCache.Resource.CATEGORIES;
+            case AREAS -> TenantReferenceCache.Resource.AREAS;
+            case COMPONENTS -> TenantReferenceCache.Resource.COMPONENTS;
+            case CONDITIONS -> TenantReferenceCache.Resource.CONDITIONS;
+            case SEVERITIES -> TenantReferenceCache.Resource.SEVERITIES;
+            case FLEETS -> TenantReferenceCache.Resource.FLEETS;
+            default -> null;
+        };
+    }
+
+    private void invalidateReferenceData(UUID operatorId, Resource resource) {
+        if (referenceCache == null) return;
+        switch (resource) {
+            case CATEGORIES -> referenceCache.invalidateAfterCommit(operatorId,TenantReferenceCache.Resource.CATEGORIES,TenantReferenceCache.Resource.FORM_OPTIONS);
+            case AREAS -> referenceCache.invalidateAfterCommit(operatorId,TenantReferenceCache.Resource.AREAS,TenantReferenceCache.Resource.COMPONENTS,TenantReferenceCache.Resource.CONDITIONS,TenantReferenceCache.Resource.PUBLISHED_FORMS,TenantReferenceCache.Resource.FORM_OPTIONS);
+            case COMPONENTS -> referenceCache.invalidateAfterCommit(operatorId,TenantReferenceCache.Resource.COMPONENTS,TenantReferenceCache.Resource.CONDITIONS,TenantReferenceCache.Resource.FORM_OPTIONS);
+            case CONDITIONS -> referenceCache.invalidateAfterCommit(operatorId,TenantReferenceCache.Resource.CONDITIONS,TenantReferenceCache.Resource.FORM_OPTIONS);
+            case SEVERITIES -> referenceCache.invalidateAfterCommit(operatorId,TenantReferenceCache.Resource.SEVERITIES,TenantReferenceCache.Resource.FORM_OPTIONS);
+            case FLEETS -> referenceCache.invalidateAfterCommit(operatorId,TenantReferenceCache.Resource.FLEETS,TenantReferenceCache.Resource.FORM_OPTIONS);
+            case AIRCRAFT -> referenceCache.invalidateAfterCommit(operatorId,TenantReferenceCache.Resource.AIRCRAFT_TYPES);
+            default -> { }
+        }
     }
 
     /** Server-side administrative table query; the legacy list API remains available to small reference lookups. */
@@ -306,7 +381,7 @@ public class ConfigurationService {
             case USERS -> "r.external_user_id AS id,r.external_user_id AS \"externalUserId\",r.display_name AS \"displayName\",r.role,r.last_login_at AS \"lastLoginAt\",ev.last_logout_at AS \"lastLogoutAt\",ev.last_activity_at AS \"lastActivityAt\",CASE WHEN r.last_login_at IS NULL THEN NULL ELSE floor(extract(epoch FROM (now()-r.last_login_at))/86400)::bigint END AS \"daysSinceLogin\",CASE WHEN r.last_login_at IS NULL THEN 'NEVER_LOGGED_IN' WHEN r.last_login_at > now()-interval '30 days' THEN 'ACTIVE_RECENTLY' ELSE 'INACTIVE_30_DAYS' END AS \"inactivityStatus\",COALESCE((SELECT string_agg(DISTINCT omt.team_name,'|' ORDER BY omt.team_name) FROM operator_membership_teams_mst omt JOIN maintenance_teams_mst mt ON mt.operator_id=omt.operator_id AND mt.name=omt.team_name AND mt.isactive=1 WHERE omt.operator_id=r.operator_id AND omt.external_user_id=r.external_user_id AND omt.isactive=1),'') AS \"teamNames\",COALESCE((SELECT string_agg(DISTINCT mt.id::text,'|' ORDER BY mt.id::text) FROM operator_membership_teams_mst omt JOIN maintenance_teams_mst mt ON mt.operator_id=omt.operator_id AND mt.name=omt.team_name AND mt.isactive=1 WHERE omt.operator_id=r.operator_id AND omt.external_user_id=r.external_user_id AND omt.isactive=1),'') AS \"teamIds\",r.isactive,r.created_at,r.updated_at";
             case NAVIGATION -> "r.id,r.menu_key AS key,r.label,r.parent_id AS \"parentId\",p.label AS \"parentLabel\",r.required_permissions AS \"requiredPermissions\",r.icon,r.route_key AS \"routeKey\",r.display_order AS \"displayOrder\",r.isactive,r.created_at,r.updated_at";
             case ROLES -> "r.id,r.role_key AS \"roleKey\",r.name,r.description,r.permissions,r.isactive,r.system_role AS \"systemRole\",r.created_at,r.updated_at";
-            case SEVERITIES -> "r.id,r.severity_code AS code,r.severity_name AS name,r.description,r.sort_order AS \"sortOrder\",r.background_color AS \"backgroundColor\",r.text_color AS \"textColor\",r.border_color AS \"borderColor\",r.icon,r.display_style AS \"displayStyle\",r.isactive,r.created_at,r.updated_at";
+            case SEVERITIES -> "r.id,r.severity_code AS code,r.severity_name AS name,r.description,r.sort_order AS \"sortOrder\",r.background_color AS \"backgroundColor\",r.text_color AS \"textColor\",r.border_color AS \"borderColor\",r.icon,r.display_style AS \"displayStyle\",r.isactive,r.is_default AS \"isDefault\",r.created_at,r.updated_at";
             case PERMISSIONS -> "r.permission_id AS id,r.permission_code AS code,r.permission_name AS name,r.description,r.module,r.is_system_permission AS \"systemPermission\",(r.permission_code<>'ADMINISTER_ORGANIZATION') AS \"organizationAssignable\",r.isactive,r.created_at,r.updated_at";
             case ROLE_MAPPINGS -> "r.id,r.role_key AS \"roleKey\",r.name,r.description,r.permissions AS \"permissionCodes\",COALESCE(mapped.permission_details,'') AS \"permissionDetails\",r.isactive,r.system_role AS \"systemRole\",r.updated_at";
         };
@@ -363,7 +438,7 @@ public class ConfigurationService {
             case USERS -> List.of(new String[]{"Name","displayName"},new String[]{"Enterprise identity","externalUserId"},new String[]{"Role","role"},new String[]{"Teams","teamNames"},new String[]{"Last login","lastLoginAt"},new String[]{"Last logout","lastLogoutAt"},new String[]{"Days since login","daysSinceLogin"},new String[]{"Inactivity status","inactivityStatus"},new String[]{"Status","isactive"},new String[]{"Created","created_at"});
             case NAVIGATION -> List.of(new String[]{"Menu / submenu","label"},new String[]{"Key","key"},new String[]{"Parent menu","parentLabel"},new String[]{"Visible permissions","requiredPermissions"},new String[]{"Application section","routeKey"},new String[]{"Order","displayOrder"},new String[]{"Status","isactive"},new String[]{"Created","created_at"});
             case ROLES -> List.of(new String[]{"Role key","roleKey"},new String[]{"Role","name"},new String[]{"Description","description"},new String[]{"Permissions","permissions"},new String[]{"System role","systemRole"},new String[]{"Status","isactive"},new String[]{"Created","created_at"});
-            case SEVERITIES -> List.of(new String[]{"Code","code"},new String[]{"Severity","name"},new String[]{"Description","description"},new String[]{"Order","sortOrder"},new String[]{"Background color","backgroundColor"},new String[]{"Text color","textColor"},new String[]{"Border color","borderColor"},new String[]{"Icon","icon"},new String[]{"Display style","displayStyle"},new String[]{"Status","isactive"},new String[]{"Created","created_at"});
+            case SEVERITIES -> List.of(new String[]{"Code","code"},new String[]{"Severity","name"},new String[]{"Description","description"},new String[]{"Order","sortOrder"},new String[]{"Background color","backgroundColor"},new String[]{"Text color","textColor"},new String[]{"Border color","borderColor"},new String[]{"Icon","icon"},new String[]{"Display style","displayStyle"},new String[]{"Default","isDefault"},new String[]{"Status","isactive"},new String[]{"Created","created_at"});
             case PERMISSIONS -> List.of(new String[]{"Code","code"},new String[]{"Permission","name"},new String[]{"Description","description"},new String[]{"Module","module"},new String[]{"System permission","systemPermission"},new String[]{"Status","isactive"});
             case ROLE_MAPPINGS -> List.of(new String[]{"Role key","roleKey"},new String[]{"Role","name"},new String[]{"Permission codes","permissionCodes"},new String[]{"Permission descriptions","permissionDetails"},new String[]{"Built-in","systemRole"},new String[]{"Updated","updated_at"});
         };
@@ -431,6 +506,7 @@ public class ConfigurationService {
         Map<String, Object> current = find(resource, operatorId, entityId);
         audit(operatorId, actorId, resource, entityId, creating ? "MASTER_DATA_CREATED" : "MASTER_DATA_UPDATED",
             creating ? "Created " + resource.label.toLowerCase() + " record." : "Updated " + resource.label.toLowerCase() + " record.", previous, current);
+        invalidateReferenceData(operatorId, resource);
         return current;
     }
 
@@ -458,9 +534,10 @@ public class ConfigurationService {
         if (reason == null || reason.isBlank() || reason.length() > 1000) throw new IllegalArgumentException("A reason of up to 1000 characters is required.");
         String entityId = id;
         if (resource != Resource.USERS) entityId = parseUuid(id).toString();
-        if (resource == Resource.USERS) {
+        if (resource == Resource.USERS || resource == Resource.SEVERITIES) {
             // Serialize membership deactivation within the tenant so concurrent requests cannot both remove
-            // the final active administrator after independently observing a count of two.
+            // the final active administrator after independently observing a count of two. Severity default
+            // changes use the same organization lock so a default cannot be set concurrently with its deactivation.
             jdbc.query("SELECT id FROM operators_mst WHERE id=? FOR UPDATE", (ResultSetExtractor<Boolean>) rs -> rs.next(), operatorId);
         }
         Map<String, Object> previous = find(resource, operatorId, entityId);
@@ -490,7 +567,9 @@ public class ConfigurationService {
             throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.CONFLICT, "Deactivate or replace active cabin-area mappings before deactivating this Maintenance team.");
         if (resource == Resource.ROLES && ("ADMIN".equals(previous.get("roleKey")) || exists("SELECT 1 FROM operator_memberships_mst WHERE operator_id=? AND role=? AND isactive=1 LIMIT 1", operatorId, previous.get("roleKey"))))
             throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.CONFLICT, "The Administrator role is protected. Reassign active users before deactivating another role.");
-        String sql = "UPDATE " + resource.table + " SET isactive=2,updated_at=now() WHERE operator_id=? AND " + (resource == Resource.USERS ? "external_user_id" : "id") + "=? AND isactive=1";
+        String sql = resource == Resource.SEVERITIES
+            ? "UPDATE defect_severities_mst SET isactive=2,is_default=false,updated_at=now() WHERE operator_id=? AND id=? AND isactive=1"
+            : "UPDATE " + resource.table + " SET isactive=2,updated_at=now() WHERE operator_id=? AND " + (resource == Resource.USERS ? "external_user_id" : "id") + "=? AND isactive=1";
         int changed = jdbc.update(sql, operatorId, resource == Resource.USERS ? entityId : UUID.fromString(entityId));
         if (changed != 1) throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.CONFLICT, "The record changed while this request was being processed. Refresh and try again.");
         if (resource == Resource.TEAMS) {
@@ -499,6 +578,7 @@ public class ConfigurationService {
         }
         Map<String, Object> current = find(resource, operatorId, entityId);
         audit(operatorId, actorId, resource, entityId, "MASTER_DATA_DEACTIVATED", reason.trim(), previous, current);
+        invalidateReferenceData(operatorId, resource);
     }
 
     @Transactional
@@ -520,6 +600,40 @@ public class ConfigurationService {
         jdbc.update("UPDATE " + resource.table + " SET isactive=1,updated_at=now() WHERE operator_id=? AND " + idField + "=? AND isactive=2", operatorId, recordId);
         Map<String, Object> current = find(resource, operatorId, entityId);
         audit(operatorId, actorId, resource, entityId, "MASTER_DATA_ACTIVATED", reason.trim(), previous, current);
+        invalidateReferenceData(operatorId, resource);
+    }
+
+    /** Sets the tenant's sole active default severity without accepting a tenant ID from the request body. */
+    @Transactional
+    public Map<String,Object> setDefaultSeverity(UUID operatorId, String actorId, String id) {
+        setAuditActor(actorId);
+        UUID severityId = parseUuid(id);
+        boolean organizationExists = Boolean.TRUE.equals(jdbc.query(
+            "SELECT id FROM operators_mst WHERE id=? AND isactive=1 FOR UPDATE",
+            (ResultSetExtractor<Boolean>) rs -> rs.next(), operatorId));
+        if (!organizationExists) throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.NOT_FOUND, "Organization was not found.");
+
+        Map<String,Object> target = find(Resource.SEVERITIES, operatorId, severityId.toString());
+        if (target == null) throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.NOT_FOUND, "Severity was not found.");
+        if (((Number) target.get("isactive")).intValue() != 1) throw new IllegalArgumentException("Only an active severity can be selected as the default.");
+
+        UUID currentDefaultId = jdbc.query(
+            "SELECT id FROM defect_severities_mst WHERE operator_id=? AND is_default=true",
+            (ResultSetExtractor<UUID>) rs -> rs.next() ? rs.getObject("id", UUID.class) : null, operatorId);
+        if (severityId.equals(currentDefaultId)) return target;
+
+        jdbc.update("UPDATE defect_severities_mst SET is_default=false,updated_at=now() WHERE operator_id=? AND is_default=true", operatorId);
+        int updated = jdbc.update("UPDATE defect_severities_mst SET is_default=true,updated_at=now() WHERE operator_id=? AND id=? AND isactive=1", operatorId, severityId);
+        if (updated != 1) throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.CONFLICT, "The severity changed while the default was being updated. Refresh and try again.");
+
+        Map<String,Object> previousState = new LinkedHashMap<>();
+        previousState.put("defaultSeverityId", currentDefaultId);
+        Map<String,Object> newState = new LinkedHashMap<>();
+        newState.put("defaultSeverityId", severityId);
+        audit(operatorId, actorId, Resource.SEVERITIES, severityId.toString(), "MASTER_DATA_DEFAULT_CHANGED",
+            "Changed the organization's default severity.", previousState, newState);
+        invalidateReferenceData(operatorId, Resource.SEVERITIES);
+        return find(Resource.SEVERITIES, operatorId, severityId.toString());
     }
 
     private Map<String, String> validate(Resource resource, Map<String, String> fields) {

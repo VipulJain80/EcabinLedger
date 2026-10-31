@@ -90,7 +90,9 @@ public final class FormModels {
     public record DeletedForm(UUID id,String formKey,String name,UUID areaId,String areaName,FormPurpose purpose,WorkflowStage workflowStage) {}
     public record FormForArea(UUID id, String formKey, String name, UUID areaId, FormPurpose purpose, WorkflowStage workflowStage, UUID versionId, int versionNumber,
         FormConfiguration configuration) {}
-    public record FormOption(UUID id, String code, String label) {}
+    public record FormOption(UUID id, String code, String label, boolean isDefault) {
+        public FormOption(UUID id, String code, String label) { this(id, code, label, false); }
+    }
     public record AircraftOption(UUID id, String tailNumber, String msnNumber, String aircraftType) {}
     public record AircraftOptionPage(List<AircraftOption> items, int page, int size, long totalElements, int totalPages) {}
     public record FieldBindingDefinition(DefectFieldBinding binding, String stableKey, String name, String domainProperty,

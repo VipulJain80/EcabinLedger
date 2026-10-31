@@ -1,9 +1,8 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { alert, responseErrorMessage } from "@/common/alerts";
-import { formatDateTime } from "@/common/dateTime";
 import { isPublishedFormForArea, orderedOperationalFields, unsupportedPublishedField } from "./publishedFormDefinition";
 import { answersWithoutUntouchedDefaults, defectReportBindingIssue, initializeFormValues } from "./defectReportMapping";
 import EvidenceUploadField from "./EvidenceUploadField";
@@ -13,6 +12,10 @@ import AttachmentPreviewDialog from "@/common/dialogs/AttachmentPreviewDialog";
 import AircraftRegistrationSelect from "./AircraftRegistrationSelect";
 import { SearchableMultiSelect, SearchableSelect } from "@/common/selects/SearchableSelect";
 import { shouldUseSearchableSelect } from "@/common/selects/searchableDropdownModel.mjs";
+import EvidenceDocumentCard from "@/common/fleet/EvidenceDocumentCard";
+import { selectInitialSeverityOption, shouldInitializeSeverityDefault } from "./severityDefaultModel.mjs";
+import { referenceQueryKeys, type RefreshTask } from "@/common/query/referenceQueryKeys";
+import ReferenceDataRefreshButton from "@/common/query/ReferenceDataRefreshButton";
 
 type Request = (path: string, init?: RequestInit) => Promise<Response>;
 type Field = {
@@ -37,7 +40,7 @@ type Field = {
 };
 type Purpose = "DEFECT_REPORT" | "INSPECTION" | "CORRECTIVE_ACTION" | "VERIFICATION" | "CLOSURE_APPROVAL" | "REOPEN";
 type Definition = { id: string; name: string; areaId: string; purpose: Purpose; workflowStage: string; versionId: string; versionNumber: number; configuration: { fields: Field[] } };
-type Choice = { id: string; label: string; code: string };
+type Choice = { id: string; label: string; code: string; isDefault?: boolean };
 type AircraftOption = { id:string; tailNumber:string; msnNumber:string|null; aircraftType:string };
 type Uploaded = { id: string; filename: string; sizeBytes?: number; scanStatus: string };
 type CaseEvidence = { id:string;formSubmissionId:string|null;fieldKey:string;filename:string;mimeType:string;sizeBytes:number;scanStatus:string;uploadedAt:string;source?:string|null;uploadedBy?:string|null };
@@ -45,17 +48,12 @@ type EvidencePreview = { file:CaseEvidence; url?:string; error?:string };
 
 const EMPTY_FIELDS: Field[] = [];
 
-function evidenceSourceLabel(source?:string|null){
-  if(source==="DEFECT_REPORT")return "Auditor report";
-  if(source==="CORRECTIVE_ACTION")return "Maintenance action";
-  return source?source.replaceAll("_"," "):"Case evidence · source unavailable";
-}
-
 function fileIdentity(file: File) { return `${file.name}:${file.size}:${file.lastModified}`; }
 const EMPTY_FILES: File[] = [];
 
-export default function OperationalFormRenderer({ request, defectId, actionId, areaId, areaName, initialFormId, initialVersionId, purpose = "DEFECT_REPORT", workflowStage = "INITIAL_REPORT", previewOnly = false, preparationMode = false, initialAnswers, initialFiles, onAnswersChange, onFilesChange, onPreparationReady, onAircraftSelected, onWorkflowComplete, aircraftOptionsCacheKey = "" }: {
+export default function OperationalFormRenderer({ request, defectId, actionId, areaId, areaName, organizationId = "", initialFormId, initialVersionId, purpose = "DEFECT_REPORT", workflowStage = "INITIAL_REPORT", previewOnly = false, preparationMode = false, initialAnswers, initialFiles, onAnswersChange, onFilesChange, onPreparationReady, onAircraftSelected, onWorkflowComplete, aircraftOptionsCacheKey = "" }: {
   request: Request;
+  organizationId?: string;
   defectId?: string;
   actionId?: string;
   areaId: string;
@@ -76,6 +74,7 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
   onWorkflowComplete?: (status: string) => void;
   aircraftOptionsCacheKey?: string;
 }) {
+  const queryClient=useQueryClient();
   const [formId, setFormId] = useState(initialFormId || "");
   const [values, setValues] = useState<Record<string, unknown>>(initialAnswers || {});
   const [dirtyFields,setDirtyFields]=useState<Set<string>>(()=>new Set());
@@ -93,9 +92,12 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
   const submissionGuard = useRef(false);
   const initialUploadsStarted = useRef(false);
   const previousSelectionContext = useRef<string | null>(null);
+  const manuallyTouchedFields = useRef(new Set<string>());
 
   const available = useQuery<Definition[]>({
-    queryKey: ["area-operational-forms", areaId, defectId || "new", purpose, workflowStage],
+    queryKey: ["operational-forms", organizationId, defectId ? "defect" : "area", defectId || areaId, purpose, workflowStage],
+    staleTime: defectId ? 0 : 30_000,
+    gcTime: defectId ? 0 : 5 * 60_000,
     enabled: !initialFormId && Boolean(areaId),
     queryFn: async () => {
       const path = defectId ? `/defects/${encodeURIComponent(defectId)}/operational-forms?purpose=${encodeURIComponent(purpose)}` : `/areas/${encodeURIComponent(areaId)}/forms?purpose=${encodeURIComponent(purpose)}&stage=${encodeURIComponent(workflowStage)}`;
@@ -105,7 +107,7 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
     },
   });
   const initialDefinition = useQuery<Definition>({
-    queryKey: ["published-operational-form", areaId, initialFormId, initialVersionId],
+    queryKey: ["published-operational-form", organizationId, areaId, initialFormId, initialVersionId],
     enabled: Boolean(initialFormId && initialVersionId),
     queryFn: async () => {
       const response = await request(`/forms/${encodeURIComponent(initialFormId! as string)}/versions/${encodeURIComponent(initialVersionId! as string)}/definition?areaId=${encodeURIComponent(areaId)}`);
@@ -131,12 +133,18 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
     return current;
   },[allConfiguredFields,areaId,dirtyFields,initialAnswers,options,purpose,selected?.versionId,values]);
   const selectedFields = useMemo(() => orderedOperationalFields(allConfiguredFields).filter(field => isFieldVisible(field, conditionValues, allConfiguredFields)), [allConfiguredFields, conditionValues]);
+  const refreshableOptionFields=selectedFields.filter(field=>field.optionSource&&["DEFECT_CATEGORIES","DEFECT_SEVERITIES","GALLEY_SEVERITIES","CABIN_AREAS","CABIN_ZONES","COMPONENTS","DEFECT_CONDITIONS","FLEETS"].includes(field.optionSource));
+  const refreshTasks:RefreshTask[]=organizationId&&selected?refreshableOptionFields.map(field=>{
+    const areaKey=field.optionFilter?.areaFieldKey,componentKey=field.optionFilter?.componentFieldKey;
+    const selectedArea=areaKey?String(values[areaKey]||""):areaId,componentId=componentKey?String(values[componentKey]||""):"";
+    return {body:{resources:["FORM_OPTIONS"],formId:selected.id,versionId:selected.versionId,fieldKey:field.key,areaId:selectedArea||undefined,componentId:componentId||undefined},queryKey:referenceQueryKeys.formOptions(organizationId,selected.id,selected.versionId,field.key,selectedArea,componentId)};
+  }):[];
   const unsupportedField = unsupportedPublishedField(selectedFields);
   const maintenanceStatusField=selectedFields.find(field=>field.binding==="MAINTENANCE_STATUS");
   const maintenanceStatusChoices=maintenanceStatusField?options[`${selected?.versionId}:${maintenanceStatusField.key}:${areaId}:` ]||[]:[];
   const selectedMaintenanceStatus=maintenanceStatusChoices.find(choice=>choice.id===String(values[maintenanceStatusField?.key||""]||""))?.code||"";
   const slaPolicyQuery=useQuery<{policy:{dateRequired:boolean;businessTimezone:string};today:string;minDate:string;maxDate:string}>({
-    queryKey:["maintenance-sla-effective-policy",defectId,actionId,selectedMaintenanceStatus],
+    queryKey:["maintenance-sla-effective-policy",organizationId,defectId,actionId,selectedMaintenanceStatus],
     enabled:purpose==="CORRECTIVE_ACTION"&&Boolean(defectId&&selectedMaintenanceStatus),
     queryFn:async({signal})=>{const response=await request(`/defects/${encodeURIComponent(defectId!)}/maintenance-sla-policy?status=${encodeURIComponent(selectedMaintenanceStatus)}`,{signal});if(!response.ok)throw new Error(await responseErrorMessage(response,"Could not load the effective SLA date policy."));return response.json();},
     retry:false,
@@ -149,7 +157,7 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
     if (preparationMode) onPreparationReady?.(Boolean(initialDefinition.isSuccess && selected && !definitionIssue && !reportBindingIssue));
   }, [definitionIssue, initialDefinition.isSuccess, onPreparationReady, preparationMode, reportBindingIssue, selected]);
   const closureEvidence = useQuery<CaseEvidence[]>({
-    queryKey:["closure-review-evidence",defectId],
+    queryKey:["closure-review-evidence",organizationId,defectId],
     enabled:Boolean(defectId&&purpose==="CLOSURE_APPROVAL"&&!previewOnly),
     queryFn:async({signal})=>{const response=await request(`/defects/${encodeURIComponent(defectId!)}/attachments`,{signal});if(!response.ok)throw new Error(await responseErrorMessage(response,"Could not load authorized case evidence."));return response.json();},
   });
@@ -161,6 +169,22 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
     setEvidencePreview({file:item});
     try{const response=await request(`/attachments/${encodeURIComponent(item.id)}/download`);if(!response.ok)throw new Error(await responseErrorMessage(response,"Could not open this evidence."));const url=URL.createObjectURL(await response.blob());setEvidencePreview(current=>{if(current?.file.id!==item.id){URL.revokeObjectURL(url);return current;}return{file:item,url};});}
     catch(error){setEvidencePreview(current=>current?.file.id===item.id?{file:item,error:error instanceof Error?error.message:"Could not open this evidence."}:current);}
+  }
+
+  async function reloadCurrentOptionData(){
+    if(!selected)return;
+    const refreshed:Record<string,Choice[]>={};
+    await Promise.all(refreshableOptionFields.map(async field=>{
+      const areaKey=field.optionFilter?.areaFieldKey,componentKey=field.optionFilter?.componentFieldKey;
+      const chosenArea=areaKey?String(values[areaKey]||""):areaId,componentId=componentKey?String(values[componentKey]||""):"";
+      if((areaKey&&!chosenArea)||(componentKey&&!componentId))return;
+      const params=new URLSearchParams();if(chosenArea)params.set("areaId",chosenArea);if(componentId)params.set("componentId",componentId);
+      const cacheKey=`${selected.versionId}:${field.key}:${chosenArea}:${componentId}`;
+      const queryKey=organizationId?referenceQueryKeys.formOptions(organizationId,selected.id,selected.versionId,field.key,chosenArea,componentId):["form-options-unscoped",selected.id,selected.versionId,field.key,chosenArea,componentId];
+      const data=await queryClient.fetchQuery({queryKey,staleTime:0,queryFn:async({signal})=>{const response=await request(`/forms/${selected.id}/versions/${selected.versionId}/fields/${encodeURIComponent(field.key)}/options?${params}`,{signal});if(!response.ok)throw new Error(await responseErrorMessage(response,"Could not load authorized field options."));return response.json() as Promise<Choice[]>;}});
+      refreshed[cacheKey]=data;
+    }));
+    setOptions(current=>({...current,...refreshed}));
   }
 
   function downloadCaseEvidence(){
@@ -183,21 +207,54 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
       const params = new URLSearchParams();
       if (chosenArea) params.set("areaId", chosenArea);
       if (componentId) params.set("componentId", componentId);
-      void request(`/forms/${selected.id}/versions/${selected.versionId}/fields/${encodeURIComponent(field.key)}/options?${params}`)
-        .then(async response => {
+      const optionQueryKey=organizationId?referenceQueryKeys.formOptions(organizationId,selected.id,selected.versionId,field.key,chosenArea,componentId):["form-options-unscoped",selected.id,selected.versionId,field.key,chosenArea,componentId];
+      void queryClient.fetchQuery({queryKey:optionQueryKey,staleTime:60_000,queryFn:async({signal})=>{
+          const response=await request(`/forms/${selected.id}/versions/${selected.versionId}/fields/${encodeURIComponent(field.key)}/options?${params}`,{signal});
           if (!response.ok) throw new Error(await responseErrorMessage(response, "Could not load authorized field options."));
-          const data = await response.json() as Choice[];
+          return await response.json() as Choice[];
+        }})
+        .then(data => {
           if (alive) setOptions(current => ({ ...current, [cacheKey]: data }));
         })
         .catch(error => { if (alive) setMessage(error instanceof Error ? error.message : "Could not load options."); });
     }
     return () => { alive = false; };
-  }, [selected, selectedFields, request, values, options, areaId]);
+  }, [selected, selectedFields, request, values, options, areaId, organizationId, queryClient]);
+
+  useEffect(() => {
+    const severityField = selectedFields.find(field => field.binding === "SEVERITY");
+    if (!severityField || !preparationMode || purpose !== "DEFECT_REPORT" || defectId || !selected) return;
+    const optionKey = `${selected.versionId}:${severityField.key}:${areaId}:`;
+    if (!Object.prototype.hasOwnProperty.call(options, optionKey)) return;
+    const hasInitialAnswer = Object.prototype.hasOwnProperty.call(initialAnswers || {}, severityField.key);
+    if (!shouldInitializeSeverityDefault({
+      preparationMode,
+      purpose,
+      hasDefectId: Boolean(defectId),
+      hasInitialAnswer,
+      isDirty: dirtyFields.has(severityField.key) || manuallyTouchedFields.current.has(severityField.key),
+      currentValue: values[severityField.key],
+    })) return;
+
+    const defaultOption = selectInitialSeverityOption(options[optionKey] || []);
+    if (!defaultOption) return;
+    const nextValues = { ...values, [severityField.key]: defaultOption.id };
+    setValues(current => shouldInitializeSeverityDefault({
+      preparationMode,
+      purpose,
+      hasDefectId: Boolean(defectId),
+      hasInitialAnswer,
+      isDirty: dirtyFields.has(severityField.key) || manuallyTouchedFields.current.has(severityField.key),
+      currentValue: current[severityField.key],
+    }) ? { ...current, [severityField.key]: defaultOption.id } : current);
+    setDirtyFields(current => new Set(current).add(severityField.key));
+    onAnswersChange?.(answersWithoutUntouchedDefaults(selected.configuration.fields || [], nextValues, new Set([...dirtyFields, severityField.key]), initialAnswers || {}));
+  }, [areaId, defectId, dirtyFields, initialAnswers, onAnswersChange, options, preparationMode, purpose, selected, selectedFields, values]);
 
   useEffect(() => {
     if (!selected) return;
     if (previousSelectionContext.current === null || previousSelectionContext.current !== selectionContext) {
-      setValues(initializeFormValues(selected.configuration.fields, initialAnswers || {})); setDirtyFields(new Set()); setFiles({}); setPendingFiles(initialFiles || {}); setUploadErrors({}); setOptions({}); setMessage("");
+      setValues(initializeFormValues(selected.configuration.fields, initialAnswers || {})); setDirtyFields(new Set()); manuallyTouchedFields.current.clear(); setFiles({}); setPendingFiles(initialFiles || {}); setUploadErrors({}); setOptions({}); setMessage("");
       setSelectedAircraft(null);onAircraftSelected?.(null);
       submissionGuard.current = false; initialUploadsStarted.current = false;
     }
@@ -205,6 +262,7 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
   }, [selectionContext, selected, initialAnswers, initialFiles, onAircraftSelected]);
 
   function changeValue(field: Field, value: unknown) {
+    manuallyTouchedFields.current.add(field.key);
     const next = { ...values, [field.key]: value };
     for (const dependent of selectedFields) {
       if (dependent.optionFilter?.areaFieldKey === field.key || dependent.optionFilter?.componentFieldKey === field.key) delete next[dependent.key];
@@ -385,7 +443,8 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
     {requestPending && <p role="status">Loading the selected published form…</p>}
     {requestFailed && <p role="alert">{requestError instanceof Error ? requestError.message : "Could not load the selected published form."}</p>}
     {noForms && !(defectId && purpose === "DEFECT_REPORT") && <p role="status">{purpose === "DEFECT_REPORT" ? "No published operational form is configured for this cabin area. Please contact your administrator." : `No published ${purpose.replaceAll("_", " ").toLowerCase()} form is configured for this workflow stage. Please contact your administrator.`}</p>}
-    {defectId&&purpose==="CLOSURE_APPROVAL"&&!previewOnly&&<section className="closure-review-evidence my-[14px] grid min-w-0 gap-[9px] rounded-[10px] border border-[#dce6df] bg-[#f8fbf9] p-[13px_15px]" aria-labelledby="closure-review-evidence-title"><h4 id="closure-review-evidence-title" className="m-0">Case evidence</h4>{closureEvidence.isPending?<p className="m-0" role="status">Loading authorized evidence…</p>:closureEvidence.isError?<p className="m-0" role="alert">{closureEvidence.error.message} <button type="button" className="button-secondary" onClick={()=>void closureEvidence.refetch()}>Retry</button></p>:!closureEvidence.data?.length?<p className="m-0">No evidence is attached to this case.</p>:<ul className="m-0 grid list-none gap-2 p-0">{closureEvidence.data.map(item=><li className="flex min-w-0 flex-wrap items-center justify-between gap-3 rounded-lg border border-[#e2e9e4] bg-white px-[10px] py-2" key={item.id}><span className="grid min-w-0 gap-[3px]"><strong className="break-all text-[12px] text-[#000000]">{item.filename}</strong><small className="text-[11px] font-semibold text-[#315b43]">{evidenceSourceLabel(item.source)}</small><small className="text-[11px] text-[#000000]">Uploaded by {item.uploadedBy||"uploader unavailable"} · {formatDateTime(item.uploadedAt)}</small><small className="text-[11px] text-[#000000]">{item.fieldKey} · {(item.sizeBytes/1024/1024).toFixed(1)} MB</small></span><button type="button" className="button-secondary" disabled={item.scanStatus==="REJECTED"} onClick={()=>void viewCaseEvidence(item)}>{item.scanStatus==="REJECTED"?"Unavailable":"View evidence"}</button></li>)}</ul>}</section>}
+    {defectId&&purpose==="CLOSURE_APPROVAL"&&!previewOnly&&<section className="closure-review-evidence my-[14px] grid min-w-0 gap-[9px] rounded-[10px] border border-[#dce6df] bg-[#f8fbf9] p-[13px_15px]" aria-labelledby="closure-review-evidence-title"><h4 id="closure-review-evidence-title" className="m-0">Case evidence</h4>{closureEvidence.isPending?<p className="m-0" role="status">Loading authorized evidence…</p>:closureEvidence.isError?<p className="m-0" role="alert">{closureEvidence.error.message} <button type="button" className="button-secondary" onClick={()=>void closureEvidence.refetch()}>Retry</button></p>:!closureEvidence.data?.length?<p className="m-0">No evidence is attached to this case.</p>:<ul className="m-0 grid list-none gap-2 p-0">{closureEvidence.data.map(item=><li key={item.id}><EvidenceDocumentCard file={item} onView={()=>void viewCaseEvidence(item)}/></li>)}</ul>}</section>}
+    {refreshTasks.length>0&&!previewOnly&&<div className="flex justify-end"><ReferenceDataRefreshButton request={request} tasks={refreshTasks} label="Refresh form options" onRefreshed={reloadCurrentOptionData}/></div>}
     {!initialFormId && !requestPending && !requestFailed && availableForms.length > 1 && (shouldUseSearchableSelect(availableForms.length)
       ? <SearchableSelect id="operational-form-selector" label="Published form" options={availableForms.map(form=>({value:form.id,label:`${form.name}${defectId?"":` · v${form.versionNumber}`}`}))} value={formId} placeholder="Choose a form…" onChange={value=>{setFormId(value);setValues({});setFiles({});setPendingFiles({});setUploadErrors({});setOptions({});setMessage("");initialUploadsStarted.current=false;}} className="my-[10px]"/>
       : <label className="flex flex-col gap-[7px] my-[10px]">Published form<select value={formId} onChange={event => { setFormId(event.target.value); setValues({}); setFiles({}); setPendingFiles({}); setUploadErrors({}); setOptions({}); setMessage(""); initialUploadsStarted.current=false; }}><option value="">Choose a form…</option>{availableForms.map(form => <option key={`${form.id}:${form.versionId}`} value={form.id}>{form.name}{defectId ? "" : ` · v${form.versionNumber}`}</option>)}</select></label>)}
@@ -406,18 +465,19 @@ export default function OperationalFormRenderer({ request, defectId, actionId, a
     const currentArea = areaKey ? String(values[areaKey] || "") : areaId;
     const currentComponent = componentKey ? String(values[componentKey] || "") : "";
     const choices = options[`${selected?.versionId}:${field.key}:${currentArea}:${currentComponent}`] || [];
+    const severityNeedsSelection = preparationMode && purpose === "DEFECT_REPORT" && !defectId && field.binding === "SEVERITY" && choices.length === 0;
     const id = `operational-${field.key}`;
     const uploaded = files[field.key] || [];
     const disabled = readOnly || Boolean(field.readOnly) || (Boolean(areaKey && !currentArea || componentKey && !currentComponent));
     const isSlaDate=field.binding==="SLA_TARGET_DATE";
     const datePolicy=slaPolicyQuery.data;
     const evidenceRequired=purpose==="CORRECTIVE_ACTION"&&field.binding==="EVIDENCE_ATTACHMENTS"&&field.requiredWhen?.equals==="CLOSE_SUBMITTED"&&selectedMaintenanceStatus==="CLOSE_SUBMITTED";
-    const fieldRequired=isSlaDate&&purpose==="CORRECTIVE_ACTION"?Boolean(datePolicy?.policy.dateRequired):evidenceRequired||isFieldRequired(field,conditionValues,allConfiguredFields);
+    const fieldRequired=isSlaDate&&purpose==="CORRECTIVE_ACTION"?Boolean(datePolicy?.policy.dateRequired):evidenceRequired||severityNeedsSelection||isFieldRequired(field,conditionValues,allConfiguredFields);
     if (field.type === "SECTION") return <div className="operational-form-section" key={field.key}><h4>{field.label}</h4>{field.helpText && <p>{field.helpText}</p>}</div>;
     if(field.type==="AIRCRAFT_SELECT"){
       return <div className="dynamic-aircraft-select grid min-w-0 content-start gap-[7px] self-start" key={field.key}>
         {preparationMode&&!readOnly
-          ? <AircraftRegistrationSelect request={request} cacheKey={`${aircraftOptionsCacheKey}:${selected?.id}:${selected?.versionId}`} areaId={areaId} formId="defect-report-form" id={id} label={field.label} helpText={field.helpText} required={field.required} selected={selectedAircraft} onSelect={option=>{setSelectedAircraft(option);onAircraftSelected?.(option);}} />
+          ? <AircraftRegistrationSelect request={request} cacheKey={`${organizationId}:${aircraftOptionsCacheKey}:${selected?.id}:${selected?.versionId}`} areaId={areaId} formId="defect-report-form" id={id} label={field.label} helpText={field.helpText} required={field.required} selected={selectedAircraft} onSelect={option=>{setSelectedAircraft(option);onAircraftSelected?.(option);}} />
           : <><span className="dynamic-form-field-label">{field.label}</span><p className="selected-aircraft-context" role="status">Aircraft identity is controlled by the defect record and cannot be changed here.</p></>}
       </div>;
     }

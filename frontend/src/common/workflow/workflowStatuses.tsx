@@ -3,6 +3,7 @@
 import { useQuery } from "@tanstack/react-query";
 import type { CSSProperties } from "react";
 import { workflowStatusLabel } from "./workflowStatusLabels.mjs";
+import { referenceQueryKeys } from "@/common/query/referenceQueryKeys";
 
 export { workflowStatusLabel } from "./workflowStatusLabels.mjs";
 
@@ -13,7 +14,7 @@ type Request = (path: string, init?: RequestInit) => Promise<Response>;
 
 export function useDefectWorkflowStatuses(request: Request) {
   return useQuery<{ items: WorkflowStatus[] }>({
-    queryKey: ["workflow-status-definitions", "DEFECT"],
+    queryKey: referenceQueryKeys.workflowStatuses("DEFECT"),
     queryFn: async ({ signal }) => {
       const response = await request("/workflow-statuses?moduleCode=DEFECT&activeOnly=false&page=0&size=100", { signal });
       if (!response.ok) throw new Error("Workflow status labels could not be loaded.");
@@ -29,9 +30,10 @@ export function badgeStyle(style: BadgeStyle): CSSProperties {
   return { backgroundColor: style.backgroundColor, color: style.textColor, borderColor: style.borderColor };
 }
 
-export function useDefectSeverities(request: Request) {
+export function useDefectSeverities(request: Request, organizationId: string) {
   return useQuery<SeverityDefinition[]>({
-    queryKey: ["reference-data", "severity-badge-styles"],
+    queryKey: referenceQueryKeys.list(organizationId, "severity-badge-styles"),
+    enabled: Boolean(organizationId),
     queryFn: async ({ signal }) => {
       const response = await request("/reference-data/severity-badges", { signal });
       if (!response.ok) throw new Error("Severity definitions could not be loaded.");
@@ -50,8 +52,8 @@ export function WorkflowStatusBadge({ statusCode, statusId, statuses = [], class
   </span>;
 }
 
-export function SeverityBadge({ severityCode, severityId, severityName, request, definitions, className = "" }: { severityCode?: string; severityId?: string; severityName?: string | null; request: Request; definitions?: SeverityDefinition[]; className?: string }) {
-  const query = useDefectSeverities(request);
+export function SeverityBadge({ severityCode, severityId, severityName, request, definitions, organizationId = "", className = "" }: { severityCode?: string; severityId?: string; severityName?: string | null; request: Request; definitions?: SeverityDefinition[]; organizationId?: string; className?: string }) {
+  const query = useDefectSeverities(request, organizationId);
   const severity = (definitions || query.data || []).find(item => (severityId && item.id === severityId) || (severityCode && item.code === severityCode));
   const code = severity?.code || severityCode || "UNKNOWN";
   const label = severity?.name || severityName || code.replaceAll("_", " ");
@@ -60,6 +62,6 @@ export function SeverityBadge({ severityCode, severityId, severityName, request,
   </span>;
 }
 
-export function IssueMetadata({ severityCode, severityId, statusCode, statusId, request, statuses = [] }: { severityCode?: string; severityId?: string; statusCode?: string; statusId?: string; request: Request; statuses?: WorkflowStatus[] }) {
-  return <div className="flex flex-wrap items-center gap-2"><SeverityBadge request={request} severityCode={severityCode} severityId={severityId} /><WorkflowStatusBadge statusCode={statusCode} statusId={statusId} statuses={statuses} /></div>;
+export function IssueMetadata({ severityCode, severityId, statusCode, statusId, request, statuses = [], organizationId = "" }: { severityCode?: string; severityId?: string; statusCode?: string; statusId?: string; request: Request; statuses?: WorkflowStatus[]; organizationId?: string }) {
+  return <div className="flex flex-wrap items-center gap-2"><SeverityBadge request={request} organizationId={organizationId} severityCode={severityCode} severityId={severityId} /><WorkflowStatusBadge statusCode={statusCode} statusId={statusId} statuses={statuses} /></div>;
 }

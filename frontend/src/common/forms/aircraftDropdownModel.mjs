@@ -1,5 +1,5 @@
 export function aircraftOptionLabel(option) {
-  return `${option.tailNumber} — MSN ${option.msnNumber || "—"}`;
+  return option.tailNumber;
 }
 
 export function mergeAircraftPages(pages) {

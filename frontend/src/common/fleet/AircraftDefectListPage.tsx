@@ -9,9 +9,11 @@ import { formatDateTime } from "@/common/dateTime";
 import { FleetAircraft } from "@/common/fleet/FleetStatusPage";
 import { areaFormSelection, selectableCabinAreas, shouldShowCabinAreaChooser, singleAreaForm } from "@/common/fleet/areaFormSelection";
 import { useDefectWorkflowStatuses, useDefectSeverities, workflowStatusLabel, WorkflowStatusBadge, SeverityBadge } from "@/common/workflow/workflowStatuses";
+import { effectiveDefectStatus } from "./defectDetailsModel";
+import { referenceQueryKeys } from "@/common/query/referenceQueryKeys";
 
 type Request = (path: string, init?: RequestInit) => Promise<Response>;
-type DefectRow = { id: string; reference: string; title: string | null; location: string; zone: string; component: string; conditionName?: string | null; severity: string; severityName?: string; status: string; reportedAt: string; closedAt?: string | null };
+type DefectRow = { id: string; reference: string; title: string | null; location: string; zone: string; component: string; conditionName?: string | null; severity: string; severityName?: string; status: string; currentActionStatus?: string | null; reportedAt: string; closedAt?: string | null };
 type AreaOption = { id: string; code: string; name: string; isactive?: number };
 type PublishedForm = { id: string; name: string; versionId: string; versionNumber: number; configuration: { fields: import("@/common/forms/defectReportMapping").ReportField[] } };
 
@@ -26,10 +28,10 @@ export default function AircraftDefectListPage({ request, aircraftId, organizati
   const [selectedAreaId, setSelectedAreaId] = useState("");
   const queryClient = useQueryClient();
   const workflowStatuses = useDefectWorkflowStatuses(request).data?.items || [];
-  const severityDefinitions = useDefectSeverities(request).data || [];
+  const severityDefinitions = useDefectSeverities(request,organizationCacheKey).data || [];
   const handledSingleForm = useRef("");
   const areasQuery = useQuery<AreaOption[]>({
-    queryKey: ["reference-cabin-areas", organizationCacheKey],
+    queryKey: referenceQueryKeys.list(organizationCacheKey,"areas"),
     queryFn: async ({ signal }) => {
       const response = await request("/reference-data", { signal });
       if (!response.ok) throw new Error(await responseErrorMessage(response, "Could not load cabin areas for this organization."));
@@ -42,7 +44,7 @@ export default function AircraftDefectListPage({ request, aircraftId, organizati
   const areas = areasQuery.data || [];
   const [sorting, setSorting] = useState<SortingState>([{ id: "reportedAt", desc: true }]);
   const aircraftQuery = useQuery<FleetAircraft>({
-    queryKey: ["aircraft-detail", aircraftId],
+    queryKey: ["aircraft-detail", organizationCacheKey, aircraftId],
     queryFn: async ({ signal }) => {
       const response = await request(`/aircraft/${encodeURIComponent(aircraftId)}`, { signal });
       if (!response.ok) throw new Error(await responseErrorMessage(response, "This aircraft is unavailable to your account."));
@@ -50,7 +52,7 @@ export default function AircraftDefectListPage({ request, aircraftId, organizati
     },
   });
   const listQuery = useQuery<ServerTablePage<DefectRow>>({
-    queryKey: ["aircraft-defects", aircraftId, page, pageSize, search, status, sorting],
+    queryKey: ["aircraft-defects", organizationCacheKey, aircraftId, page, pageSize, search, status, sorting],
     queryFn: async ({ signal }) => {
       const params = new URLSearchParams({ page: String(page), size: String(pageSize) });
       if (search) params.set("search", search);
@@ -62,12 +64,12 @@ export default function AircraftDefectListPage({ request, aircraftId, organizati
     },
   });
   useEffect(() => {
-    const refresh = () => void queryClient.invalidateQueries({ queryKey: ["aircraft-defects", aircraftId] });
+    const refresh = () => void queryClient.invalidateQueries({ queryKey: ["aircraft-defects", organizationCacheKey, aircraftId] });
     window.addEventListener("aircraft-defect-list-refresh", refresh);
     return () => window.removeEventListener("aircraft-defect-list-refresh", refresh);
-  }, [aircraftId, queryClient]);
+  }, [aircraftId, organizationCacheKey, queryClient]);
   const formsQuery = useQuery<PublishedForm[]>({
-    queryKey: ["area-operational-forms", selectedAreaId],
+    queryKey: referenceQueryKeys.forms(organizationCacheKey,selectedAreaId,"DEFECT_REPORT","INITIAL_REPORT"),
     enabled: Boolean(selectedAreaId),
     queryFn: async ({ signal }) => {
       const response = await request(`/areas/${encodeURIComponent(selectedAreaId)}/forms`, { signal });
@@ -81,8 +83,8 @@ export default function AircraftDefectListPage({ request, aircraftId, organizati
     { accessorKey: "zone", header: "Cabin zone" },
     { accessorKey: "component", header: "Component" },
     { accessorKey: "conditionName", header: "Condition", cell: ({ getValue }) => String(getValue() || "—") },
-    { accessorKey: "severity", header: "Severity", cell: ({ row }) => <SeverityBadge request={request} definitions={severityDefinitions} severityCode={row.original.severity} severityName={row.original.severityName} /> },
-    { accessorKey: "status", header: "Status", cell: ({ getValue }) => <WorkflowStatusBadge statusCode={String(getValue())} statuses={workflowStatuses} /> },
+    { accessorKey: "severity", header: "Severity", cell: ({ row }) => <SeverityBadge request={request} organizationId={organizationCacheKey} definitions={severityDefinitions} severityCode={row.original.severity} severityName={row.original.severityName} /> },
+    { accessorKey: "status", header: "Status", cell: ({ row }) => <WorkflowStatusBadge statusCode={effectiveDefectStatus(row.original.status,row.original.currentActionStatus)} statuses={workflowStatuses} /> },
     { accessorKey: "reportedAt", header: "Case Created Date", cell: ({ getValue }) => formatDateTime(String(getValue())) },
     { accessorKey: "closedAt", header: "Case Closed Date", cell: ({ getValue }) => getValue() ? formatDateTime(String(getValue())) : "—" },
   ];

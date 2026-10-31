@@ -26,7 +26,7 @@ test("pages append unique aircraft without losing the separately retained select
   ]);
 
   assert.deepEqual(loaded.map(item => item.id), ["1", "2", "3"]);
-  assert.equal(aircraftOptionLabel(selected), "VH-SELECTED — MSN —");
+  assert.equal(aircraftOptionLabel(selected), "VH-SELECTED");
   assert.equal(selected.id, "selected");
 });
 
@@ -72,4 +72,5 @@ test("form binding and selected aircraft callback remain the form submission con
   assert.match(selector, /required=\{required\}/);
   assert.match(selector, /value=\{selected\?\.id \|\| ""\}/);
   assert.match(selector, /selected\?\.id === option\.id/);
+  assert.doesNotMatch(selector, /· MSN/);
 });

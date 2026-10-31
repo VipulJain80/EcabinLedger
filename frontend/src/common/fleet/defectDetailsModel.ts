@@ -12,7 +12,12 @@ export type DefectActivity = {
 };
 
 export function canReassignMaintenance(permissions: string[], activeActionId: string | null | undefined, status: string): boolean {
-  return permissions.includes("ASSIGN_ACTION") && Boolean(activeActionId) && ["ACTION_ASSIGNED", "IN_PROGRESS"].includes(status);
+  return permissions.includes("ASSIGN_ACTION") && Boolean(activeActionId) && ["ACTION_ASSIGNED", "IN_PROGRESS", "ON_HOLD"].includes(status);
+}
+
+/** A currently held action takes display priority for legacy and newly held cases. */
+export function effectiveDefectStatus(defectStatus: string, currentActionStatus: string | null | undefined): string {
+  return currentActionStatus === "ON_HOLD" && ["IN_PROGRESS", "ON_HOLD"].includes(defectStatus) ? "ON_HOLD" : defectStatus;
 }
 
 export type DefectEventDetails = {

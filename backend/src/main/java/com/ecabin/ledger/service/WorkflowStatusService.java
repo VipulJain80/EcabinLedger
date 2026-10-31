@@ -23,10 +23,28 @@ public class WorkflowStatusService {
         rs.getString("border_color"), rs.getString("icon"), rs.getString("display_style"));
 
     private final JdbcTemplate jdbc;
+    private TenantReferenceCache referenceCache;
 
     public WorkflowStatusService(JdbcTemplate jdbc) { this.jdbc = jdbc; }
+    @org.springframework.beans.factory.annotation.Autowired
+    public void setReferenceCache(TenantReferenceCache referenceCache) { this.referenceCache = referenceCache; }
 
     public WorkflowStatusPage list(String moduleCode, boolean activeOnly, int page, int size, String search, String sortBy, String sortDirection) {
+        return list(moduleCode,activeOnly,page,size,search,sortBy,sortDirection,false);
+    }
+
+    public WorkflowStatusPage refreshList(String moduleCode, boolean activeOnly, int page, int size, String search, String sortBy, String sortDirection) {
+        return list(moduleCode,activeOnly,page,size,search,sortBy,sortDirection,true);
+    }
+
+    private WorkflowStatusPage list(String moduleCode, boolean activeOnly, int page, int size, String search, String sortBy, String sortDirection, boolean refresh) {
+        String key=String.join("|",String.valueOf(moduleCode),String.valueOf(activeOnly),String.valueOf(page),String.valueOf(size),String.valueOf(search),String.valueOf(sortBy),String.valueOf(sortDirection));
+        if(referenceCache==null)return listUncached(moduleCode,activeOnly,page,size,search,sortBy,sortDirection);
+        return refresh?referenceCache.refresh(TenantReferenceCache.Resource.WORKFLOW_STATUSES,null,key,()->listUncached(moduleCode,activeOnly,page,size,search,sortBy,sortDirection))
+            :referenceCache.get(TenantReferenceCache.Resource.WORKFLOW_STATUSES,null,key,()->listUncached(moduleCode,activeOnly,page,size,search,sortBy,sortDirection));
+    }
+
+    private WorkflowStatusPage listUncached(String moduleCode, boolean activeOnly, int page, int size, String search, String sortBy, String sortDirection) {
         if (page < 0 || size < 1 || size > 200) throw new IllegalArgumentException("Choose a valid page and a page size from 1 to 200.");
         String module = moduleCode == null || moduleCode.isBlank() ? null : moduleCode.trim().toUpperCase(Locale.ROOT);
         if (module != null && !module.matches("[A-Z][A-Z0-9_]{0,49}")) throw new IllegalArgumentException("Module code is invalid.");
@@ -81,6 +99,7 @@ public class WorkflowStatusService {
             operatorId, "Workflow status " + existing.statusCode() + " updated. Reason: " + reason, actorId, id,
             existing.displayName(), existing.aliasName(), existing.description(), existing.sortOrder(), existing.isActive(), existing.backgroundColor(), existing.textColor(), existing.borderColor(), existing.icon(), existing.displayStyle(),
             updated.displayName(), updated.aliasName(), updated.description(), updated.sortOrder(), updated.isActive(), updated.backgroundColor(), updated.textColor(), updated.borderColor(), updated.icon(), updated.displayStyle());
+        if(referenceCache!=null)referenceCache.invalidateGlobalAfterCommit(TenantReferenceCache.Resource.WORKFLOW_STATUSES);
         return updated;
     }
 

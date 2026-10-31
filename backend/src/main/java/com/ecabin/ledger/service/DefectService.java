@@ -30,6 +30,8 @@ import org.springframework.transaction.annotation.Transactional;
 public class DefectService {
     private static final Set<String> LOCATIONS = Set.of("CABIN", "GALLEY", "LAVATORY", "ATTENDANT_SEAT");
     private static final Set<String> CATEGORIES = Set.of("CABIN", "GALLEY", "LAVATORY", "ATTENDANT_SEAT", "IFE", "SEAT", "LIGHTING", "OVERHEAD_BIN", "PSU", "EMERGENCY_EQUIPMENT", "OTHER");
+    private static final String EFFECTIVE_DEFECT_STATUS = "CASE WHEN current_action.status='ON_HOLD' AND d.status IN ('IN_PROGRESS','ON_HOLD') THEN 'ON_HOLD' ELSE d.status END";
+    private static final String CURRENT_ACTION_LEFT_JOIN = "LEFT JOIN LATERAL (SELECT ca.id,ca.status,ca.assigned_team,ca.assigned_user_id,ca.created_at FROM corrective_actions_dtl ca WHERE ca.operator_id=d.operator_id AND ca.defect_id=d.id AND ca.isactive=1 ORDER BY ca.created_at DESC,ca.id DESC LIMIT 1) current_action ON TRUE ";
     private static final RowMapper<DefectView> DEFECT = (rs, row) -> {
         int rowNumber = rs.getInt("row_number");
         boolean rowNumberNull = rs.wasNull();
@@ -43,7 +45,7 @@ public class DefectService {
             rs.getString("status"), rs.getString("reported_by"), rs.getString("assigned_to"),
             rs.getObject("active_action_id", UUID.class), dueAt == null ? null : dueAt.toInstant(), rs.getTimestamp("reported_at").toInstant(), rs.getTimestamp("updated_at").toInstant(),
             rs.getString("assigned_team"), "REPORTED".equals(rs.getString("status")) && rs.getObject("reviewer_team_id") == null && rs.getString("assigned_team") == null ? "No eligible Reviewer or Maintenance route is configured. Contact an organization administrator." : null,
-            closedAt == null ? null : closedAt.toInstant());
+            closedAt == null ? null : closedAt.toInstant(), rs.getString("current_action_status"));
     };
     private final JdbcTemplate jdbc;
     private final NotificationService notifications;
@@ -75,7 +77,7 @@ public class DefectService {
 
     public DefectPage list(UUID operatorId, String externalUserId, String status, String location, String query, String searchBy, String aircraftType,
             Instant fromDate, Instant toDate, boolean mine, boolean teamScoped, boolean reviewerScoped, String cursor, int limit) {
-        if (status != null && !Set.of("REPORTED", "UNDER_REVIEW", "REWORK", "INSPECTION_REQUIRED", "INSPECTION_IN_PROGRESS", "INSPECTION_COMPLETE", "ACTION_ASSIGNED", "IN_PROGRESS", "AWAITING_VERIFICATION", "VERIFIED", "APPROVAL_REQUIRED", "CLOSED", "REJECTED", "CANCELLED", "REOPENED").contains(status)) throw new IllegalArgumentException("Unsupported status filter.");
+        if (status != null && !Set.of("REPORTED", "UNDER_REVIEW", "REWORK", "INSPECTION_REQUIRED", "INSPECTION_IN_PROGRESS", "INSPECTION_COMPLETE", "ACTION_ASSIGNED", "IN_PROGRESS", "ON_HOLD", "AWAITING_VERIFICATION", "VERIFIED", "APPROVAL_REQUIRED", "CLOSED", "REJECTED", "CANCELLED", "REOPENED").contains(status)) throw new IllegalArgumentException("Unsupported status filter.");
         if (location != null && !LOCATIONS.contains(location)) throw new IllegalArgumentException("Unsupported location filter.");
         String searchColumn = switch (searchBy == null ? "ALL" : searchBy.toUpperCase(java.util.Locale.ROOT)) {
             case "DEFECT_ID" -> "d.reference";
@@ -83,7 +85,7 @@ public class DefectService {
             case "CATEGORY" -> "d.category";
             case "COMPONENT" -> "d.component";
             case "ASSIGNED_USER" -> "d.assigned_to";
-            case "ALL" -> "concat_ws(' ',d.reference,d.title,d.description,a.tail_number,a.aircraft_type,d.category,d.zone,d.component,d.assigned_to,d.severity,(SELECT s.severity_name FROM defect_severities_mst s WHERE s.operator_id=d.operator_id AND s.id=d.severity_id))";
+            case "ALL" -> "concat_ws(' ',d.reference,d.title,d.description,a.tail_number,a.aircraft_type,d.category,d.zone,d.component,d.assigned_to,d.severity,(SELECT s.severity_name FROM defect_severities_mst s WHERE s.operator_id=d.operator_id AND s.id=d.severity_id)," + EFFECTIVE_DEFECT_STATUS + ")";
             default -> throw new IllegalArgumentException("Unsupported defect search field.");
         };
         Instant before = null;
@@ -95,14 +97,14 @@ public class DefectService {
                 beforeId = UUID.fromString(parts[1]);
             } catch (RuntimeException ex) { throw new IllegalArgumentException("Invalid page cursor."); }
         }
-        String sql = "SELECT d.*, " + closedAtProjection() + ", " + severityNameProjection() + ", a.tail_number, a.aircraft_type, current_action.id AS active_action_id FROM defects_dtl d JOIN aircraft_mst a ON a.id=d.aircraft_id AND a.operator_id=d.operator_id " +
-            "LEFT JOIN LATERAL (SELECT ca.id FROM corrective_actions_dtl ca WHERE ca.operator_id=d.operator_id AND ca.defect_id=d.id AND ca.isactive=1 AND ca.status IN ('ASSIGNED','IN_PROGRESS','ON_HOLD') ORDER BY ca.created_at DESC LIMIT 1) current_action ON TRUE " +
-            "WHERE d.operator_id=? AND d.isactive=1 AND a.isactive=1 AND (CAST(? AS varchar) IS NULL OR d.status=?) AND (CAST(? AS varchar) IS NULL OR d.location=?) " +
+        String sql = "SELECT d.*, " + closedAtProjection() + ", " + severityNameProjection() + ", a.tail_number, a.aircraft_type, current_action.id AS active_action_id,current_action.status AS current_action_status FROM defects_dtl d JOIN aircraft_mst a ON a.id=d.aircraft_id AND a.operator_id=d.operator_id " +
+            "LEFT JOIN LATERAL (SELECT ca.id,ca.status,ca.assigned_team,ca.assigned_user_id,ca.created_at FROM corrective_actions_dtl ca WHERE ca.operator_id=d.operator_id AND ca.defect_id=d.id AND ca.isactive=1 ORDER BY ca.created_at DESC,ca.id DESC LIMIT 1) current_action ON TRUE " +
+            "WHERE d.operator_id=? AND d.isactive=1 AND a.isactive=1 AND (CAST(? AS varchar) IS NULL OR (CASE WHEN current_action.status='ON_HOLD' AND d.status IN ('IN_PROGRESS','ON_HOLD') THEN 'ON_HOLD' ELSE d.status END)=?) AND (CAST(? AS varchar) IS NULL OR d.location=?) " +
             "AND (CAST(? AS varchar) IS NULL OR " + searchColumn + " ILIKE '%'||?||'%') " +
             "AND (CAST(? AS varchar) IS NULL OR a.aircraft_type=?) AND (CAST(? AS timestamptz) IS NULL OR d.reported_at>=CAST(? AS timestamptz)) " +
             "AND (CAST(? AS timestamptz) IS NULL OR d.reported_at<CAST(? AS timestamptz)+interval '1 day') AND (?=false OR d.reported_by=?) " +
-            "AND (?=false OR ((d.assigned_team IS NULL AND d.assigned_user_id=?) OR " + teamMembershipExists("d.assigned_team") + ")) " +
-            "AND (?=false OR (d.reviewer_team_id IS NOT NULL AND d.status IN ('REPORTED','UNDER_REVIEW','INSPECTION_REQUIRED','IN_PROGRESS','AWAITING_VERIFICATION','VERIFIED','APPROVAL_REQUIRED','REOPENED','REJECTED') AND " + reviewerMembershipExists("d.reviewer_team_id") + ")) " +
+            "AND (?=false OR ((current_action.assigned_team IS NULL AND current_action.assigned_user_id=?) OR " + teamMembershipExists("current_action.assigned_team") + ")) " +
+            "AND (?=false OR (d.reviewer_team_id IS NOT NULL AND d.status IN ('REPORTED','UNDER_REVIEW','INSPECTION_REQUIRED','IN_PROGRESS','ON_HOLD','AWAITING_VERIFICATION','VERIFIED','APPROVAL_REQUIRED','REOPENED','REJECTED') AND " + reviewerMembershipExists("d.reviewer_team_id") + ")) " +
             "AND (CAST(? AS timestamptz) IS NULL OR (d.reported_at,d.id) < (CAST(? AS timestamptz),CAST(? AS uuid))) ORDER BY d.reported_at DESC,d.id DESC LIMIT ?";
         List<DefectView> results = jdbc.query(sql, DEFECT, operatorId, status, status, location, location,
             blankToNull(query), blankToNull(query), blankToNull(aircraftType), blankToNull(aircraftType), utcTimestamp(fromDate), utcTimestamp(fromDate), utcTimestamp(toDate), utcTimestamp(toDate),
@@ -132,11 +134,11 @@ public class DefectService {
     public DashboardSummary summary(UUID operatorId, String externalUserId, boolean teamScoped) {
         if (!teamScoped) return summary(operatorId);
         return jdbc.queryForObject("SELECT " +
-            "count(*) FILTER (WHERE status NOT IN ('CLOSED','REJECTED','CANCELLED')) AS open_defects, " +
-            "count(*) FILTER (WHERE severity='CRITICAL' AND status NOT IN ('CLOSED','REJECTED','CANCELLED')) AS critical_defects, " +
-            "count(*) FILTER (WHERE reported_at >= date_trunc('day',now())) AS reported_today, " +
-            "count(*) FILTER (WHERE status='CLOSED' AND updated_at >= date_trunc('month',now())) AS closed_this_month " +
-            "FROM defects_dtl d WHERE operator_id=? AND isactive=1 AND status IN ('ACTION_ASSIGNED','IN_PROGRESS') AND ((assigned_team IS NULL AND assigned_user_id=?) OR " + teamMembershipExists("d.assigned_team") + ")",
+            "count(*) FILTER (WHERE d.status NOT IN ('CLOSED','REJECTED','CANCELLED')) AS open_defects, " +
+            "count(*) FILTER (WHERE d.severity='CRITICAL' AND d.status NOT IN ('CLOSED','REJECTED','CANCELLED')) AS critical_defects, " +
+            "count(*) FILTER (WHERE d.reported_at >= date_trunc('day',now())) AS reported_today, " +
+            "count(*) FILTER (WHERE d.status='CLOSED' AND d.updated_at >= date_trunc('month',now())) AS closed_this_month " +
+            "FROM defects_dtl d LEFT JOIN LATERAL (SELECT ca.assigned_team,ca.assigned_user_id FROM corrective_actions_dtl ca WHERE ca.operator_id=d.operator_id AND ca.defect_id=d.id AND ca.isactive=1 ORDER BY ca.created_at DESC,ca.id DESC LIMIT 1) current_action ON TRUE WHERE d.operator_id=? AND d.isactive=1 AND d.status IN ('ACTION_ASSIGNED','IN_PROGRESS','ON_HOLD') AND ((current_action.assigned_team IS NULL AND current_action.assigned_user_id=?) OR " + teamMembershipExists("current_action.assigned_team") + ")",
             (rs, row) -> new DashboardSummary(rs.getLong("open_defects"), rs.getLong("critical_defects"), rs.getLong("reported_today"), rs.getLong("closed_this_month")),
             operatorId, externalUserId, operatorId, externalUserId);
     }
@@ -153,20 +155,20 @@ public class DefectService {
         // like the Defect Register list query. The previous reviewer-only branch could count
         // defects assigned to a different maintenance team for combined Reviewer/Maintenance roles.
         if(reviewerScoped&&(teamScoped||reporterScoped)){
-            String reviewerStatuses="'REPORTED','UNDER_REVIEW','INSPECTION_REQUIRED','IN_PROGRESS','AWAITING_VERIFICATION','VERIFIED','APPROVAL_REQUIRED','CLOSED','REOPENED','REJECTED'";
+            String reviewerStatuses="'REPORTED','UNDER_REVIEW','INSPECTION_REQUIRED','IN_PROGRESS','ON_HOLD','AWAITING_VERIFICATION','VERIFIED','APPROVAL_REQUIRED','CLOSED','REOPENED','REJECTED'";
             String sql="SELECT count(*) FILTER(WHERE d.status NOT IN ('CLOSED','CANCELLED')) AS open_defects,"
                 +"count(*) FILTER(WHERE d.severity='CRITICAL' AND d.status NOT IN ('CLOSED','CANCELLED')) AS critical_defects,"
                 +"count(*) FILTER(WHERE d.reported_at>=date_trunc('day',now())) AS reported_today,"
                 +"count(*) FILTER(WHERE d.status='CLOSED' AND d.updated_at>=date_trunc('month',now())) AS closed_this_month "
-                +"FROM defects_dtl d WHERE d.operator_id=? AND d.isactive=1 "
+                +"FROM defects_dtl d LEFT JOIN LATERAL (SELECT ca.assigned_team,ca.assigned_user_id FROM corrective_actions_dtl ca WHERE ca.operator_id=d.operator_id AND ca.defect_id=d.id AND ca.isactive=1 ORDER BY ca.created_at DESC,ca.id DESC LIMIT 1) current_action ON TRUE WHERE d.operator_id=? AND d.isactive=1 "
                 +"AND (?=false OR d.reported_by=?) "
-                +"AND (?=false OR ((d.assigned_team IS NULL AND d.assigned_user_id=?) OR "+teamMembershipExists("d.assigned_team")+")) "
+                +"AND (?=false OR ((current_action.assigned_team IS NULL AND current_action.assigned_user_id=?) OR "+teamMembershipExists("current_action.assigned_team")+")) "
                 +"AND (?=false OR (d.reviewer_team_id IS NOT NULL AND d.status IN ("+reviewerStatuses+") AND "+reviewerMembershipExists("d.reviewer_team_id")+"))";
             return jdbc.queryForObject(sql,(rs,row)->new DashboardSummary(rs.getLong("open_defects"),rs.getLong("critical_defects"),rs.getLong("reported_today"),rs.getLong("closed_this_month")),
                 operatorId,reporterScoped,externalUserId,teamScoped,externalUserId,operatorId,externalUserId,reviewerScoped,operatorId,externalUserId);
         }
         if(!reviewerScoped)return summary(operatorId,externalUserId,teamScoped,reporterScoped);
-        String statuses="'REPORTED','UNDER_REVIEW','INSPECTION_REQUIRED','IN_PROGRESS','AWAITING_VERIFICATION','VERIFIED','APPROVAL_REQUIRED','CLOSED','REOPENED','REJECTED'";
+        String statuses="'REPORTED','UNDER_REVIEW','INSPECTION_REQUIRED','IN_PROGRESS','ON_HOLD','AWAITING_VERIFICATION','VERIFIED','APPROVAL_REQUIRED','CLOSED','REOPENED','REJECTED'";
         String sql="SELECT count(*) FILTER(WHERE status NOT IN ('CLOSED','CANCELLED')) AS open_defects,count(*) FILTER(WHERE severity='CRITICAL' AND status NOT IN ('CLOSED','CANCELLED')) AS critical_defects,count(*) FILTER(WHERE reported_at>=date_trunc('day',now())) AS reported_today,count(*) FILTER(WHERE status='CLOSED' AND updated_at>=date_trunc('month',now())) AS closed_this_month FROM defects_dtl d WHERE d.operator_id=? AND d.isactive=1 AND d.reviewer_team_id IS NOT NULL AND d.status IN ("+statuses+") AND "+reviewerMembershipExists("d.reviewer_team_id");
         return jdbc.queryForObject(sql,(rs,row)->new DashboardSummary(rs.getLong("open_defects"),rs.getLong("critical_defects"),rs.getLong("reported_today"),rs.getLong("closed_this_month")),operatorId,operatorId,externalUserId);
     }
@@ -176,12 +178,12 @@ public class DefectService {
             String search, String actionStatus, String sortBy, String sortDirection) {
         if (page < 0 || size < 1 || size > 100) throw new IllegalArgumentException("Choose a page and page size between 1 and 100.");
         String normalizedStatus = actionStatus == null || actionStatus.isBlank() ? "ALL" : actionStatus.toUpperCase(java.util.Locale.ROOT);
-        if (!Set.of("ALL", "ASSIGNED", "IN_PROGRESS").contains(normalizedStatus)) throw new IllegalArgumentException("Choose a valid corrective-action status.");
+        if (!Set.of("ALL", "ASSIGNED", "IN_PROGRESS", "ON_HOLD").contains(normalizedStatus)) throw new IllegalArgumentException("Choose a valid corrective-action status.");
         String query = search == null ? "" : search.trim();
         if (query.length() > 200) throw new IllegalArgumentException("Search is limited to 200 characters.");
         Map<String,String> sorts = Map.ofEntries(Map.entry("defectId", "d.reference"), Map.entry("aircraftRegistration", "a.tail_number"),
             Map.entry("msnNumber", "a.msn_number"), Map.entry("aircraftType", "a.aircraft_type"), Map.entry("zone", "d.zone"),
-            Map.entry("component", "d.component"), Map.entry("assignedTeam", "d.assigned_team"), Map.entry("defectStatus", "d.status"),
+            Map.entry("component", "d.component"), Map.entry("assignedTeam", "current_action.assigned_team"), Map.entry("defectStatus", EFFECTIVE_DEFECT_STATUS),
             Map.entry("correctiveActionStatus", "current_action.status"), Map.entry("assignmentDate", "current_action.created_at"),
             Map.entry("reportedAt", "d.reported_at"));
         String sortColumn = sorts.get(sortBy == null || sortBy.isBlank() ? "assignmentDate" : sortBy);
@@ -194,14 +196,14 @@ public class DefectService {
         String membership = " EXISTS (SELECT 1 FROM operator_membership_teams_mst omt " +
             "JOIN operator_memberships_mst om ON om.operator_id=omt.operator_id AND om.external_user_id=omt.external_user_id AND om.isactive=1 " +
             "JOIN maintenance_teams_mst mt ON mt.operator_id=omt.operator_id AND mt.name=omt.team_name AND mt.isactive=1 " +
-            "WHERE omt.operator_id=d.operator_id AND omt.external_user_id=? AND omt.team_name=d.assigned_team AND omt.isactive=1) ";
-        String filter = " WHERE d.operator_id=? AND d.isactive=1 AND a.isactive=1 AND d.assigned_team IS NOT NULL " +
-            "AND d.status IN ('ACTION_ASSIGNED','IN_PROGRESS') AND current_action.status IN ('ASSIGNED','IN_PROGRESS','ON_HOLD') " +
+            "WHERE omt.operator_id=d.operator_id AND omt.external_user_id=? AND omt.team_name=current_action.assigned_team AND omt.isactive=1) ";
+        String filter = " WHERE d.operator_id=? AND d.isactive=1 AND a.isactive=1 AND current_action.assigned_team IS NOT NULL " +
+            "AND d.status IN ('ACTION_ASSIGNED','IN_PROGRESS','ON_HOLD') AND current_action.status IN ('ASSIGNED','IN_PROGRESS','ON_HOLD') " +
             "AND " + membership + "AND (?='ALL' OR current_action.status=?) " +
-            "AND (?='' OR POSITION(LOWER(?) IN LOWER(CONCAT_WS(' ',d.reference,a.tail_number,a.msn_number,a.aircraft_type,d.zone,d.component,d.condition_name_snapshot,d.title,d.description,d.assigned_team)))>0)";
+            "AND (?='' OR POSITION(LOWER(?) IN LOWER(CONCAT_WS(' ',d.reference,a.tail_number,a.msn_number,a.aircraft_type,d.zone,d.component,d.condition_name_snapshot,d.title,d.description,current_action.assigned_team)))>0)";
         Long totalValue = jdbc.queryForObject("SELECT count(*)" + from + filter, Long.class, operatorId, externalUserId, normalizedStatus, normalizedStatus, query, query);
         long total = totalValue == null ? 0 : totalValue;
-        String sql = "SELECT d.id,d.reference,a.tail_number,a.msn_number,a.aircraft_type,d.zone,d.component,d.condition_name_snapshot,d.description,d.assigned_team,d.status,current_action.status AS corrective_action_status,current_action.created_at AS assignment_date,d.reported_at" +
+        String sql = "SELECT d.id,d.reference,a.tail_number,a.msn_number,a.aircraft_type,d.zone,d.component,d.condition_name_snapshot,d.description,current_action.assigned_team,CASE WHEN current_action.status='ON_HOLD' AND d.status IN ('IN_PROGRESS','ON_HOLD') THEN 'ON_HOLD' ELSE d.status END AS status,current_action.status AS corrective_action_status,current_action.created_at AS assignment_date,d.reported_at" +
             from + filter + " ORDER BY " + sortColumn + " " + direction + ",d.id ASC LIMIT ? OFFSET ?";
         List<MaintenanceWorkQueueRow> items = jdbc.query(sql, (rs, row) -> new MaintenanceWorkQueueRow(
             rs.getObject("id", UUID.class), rs.getString("reference"), rs.getString("tail_number"), rs.getString("msn_number"),
@@ -226,11 +228,11 @@ public class DefectService {
         String sort = fleetSort(sortBy, sortDirection);
         String query = search == null ? "" : search.trim();
         if (query.length() > 200) throw new IllegalArgumentException("Search is limited to 200 characters.");
-        String reviewerStatuses="'REPORTED','UNDER_REVIEW','INSPECTION_REQUIRED','IN_PROGRESS','AWAITING_VERIFICATION','VERIFIED','APPROVAL_REQUIRED','REOPENED','REJECTED'";
+        String reviewerStatuses="'REPORTED','UNDER_REVIEW','INSPECTION_REQUIRED','IN_PROGRESS','ON_HOLD','AWAITING_VERIFICATION','VERIFIED','APPROVAL_REQUIRED','REOPENED','REJECTED'";
         String reviewerAircraft="(?=false OR EXISTS (SELECT 1 FROM defects_dtl rd WHERE rd.operator_id=a.operator_id AND rd.aircraft_id=a.id AND rd.isactive=1 AND rd.reviewer_team_id IS NOT NULL AND rd.status IN ("+reviewerStatuses+") AND "+reviewerMembershipExists("rd.reviewer_team_id")+"))";
         String where = " WHERE a.operator_id=? AND a.isactive=1 AND "+reviewerAircraft+" AND (?='' OR POSITION(LOWER(?) IN LOWER(CONCAT_WS(' ',a.msn_number,a.tail_number,a.aircraft_type)))>0) AND (NULLIF(?, '') IS NULL OR a.fleet_id=CAST(NULLIF(?, '') AS uuid)) AND (?='' OR a.aircraft_type=?)";
         Long count = jdbc.queryForObject("SELECT count(*) FROM aircraft_mst a" + where, Long.class, operatorId,reviewerScoped,operatorId,externalUserId, query, query, normalizedFleetId, normalizedFleetId, aircraftType == null ? "" : aircraftType, aircraftType == null ? "" : aircraftType);
-        String visibleCount = "(SELECT COUNT(*) FROM defects_dtl d WHERE d.operator_id=a.operator_id AND d.aircraft_id=a.id AND d.isactive=1 AND d.status NOT IN ('CLOSED','CANCELLED') AND (?=false OR d.reported_by=?) AND (?=false OR (d.status IN ('ACTION_ASSIGNED','IN_PROGRESS') AND d.assigned_team IS NOT NULL AND EXISTS (SELECT 1 FROM corrective_actions_dtl ca WHERE ca.operator_id=d.operator_id AND ca.defect_id=d.id AND ca.isactive=1 AND ca.status IN ('ASSIGNED','IN_PROGRESS','ON_HOLD') AND ca.assigned_team=d.assigned_team) AND " + teamMembershipExists("d.assigned_team") + ")) AND (?=false OR (d.reviewer_team_id IS NOT NULL AND d.status IN ("+reviewerStatuses+") AND " + reviewerMembershipExists("d.reviewer_team_id") + ")))";
+        String visibleCount = "(SELECT COUNT(*) FROM defects_dtl d LEFT JOIN LATERAL (SELECT ca.id,ca.status,ca.assigned_team,ca.assigned_user_id,ca.created_at FROM corrective_actions_dtl ca WHERE ca.operator_id=d.operator_id AND ca.defect_id=d.id AND ca.isactive=1 ORDER BY ca.created_at DESC,ca.id DESC LIMIT 1) current_action ON TRUE WHERE d.operator_id=a.operator_id AND d.aircraft_id=a.id AND d.isactive=1 AND d.status NOT IN ('CLOSED','CANCELLED') AND (?=false OR d.reported_by=?) AND (?=false OR (d.status IN ('ACTION_ASSIGNED','IN_PROGRESS','ON_HOLD') AND current_action.assigned_team IS NOT NULL AND " + teamMembershipExists("current_action.assigned_team") + ")) AND (?=false OR (d.reviewer_team_id IS NOT NULL AND d.status IN ("+reviewerStatuses+") AND " + reviewerMembershipExists("d.reviewer_team_id") + ")))";
         String sql = "SELECT a.id,a.msn_number,a.tail_number,a.aircraft_type," + visibleCount + " AS open_defects FROM aircraft_mst a" + where +
             " ORDER BY " + sort + " NULLS LAST,a.id ASC LIMIT ? OFFSET ?";
         List<FleetStatusRow> rows = jdbc.query(sql, (rs, row) -> new FleetStatusRow(rs.getObject("id", UUID.class), rs.getString("msn_number"), rs.getString("tail_number"), rs.getString("aircraft_type"), rs.getLong("open_defects")),
@@ -240,17 +242,21 @@ public class DefectService {
     }
 
     public FleetDefectSummary fleetDefectSummary(UUID operatorId, String externalUserId, boolean teamScoped, boolean reporterScoped) {
-        String scope = " AND (?=false OR d.reported_by=?) AND (?=false OR (d.status IN ('ACTION_ASSIGNED','IN_PROGRESS') AND d.assigned_team IS NOT NULL AND EXISTS (SELECT 1 FROM corrective_actions_dtl ca WHERE ca.operator_id=d.operator_id AND ca.defect_id=d.id AND ca.isactive=1 AND ca.status IN ('ASSIGNED','IN_PROGRESS','ON_HOLD') AND ca.assigned_team=d.assigned_team) AND " + teamMembershipExists("d.assigned_team") + "))";
-        String sql = "SELECT count(*) AS total_defects,count(*) FILTER (WHERE d.status IN ('REPORTED','UNDER_REVIEW')) AS awaiting_review,count(*) FILTER (WHERE d.status IN ('ACTION_ASSIGNED','IN_PROGRESS')) AS in_maintenance,count(*) FILTER (WHERE d.status='CLOSED') AS closed FROM defects_dtl d WHERE d.operator_id=? AND d.isactive=1" + scope;
-        return jdbc.queryForObject(sql, (rs, row) -> new FleetDefectSummary(rs.getLong("total_defects"), rs.getLong("awaiting_review"), rs.getLong("in_maintenance"), rs.getLong("closed")),
-            operatorId, reporterScoped, externalUserId, teamScoped, operatorId, externalUserId);
+        String scope = " AND (?=false OR d.reported_by=?) AND (?=false OR (d.status IN ('ACTION_ASSIGNED','IN_PROGRESS','ON_HOLD') AND ((current_action.assigned_team IS NULL AND current_action.assigned_user_id=?) OR " + teamMembershipExists("current_action.assigned_team") + ")))";
+        String sql = "SELECT count(*) AS total_defects,count(*) FILTER (WHERE d.status IN ('REPORTED','UNDER_REVIEW')) AS awaiting_review,count(*) FILTER (WHERE d.status IN ('ACTION_ASSIGNED','IN_PROGRESS') AND current_action.status IN ('ASSIGNED','IN_PROGRESS')) AS in_maintenance,count(*) FILTER (WHERE d.status='CLOSED') AS closed,count(*) FILTER (WHERE d.status IN ('IN_PROGRESS','ON_HOLD') AND current_action.status='ON_HOLD') AS on_hold FROM defects_dtl d LEFT JOIN LATERAL (SELECT ca.status,ca.assigned_team,ca.assigned_user_id FROM corrective_actions_dtl ca WHERE ca.operator_id=d.operator_id AND ca.defect_id=d.id AND ca.isactive=1 ORDER BY ca.created_at DESC,ca.id DESC LIMIT 1) current_action ON TRUE WHERE d.operator_id=? AND d.isactive=1" + scope;
+        return jdbc.queryForObject(sql, (rs, row) -> new FleetDefectSummary(rs.getLong("total_defects"), rs.getLong("awaiting_review"), rs.getLong("in_maintenance"), rs.getLong("closed"),rs.getLong("on_hold")),
+            operatorId, reporterScoped, externalUserId, teamScoped, externalUserId, operatorId, externalUserId);
     }
 
     public FleetDefectSummary fleetDefectSummary(UUID operatorId,String externalUserId,boolean teamScoped,boolean reporterScoped,boolean reviewerScoped){
         if(!reviewerScoped)return fleetDefectSummary(operatorId,externalUserId,teamScoped,reporterScoped);
-        String statuses="'REPORTED','UNDER_REVIEW','INSPECTION_REQUIRED','IN_PROGRESS','AWAITING_VERIFICATION','VERIFIED','APPROVAL_REQUIRED','CLOSED','REOPENED','REJECTED'";
-        String sql="SELECT count(*) AS total_defects,count(*) FILTER(WHERE d.status IN ('REPORTED','UNDER_REVIEW')) AS awaiting_review,count(*) FILTER(WHERE d.status IN ('ACTION_ASSIGNED','IN_PROGRESS')) AS in_maintenance,count(*) FILTER(WHERE d.status='CLOSED') AS closed FROM defects_dtl d WHERE d.operator_id=? AND d.isactive=1 AND d.reviewer_team_id IS NOT NULL AND d.status IN ("+statuses+") AND "+reviewerMembershipExists("d.reviewer_team_id");
-        return jdbc.queryForObject(sql,(rs,row)->new FleetDefectSummary(rs.getLong("total_defects"),rs.getLong("awaiting_review"),rs.getLong("in_maintenance"),rs.getLong("closed")),operatorId,operatorId,externalUserId);
+        String statuses="'REPORTED','UNDER_REVIEW','INSPECTION_REQUIRED','IN_PROGRESS','ON_HOLD','AWAITING_VERIFICATION','VERIFIED','APPROVAL_REQUIRED','CLOSED','REOPENED','REJECTED'";
+        if(teamScoped||reporterScoped){
+            String sql="SELECT count(*) AS total_defects,count(*) FILTER(WHERE d.status IN ('REPORTED','UNDER_REVIEW')) AS awaiting_review,count(*) FILTER(WHERE d.status IN ('ACTION_ASSIGNED','IN_PROGRESS') AND current_action.status IN ('ASSIGNED','IN_PROGRESS')) AS in_maintenance,count(*) FILTER(WHERE d.status='CLOSED') AS closed,count(*) FILTER(WHERE d.status IN ('IN_PROGRESS','ON_HOLD') AND current_action.status='ON_HOLD') AS on_hold FROM defects_dtl d LEFT JOIN LATERAL (SELECT ca.id,ca.status,ca.assigned_team,ca.assigned_user_id,ca.created_at FROM corrective_actions_dtl ca WHERE ca.operator_id=d.operator_id AND ca.defect_id=d.id AND ca.isactive=1 ORDER BY ca.created_at DESC,ca.id DESC LIMIT 1) current_action ON TRUE WHERE d.operator_id=? AND d.isactive=1 AND d.reviewer_team_id IS NOT NULL AND d.status IN ("+statuses+") AND (?=false OR d.reported_by=?) AND (?=false OR ((current_action.assigned_team IS NULL AND current_action.assigned_user_id=?) OR "+teamMembershipExists("current_action.assigned_team")+")) AND "+reviewerMembershipExists("d.reviewer_team_id");
+            return jdbc.queryForObject(sql,(rs,row)->new FleetDefectSummary(rs.getLong("total_defects"),rs.getLong("awaiting_review"),rs.getLong("in_maintenance"),rs.getLong("closed"),rs.getLong("on_hold")),operatorId,reporterScoped,externalUserId,teamScoped,externalUserId,operatorId,externalUserId,operatorId,externalUserId);
+        }
+        String sql="SELECT count(*) AS total_defects,count(*) FILTER(WHERE d.status IN ('REPORTED','UNDER_REVIEW')) AS awaiting_review,count(*) FILTER(WHERE d.status IN ('ACTION_ASSIGNED','IN_PROGRESS') AND current_action.status IN ('ASSIGNED','IN_PROGRESS')) AS in_maintenance,count(*) FILTER(WHERE d.status='CLOSED') AS closed,count(*) FILTER(WHERE d.status IN ('IN_PROGRESS','ON_HOLD') AND current_action.status='ON_HOLD') AS on_hold FROM defects_dtl d LEFT JOIN LATERAL (SELECT ca.id,ca.status,ca.assigned_team,ca.assigned_user_id,ca.created_at FROM corrective_actions_dtl ca WHERE ca.operator_id=d.operator_id AND ca.defect_id=d.id AND ca.isactive=1 ORDER BY ca.created_at DESC,ca.id DESC LIMIT 1) current_action ON TRUE WHERE d.operator_id=? AND d.isactive=1 AND d.reviewer_team_id IS NOT NULL AND d.status IN ("+statuses+") AND "+reviewerMembershipExists("d.reviewer_team_id");
+        return jdbc.queryForObject(sql,(rs,row)->new FleetDefectSummary(rs.getLong("total_defects"),rs.getLong("awaiting_review"),rs.getLong("in_maintenance"),rs.getLong("closed"),rs.getLong("on_hold")),operatorId,operatorId,externalUserId);
     }
 
     public FleetStatusRow aircraft(UUID operatorId, UUID aircraftId) {
@@ -264,8 +270,8 @@ public class DefectService {
     }
 
     public FleetStatusRow aircraft(UUID operatorId, String externalUserId, UUID aircraftId, boolean teamScoped, boolean reporterScoped,boolean reviewerScoped) {
-        String scope = " AND (?=false OR d.reported_by=?) AND (?=false OR ((d.assigned_team IS NULL AND d.assigned_user_id=?) OR " + teamMembershipExists("d.assigned_team") + ")) AND (?=false OR (d.reviewer_team_id IS NOT NULL AND d.status IN ('REPORTED','UNDER_REVIEW','INSPECTION_REQUIRED','IN_PROGRESS','AWAITING_VERIFICATION','VERIFIED','APPROVAL_REQUIRED','REOPENED','REJECTED') AND "+reviewerMembershipExists("d.reviewer_team_id")+"))";
-        String sql = "SELECT a.id,a.msn_number,a.tail_number,a.aircraft_type,(SELECT COUNT(*) FROM defects_dtl d WHERE d.operator_id=a.operator_id AND d.aircraft_id=a.id AND d.isactive=1 AND d.status NOT IN ('CLOSED','CANCELLED')" + scope + ") AS open_defects FROM aircraft_mst a WHERE a.operator_id=? AND a.id=? AND a.isactive=1 AND (?=false OR EXISTS(SELECT 1 FROM defects_dtl rd WHERE rd.operator_id=a.operator_id AND rd.aircraft_id=a.id AND rd.isactive=1 AND rd.reviewer_team_id IS NOT NULL AND rd.status IN ('REPORTED','UNDER_REVIEW','INSPECTION_REQUIRED','IN_PROGRESS','AWAITING_VERIFICATION','VERIFIED','APPROVAL_REQUIRED','REOPENED','REJECTED') AND "+reviewerMembershipExists("rd.reviewer_team_id")+"))";
+        String scope = " AND (?=false OR d.reported_by=?) AND (?=false OR ((current_action.assigned_team IS NULL AND current_action.assigned_user_id=?) OR " + teamMembershipExists("current_action.assigned_team") + ")) AND (?=false OR (d.reviewer_team_id IS NOT NULL AND d.status IN ('REPORTED','UNDER_REVIEW','INSPECTION_REQUIRED','IN_PROGRESS','ON_HOLD','AWAITING_VERIFICATION','VERIFIED','APPROVAL_REQUIRED','REOPENED','REJECTED') AND "+reviewerMembershipExists("d.reviewer_team_id")+"))";
+        String sql = "SELECT a.id,a.msn_number,a.tail_number,a.aircraft_type,(SELECT COUNT(*) FROM defects_dtl d LEFT JOIN LATERAL (SELECT ca.id,ca.status,ca.assigned_team,ca.assigned_user_id,ca.created_at FROM corrective_actions_dtl ca WHERE ca.operator_id=d.operator_id AND ca.defect_id=d.id AND ca.isactive=1 ORDER BY ca.created_at DESC,ca.id DESC LIMIT 1) current_action ON TRUE WHERE d.operator_id=a.operator_id AND d.aircraft_id=a.id AND d.isactive=1 AND d.status NOT IN ('CLOSED','CANCELLED')" + scope + ") AS open_defects FROM aircraft_mst a WHERE a.operator_id=? AND a.id=? AND a.isactive=1 AND (?=false OR EXISTS(SELECT 1 FROM defects_dtl rd WHERE rd.operator_id=a.operator_id AND rd.aircraft_id=a.id AND rd.isactive=1 AND rd.reviewer_team_id IS NOT NULL AND rd.status IN ('REPORTED','UNDER_REVIEW','INSPECTION_REQUIRED','IN_PROGRESS','ON_HOLD','AWAITING_VERIFICATION','VERIFIED','APPROVAL_REQUIRED','REOPENED','REJECTED') AND "+reviewerMembershipExists("rd.reviewer_team_id")+"))";
         return jdbc.query(sql, (rs, row) -> new FleetStatusRow(rs.getObject("id", UUID.class), rs.getString("msn_number"), rs.getString("tail_number"), rs.getString("aircraft_type"), rs.getLong("open_defects")),
             reporterScoped, externalUserId, teamScoped, externalUserId, operatorId, externalUserId,reviewerScoped,operatorId,externalUserId,operatorId,aircraftId,reviewerScoped,operatorId,externalUserId)
             .stream().findFirst().orElseThrow(() -> new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.NOT_FOUND, "Aircraft not found."));
@@ -281,19 +287,19 @@ public class DefectService {
         if (page < 0 || size < 1 || size > 100) throw new IllegalArgumentException("Choose a page and page size between 1 and 100.");
         aircraft(operatorId,externalUserId,aircraftId,teamScoped,reporterScoped,reviewerScoped);
         String normalizedStatus = blankToNull(status);
-        if (normalizedStatus != null && !Set.of("REPORTED", "UNDER_REVIEW", "REWORK", "INSPECTION_REQUIRED", "INSPECTION_IN_PROGRESS", "INSPECTION_COMPLETE", "ACTION_ASSIGNED", "IN_PROGRESS", "AWAITING_VERIFICATION", "VERIFIED", "APPROVAL_REQUIRED", "CLOSED", "REJECTED", "CANCELLED", "REOPENED").contains(normalizedStatus)) throw new IllegalArgumentException("Unsupported status filter.");
+        if (normalizedStatus != null && !Set.of("REPORTED", "UNDER_REVIEW", "REWORK", "INSPECTION_REQUIRED", "INSPECTION_IN_PROGRESS", "INSPECTION_COMPLETE", "ACTION_ASSIGNED", "IN_PROGRESS", "ON_HOLD", "AWAITING_VERIFICATION", "VERIFIED", "APPROVAL_REQUIRED", "CLOSED", "REJECTED", "CANCELLED", "REOPENED").contains(normalizedStatus)) throw new IllegalArgumentException("Unsupported status filter.");
         String term = search == null ? "" : search.trim();
         if (term.length() > 200) throw new IllegalArgumentException("Search is limited to 200 characters.");
-        String scope = " AND (?=false OR d.reported_by=?) AND (?=false OR ((d.assigned_team IS NULL AND d.assigned_user_id=?) OR " + teamMembershipExists("d.assigned_team") + ")) AND (?=false OR (d.reviewer_team_id IS NOT NULL AND d.status IN ('REPORTED','UNDER_REVIEW','INSPECTION_REQUIRED','IN_PROGRESS','AWAITING_VERIFICATION','VERIFIED','APPROVAL_REQUIRED','REOPENED','REJECTED') AND "+reviewerMembershipExists("d.reviewer_team_id")+"))";
-        String where = " WHERE d.operator_id=? AND d.aircraft_id=? AND d.isactive=1 AND a.isactive=1 AND (CAST(? AS varchar) IS NULL OR d.status=?) AND (?='' OR concat_ws(' ',d.reference,d.title,d.description,d.location,d.zone,d.component,d.condition_name_snapshot,d.status,d.severity,(SELECT s.severity_name FROM defect_severities_mst s WHERE s.operator_id=d.operator_id AND s.id=d.severity_id)) ILIKE '%'||?||'%')" + scope;
+        String scope = " AND (?=false OR d.reported_by=?) AND (?=false OR ((current_action.assigned_team IS NULL AND current_action.assigned_user_id=?) OR " + teamMembershipExists("current_action.assigned_team") + ")) AND (?=false OR (d.reviewer_team_id IS NOT NULL AND d.status IN ('REPORTED','UNDER_REVIEW','INSPECTION_REQUIRED','IN_PROGRESS','ON_HOLD','AWAITING_VERIFICATION','VERIFIED','APPROVAL_REQUIRED','REOPENED','REJECTED') AND "+reviewerMembershipExists("d.reviewer_team_id")+"))";
+        String where = " WHERE d.operator_id=? AND d.aircraft_id=? AND d.isactive=1 AND a.isactive=1 AND (CAST(? AS varchar) IS NULL OR (" + EFFECTIVE_DEFECT_STATUS + ")=?) AND (?='' OR concat_ws(' ',d.reference,d.title,d.description,d.location,d.zone,d.component,d.condition_name_snapshot," + EFFECTIVE_DEFECT_STATUS + ",d.severity,(SELECT s.severity_name FROM defect_severities_mst s WHERE s.operator_id=d.operator_id AND s.id=d.severity_id)) ILIKE '%'||?||'%')" + scope;
         Object[] args = {operatorId, aircraftId, normalizedStatus, normalizedStatus, term, term, reporterScoped, externalUserId, teamScoped, externalUserId, operatorId, externalUserId,reviewerScoped,operatorId,externalUserId};
-        Long total = jdbc.queryForObject("SELECT count(*) FROM defects_dtl d JOIN aircraft_mst a ON a.operator_id=d.operator_id AND a.id=d.aircraft_id" + where, Long.class, args);
-        Map<String,String> sortColumns = Map.of("reference", "d.reference", "location", "d.location", "zone", "d.zone", "component", "d.component", "title", "d.title", "severity", "d.severity", "status", "d.status", "reportedAt", "d.reported_at");
+        Long total = jdbc.queryForObject("SELECT count(*) FROM defects_dtl d JOIN aircraft_mst a ON a.operator_id=d.operator_id AND a.id=d.aircraft_id LEFT JOIN LATERAL (SELECT ca.id,ca.status,ca.assigned_team,ca.assigned_user_id,ca.created_at FROM corrective_actions_dtl ca WHERE ca.operator_id=d.operator_id AND ca.defect_id=d.id AND ca.isactive=1 ORDER BY ca.created_at DESC,ca.id DESC LIMIT 1) current_action ON TRUE" + where, Long.class, args);
+        Map<String,String> sortColumns = Map.of("reference", "d.reference", "location", "d.location", "zone", "d.zone", "component", "d.component", "title", "d.title", "severity", "d.severity", "status", EFFECTIVE_DEFECT_STATUS, "reportedAt", "d.reported_at");
         String sortColumn = sortColumns.get(sortBy == null || sortBy.isBlank() ? "reportedAt" : sortBy);
         if (sortColumn == null) throw new IllegalArgumentException("Choose a supported defect-list sort field.");
         String direction = sortDirection == null || sortDirection.isBlank() ? "DESC" : sortDirection.toUpperCase(java.util.Locale.ROOT);
         if (!Set.of("ASC", "DESC").contains(direction)) throw new IllegalArgumentException("Choose ascending or descending sort order.");
-        String sql = "SELECT d.*," + closedAtProjection() + "," + severityNameProjection() + ",a.tail_number,a.aircraft_type,current_action.id AS active_action_id FROM defects_dtl d JOIN aircraft_mst a ON a.operator_id=d.operator_id AND a.id=d.aircraft_id LEFT JOIN LATERAL (SELECT ca.id FROM corrective_actions_dtl ca WHERE ca.operator_id=d.operator_id AND ca.defect_id=d.id AND ca.isactive=1 AND ca.status IN ('ASSIGNED','IN_PROGRESS','ON_HOLD') ORDER BY ca.created_at DESC LIMIT 1) current_action ON TRUE" + where + " ORDER BY " + sortColumn + " " + direction + ",d.id DESC LIMIT ? OFFSET ?";
+        String sql = "SELECT d.*," + closedAtProjection() + "," + severityNameProjection() + ",a.tail_number,a.aircraft_type,current_action.id AS active_action_id,current_action.status AS current_action_status FROM defects_dtl d JOIN aircraft_mst a ON a.operator_id=d.operator_id AND a.id=d.aircraft_id LEFT JOIN LATERAL (SELECT ca.id,ca.status,ca.assigned_team,ca.assigned_user_id,ca.created_at FROM corrective_actions_dtl ca WHERE ca.operator_id=d.operator_id AND ca.defect_id=d.id AND ca.isactive=1 ORDER BY ca.created_at DESC,ca.id DESC LIMIT 1) current_action ON TRUE" + where + " ORDER BY " + sortColumn + " " + direction + ",d.id DESC LIMIT ? OFFSET ?";
         Object[] rowsArgs = java.util.Arrays.copyOf(args, args.length + 2);
         rowsArgs[args.length] = size;
         rowsArgs[args.length + 1] = (long) page * size;
@@ -318,7 +324,7 @@ public class DefectService {
         String sort = fleetSort(sortBy, sortDirection);
         String query = search == null ? "" : search.trim();
         if (query.length() > 200) throw new IllegalArgumentException("Search is limited to 200 characters.");
-        String reviewerStatuses="'REPORTED','UNDER_REVIEW','INSPECTION_REQUIRED','IN_PROGRESS','AWAITING_VERIFICATION','VERIFIED','APPROVAL_REQUIRED','REOPENED','REJECTED'";
+        String reviewerStatuses="'REPORTED','UNDER_REVIEW','INSPECTION_REQUIRED','IN_PROGRESS','ON_HOLD','AWAITING_VERIFICATION','VERIFIED','APPROVAL_REQUIRED','REOPENED','REJECTED'";
         String reviewerAircraft="(?=false OR EXISTS (SELECT 1 FROM defects_dtl rd WHERE rd.operator_id=a.operator_id AND rd.aircraft_id=a.id AND rd.isactive=1 AND rd.reviewer_team_id IS NOT NULL AND rd.status IN ("+reviewerStatuses+") AND "+reviewerMembershipExists("rd.reviewer_team_id")+"))";
         String where = " WHERE a.operator_id=? AND a.isactive=1 AND "+reviewerAircraft+" AND (?='' OR POSITION(LOWER(?) IN LOWER(CONCAT_WS(' ',a.msn_number,a.tail_number,a.aircraft_type)))>0) AND (NULLIF(?, '') IS NULL OR a.fleet_id=CAST(NULLIF(?, '') AS uuid)) AND (?='' OR a.aircraft_type=?)";
         Long count = jdbc.queryForObject("SELECT count(*) FROM aircraft_mst a" + where, Long.class, operatorId,reviewerScoped,operatorId,externalUserId, query, query, normalizedFleetId, normalizedFleetId, aircraftType == null ? "" : aircraftType, aircraftType == null ? "" : aircraftType);
@@ -327,7 +333,7 @@ public class DefectService {
         if(columns.stream().anyMatch(column->!labels.containsKey(column)))throw new IllegalArgumentException("This Fleet Status column cannot be exported.");
         if(columns.isEmpty())throw new IllegalArgumentException("Select at least one visible data column to export.");
         XlsxStreamWriter writer = new XlsxStreamWriter(output, columns.stream().map(labels::get).toList(), count == null ? 0 : count);
-        String visibleCount = "(SELECT COUNT(*) FROM defects_dtl d WHERE d.operator_id=a.operator_id AND d.aircraft_id=a.id AND d.isactive=1 AND d.status NOT IN ('CLOSED','CANCELLED') AND (?=false OR d.reported_by=?) AND (?=false OR (d.status IN ('ACTION_ASSIGNED','IN_PROGRESS') AND d.assigned_team IS NOT NULL AND EXISTS (SELECT 1 FROM corrective_actions_dtl ca WHERE ca.operator_id=d.operator_id AND ca.defect_id=d.id AND ca.isactive=1 AND ca.status IN ('ASSIGNED','IN_PROGRESS','ON_HOLD') AND ca.assigned_team=d.assigned_team) AND " + teamMembershipExists("d.assigned_team") + ")) AND (?=false OR (d.reviewer_team_id IS NOT NULL AND d.status IN ("+reviewerStatuses+") AND " + reviewerMembershipExists("d.reviewer_team_id") + ")))";
+        String visibleCount = "(SELECT COUNT(*) FROM defects_dtl d LEFT JOIN LATERAL (SELECT ca.id,ca.status,ca.assigned_team,ca.assigned_user_id,ca.created_at FROM corrective_actions_dtl ca WHERE ca.operator_id=d.operator_id AND ca.defect_id=d.id AND ca.isactive=1 ORDER BY ca.created_at DESC,ca.id DESC LIMIT 1) current_action ON TRUE WHERE d.operator_id=a.operator_id AND d.aircraft_id=a.id AND d.isactive=1 AND d.status NOT IN ('CLOSED','CANCELLED') AND (?=false OR d.reported_by=?) AND (?=false OR (d.status IN ('ACTION_ASSIGNED','IN_PROGRESS','ON_HOLD') AND current_action.assigned_team IS NOT NULL AND " + teamMembershipExists("current_action.assigned_team") + ") AND (?=false OR (d.reviewer_team_id IS NOT NULL AND d.status IN ("+reviewerStatuses+") AND " + reviewerMembershipExists("d.reviewer_team_id") + ")))";
         String sql = "SELECT a.msn_number,a.tail_number,a.aircraft_type," + visibleCount + " AS open_defects FROM aircraft_mst a" + where + " ORDER BY " + sort + " NULLS LAST,a.id ASC";
         try {
             jdbc.query(connection -> {
@@ -370,15 +376,15 @@ public class DefectService {
     public record OrganizationBranding(String organizationName, String applicationName) {}
 
     public DefectView get(UUID operatorId, UUID id) {
-        return jdbc.query("SELECT d.*, " + closedAtProjection() + ", " + severityNameProjection() + ", a.tail_number, a.aircraft_type, current_action.id AS active_action_id FROM defects_dtl d JOIN aircraft_mst a ON a.id=d.aircraft_id AND a.operator_id=d.operator_id LEFT JOIN LATERAL (SELECT ca.id FROM corrective_actions_dtl ca WHERE ca.operator_id=d.operator_id AND ca.defect_id=d.id AND ca.isactive=1 AND ca.status IN ('ASSIGNED','IN_PROGRESS','ON_HOLD') ORDER BY ca.created_at DESC LIMIT 1) current_action ON TRUE WHERE d.operator_id=? AND d.id=? AND d.isactive=1 AND a.isactive=1", DEFECT, operatorId, id)
+        return jdbc.query("SELECT d.*, " + closedAtProjection() + ", " + severityNameProjection() + ", a.tail_number, a.aircraft_type, current_action.id AS active_action_id,current_action.status AS current_action_status FROM defects_dtl d JOIN aircraft_mst a ON a.id=d.aircraft_id AND a.operator_id=d.operator_id LEFT JOIN LATERAL (SELECT ca.id,ca.status,ca.assigned_team,ca.assigned_user_id,ca.created_at FROM corrective_actions_dtl ca WHERE ca.operator_id=d.operator_id AND ca.defect_id=d.id AND ca.isactive=1 ORDER BY ca.created_at DESC,ca.id DESC LIMIT 1) current_action ON TRUE WHERE d.operator_id=? AND d.id=? AND d.isactive=1 AND a.isactive=1", DEFECT, operatorId, id)
             .stream().findFirst().orElseThrow(() -> new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.NOT_FOUND, "Defect not found."));
     }
 
     /** Detail access matching the aircraft-specific Defect List policy, without broadening general detail access. */
     public DefectView getForAircraftList(UUID operatorId, String externalUserId, UUID aircraftId, UUID id, boolean reporterScoped) {
-        return jdbc.query("SELECT d.*, " + closedAtProjection() + ", " + severityNameProjection() + ", a.tail_number, a.aircraft_type, current_action.id AS active_action_id FROM defects_dtl d " +
+        return jdbc.query("SELECT d.*, " + closedAtProjection() + ", " + severityNameProjection() + ", a.tail_number, a.aircraft_type, current_action.id AS active_action_id,current_action.status AS current_action_status FROM defects_dtl d " +
                 "JOIN aircraft_mst a ON a.id=d.aircraft_id AND a.operator_id=d.operator_id " +
-                "LEFT JOIN LATERAL (SELECT ca.id FROM corrective_actions_dtl ca WHERE ca.operator_id=d.operator_id AND ca.defect_id=d.id AND ca.isactive=1 AND ca.status IN ('ASSIGNED','IN_PROGRESS','ON_HOLD') ORDER BY ca.created_at DESC,ca.id DESC LIMIT 1) current_action ON TRUE " +
+                "LEFT JOIN LATERAL (SELECT ca.id,ca.status,ca.assigned_team,ca.assigned_user_id,ca.created_at FROM corrective_actions_dtl ca WHERE ca.operator_id=d.operator_id AND ca.defect_id=d.id AND ca.isactive=1 ORDER BY ca.created_at DESC,ca.id DESC LIMIT 1) current_action ON TRUE " +
                 "WHERE d.operator_id=? AND d.aircraft_id=? AND d.id=? AND d.isactive=1 AND a.isactive=1 AND (?=false OR d.reported_by=?)",
             DEFECT, operatorId, aircraftId, id, reporterScoped, externalUserId).stream().findFirst()
             .orElseThrow(() -> new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.NOT_FOUND, "Defect not found."));
@@ -392,17 +398,17 @@ public class DefectService {
 
     /** Non-disclosing detail access for maintenance principals is tied to current active team assignment. */
     public DefectView getForMaintenanceMember(UUID operatorId, String externalUserId, UUID id) {
-        return jdbc.query("SELECT d.*," + closedAtProjection() + "," + severityNameProjection() + ",a.tail_number,a.aircraft_type,current_action.id AS active_action_id FROM defects_dtl d " +
+        return jdbc.query("SELECT d.*," + closedAtProjection() + "," + severityNameProjection() + ",a.tail_number,a.aircraft_type,current_action.id AS active_action_id,current_action.status AS current_action_status FROM defects_dtl d " +
             "JOIN aircraft_mst a ON a.id=d.aircraft_id AND a.operator_id=d.operator_id " +
-            "LEFT JOIN LATERAL (SELECT ca.id FROM corrective_actions_dtl ca WHERE ca.operator_id=d.operator_id AND ca.defect_id=d.id AND ca.isactive=1 AND ca.status IN ('ASSIGNED','IN_PROGRESS','ON_HOLD') ORDER BY ca.created_at DESC,ca.id DESC LIMIT 1) current_action ON TRUE " +
-            "WHERE d.operator_id=? AND d.id=? AND d.isactive=1 AND a.isactive=1 AND ((d.assigned_team IS NULL AND d.assigned_user_id=?) OR " + teamMembershipExists("d.assigned_team") + ")",
+            "LEFT JOIN LATERAL (SELECT ca.id,ca.status,ca.assigned_team,ca.assigned_user_id,ca.created_at FROM corrective_actions_dtl ca WHERE ca.operator_id=d.operator_id AND ca.defect_id=d.id AND ca.isactive=1 ORDER BY ca.created_at DESC,ca.id DESC LIMIT 1) current_action ON TRUE " +
+            "WHERE d.operator_id=? AND d.id=? AND d.isactive=1 AND a.isactive=1 AND ((current_action.assigned_team IS NULL AND current_action.assigned_user_id=?) OR " + teamMembershipExists("current_action.assigned_team") + ")",
             DEFECT, operatorId, id, externalUserId, operatorId, externalUserId).stream().findFirst()
             .orElseThrow(() -> new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.NOT_FOUND, "Defect not found."));
     }
 
     /** A reviewer can open a routed defect only through an active Reviewer-team membership and REVIEW grant. */
     public DefectView getForReviewerMember(UUID operatorId,String externalUserId,UUID id) {
-        return jdbc.query("SELECT d.*," + closedAtProjection() + "," + severityNameProjection() + ",a.tail_number,a.aircraft_type,current_action.id AS active_action_id FROM defects_dtl d JOIN aircraft_mst a ON a.id=d.aircraft_id AND a.operator_id=d.operator_id LEFT JOIN LATERAL (SELECT ca.id FROM corrective_actions_dtl ca WHERE ca.operator_id=d.operator_id AND ca.defect_id=d.id AND ca.isactive=1 AND ca.status IN ('ASSIGNED','IN_PROGRESS','ON_HOLD') ORDER BY ca.created_at DESC,ca.id DESC LIMIT 1) current_action ON TRUE WHERE d.operator_id=? AND d.id=? AND d.isactive=1 AND a.isactive=1 AND EXISTS (SELECT 1 FROM maintenance_teams_mst t JOIN operator_membership_teams_mst omt ON omt.operator_id=t.operator_id AND omt.team_name=t.name AND omt.isactive=1 JOIN operator_memberships_mst m ON m.operator_id=omt.operator_id AND m.external_user_id=omt.external_user_id AND m.isactive=1 JOIN operator_roles_mst r ON r.operator_id=m.operator_id AND r.role_key=m.role AND r.isactive=1 WHERE t.operator_id=d.operator_id AND t.id=d.reviewer_team_id AND t.team_type='REVIEWER' AND t.isactive=1 AND omt.external_user_id=? AND ('|'||r.permissions||'|') LIKE '%|REVIEW|%')",DEFECT,operatorId,id,externalUserId).stream().findFirst().orElseThrow(()->new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.NOT_FOUND,"Defect not found."));
+        return jdbc.query("SELECT d.*," + closedAtProjection() + "," + severityNameProjection() + ",a.tail_number,a.aircraft_type,current_action.id AS active_action_id,current_action.status AS current_action_status FROM defects_dtl d JOIN aircraft_mst a ON a.id=d.aircraft_id AND a.operator_id=d.operator_id LEFT JOIN LATERAL (SELECT ca.id,ca.status,ca.assigned_team,ca.assigned_user_id,ca.created_at FROM corrective_actions_dtl ca WHERE ca.operator_id=d.operator_id AND ca.defect_id=d.id AND ca.isactive=1 ORDER BY ca.created_at DESC,ca.id DESC LIMIT 1) current_action ON TRUE WHERE d.operator_id=? AND d.id=? AND d.isactive=1 AND a.isactive=1 AND EXISTS (SELECT 1 FROM maintenance_teams_mst t JOIN operator_membership_teams_mst omt ON omt.operator_id=t.operator_id AND omt.team_name=t.name AND omt.isactive=1 JOIN operator_memberships_mst m ON m.operator_id=omt.operator_id AND m.external_user_id=omt.external_user_id AND m.isactive=1 JOIN operator_roles_mst r ON r.operator_id=m.operator_id AND r.role_key=m.role AND r.isactive=1 WHERE t.operator_id=d.operator_id AND t.id=d.reviewer_team_id AND t.team_type='REVIEWER' AND t.isactive=1 AND omt.external_user_id=? AND ('|'||r.permissions||'|') LIKE '%|REVIEW|%')",DEFECT,operatorId,id,externalUserId).stream().findFirst().orElseThrow(()->new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.NOT_FOUND,"Defect not found."));
     }
 
     private String severityNameProjection() {
@@ -557,7 +563,7 @@ public class DefectService {
         String target = input.status().toUpperCase();
         if (target.equals("REJECTED") || target.equals("REWORK"))
             throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.CONFLICT, "Reviewer rejection and return-for-correction must use the authorized Reviewer decision operation.");
-        DefectView current = jdbc.query("SELECT d.*, " + closedAtProjection() + ", " + severityNameProjection() + ", a.tail_number, a.aircraft_type, current_action.id AS active_action_id FROM defects_dtl d JOIN aircraft_mst a ON a.id=d.aircraft_id AND a.operator_id=d.operator_id LEFT JOIN LATERAL (SELECT ca.id FROM corrective_actions_dtl ca WHERE ca.operator_id=d.operator_id AND ca.defect_id=d.id AND ca.isactive=1 AND ca.status IN ('ASSIGNED','IN_PROGRESS','ON_HOLD') ORDER BY ca.created_at DESC LIMIT 1) current_action ON TRUE WHERE d.operator_id=? AND d.id=? AND d.isactive=1 AND a.isactive=1 FOR UPDATE OF d", DEFECT, operatorId, id)
+        DefectView current = jdbc.query("SELECT d.*, " + closedAtProjection() + ", " + severityNameProjection() + ", a.tail_number, a.aircraft_type, current_action.id AS active_action_id,current_action.status AS current_action_status FROM defects_dtl d JOIN aircraft_mst a ON a.id=d.aircraft_id AND a.operator_id=d.operator_id LEFT JOIN LATERAL (SELECT ca.id,ca.status,ca.assigned_team,ca.assigned_user_id,ca.created_at FROM corrective_actions_dtl ca WHERE ca.operator_id=d.operator_id AND ca.defect_id=d.id AND ca.isactive=1 ORDER BY ca.created_at DESC,ca.id DESC LIMIT 1) current_action ON TRUE WHERE d.operator_id=? AND d.id=? AND d.isactive=1 AND a.isactive=1 FOR UPDATE OF d", DEFECT, operatorId, id)
             .stream().findFirst().orElseThrow(() -> new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.NOT_FOUND, "Defect not found."));
         DefectWorkflow.requireTransition(current.status(), target, input.note());
         if (current.status().equals("UNDER_REVIEW") && target.equals("INSPECTION_REQUIRED"))
@@ -598,6 +604,9 @@ public class DefectService {
             "CASE WHEN e.event_type IN ('REVIEW_APPROVED','REVIEW_REJECTED') OR e.event_type LIKE 'CLOSURE_%' THEN e.new_state->>'decision' END AS recorded_decision, " +
             "CASE WHEN e.event_type IN ('ACTION_ASSIGNED','ACTION_REASSIGNED') THEN e.new_state->>'team' " +
                 "WHEN e.event_type='REVIEW_APPROVED' THEN e.new_state->>'maintenanceTeam' END AS maintenance_team, " +
+            "CASE WHEN e.event_type='REVIEW_SEVERITY_CHANGED' THEN e.previous_state->>'severity' END AS previous_severity, " +
+            "CASE WHEN e.event_type='REVIEW_SEVERITY_CHANGED' THEN e.new_state->>'severity' END AS next_severity, " +
+            "CASE WHEN e.event_type='REVIEW_SEVERITY_CHANGED' THEN e.new_state->>'reason' END AS severity_change_reason, " +
             "CASE WHEN e.event_type='ATTACHMENT_UPLOADED' AND e.entity_type='ATTACHMENT' THEN e.entity_id END AS evidence_attachment_id " +
             "FROM defect_events_dtl e " +
             "LEFT JOIN operational_form_submissions_dtl s ON e.entity_type='FORM_SUBMISSION' AND s.operator_id=e.operator_id AND s.defect_id=e.defect_id AND s.id=e.entity_id " +
@@ -630,6 +639,12 @@ public class DefectService {
             addSubmitted(submitted, "Severity", rs.getString("severity_name"));
         }
         if ("INSPECTION_COMPLETED".equals(rs.getString("event_type"))) addSubmitted(submitted, "Inspection notes", rs.getString("inspection_notes"));
+        if ("REVIEW_SEVERITY_CHANGED".equals(rs.getString("event_type"))) {
+            String previousSeverity = rs.getString("previous_severity");
+            String nextSeverity = rs.getString("next_severity");
+            if (nextSeverity != null) addSubmitted(submitted, "Reviewer-assessed Severity", (previousSeverity == null ? "Not recorded" : previousSeverity) + " → " + nextSeverity);
+            addSubmitted(submitted, "Reason", rs.getString("severity_change_reason"));
+        }
         String formId = rs.getString("form_id");
         String formName = rs.getString("form_name");
         String formPurpose = rs.getString("form_purpose");
@@ -657,8 +672,8 @@ public class DefectService {
     }
 
     private boolean hasPassedInspection(UUID operatorId, UUID id) { return exists("SELECT 1 FROM inspections_dtl WHERE operator_id=? AND defect_id=? AND isactive=1 AND status='COMPLETED' AND result IN ('PASS','CONDITIONAL')", operatorId, id); }
-    private boolean hasAssignedAction(UUID operatorId, UUID id) { return exists("SELECT 1 FROM corrective_actions_dtl WHERE operator_id=? AND defect_id=? AND isactive=1 AND status IN ('ASSIGNED','IN_PROGRESS','COMPLETED')", operatorId, id); }
-    private boolean hasCompletedAction(UUID operatorId, UUID id) { return exists("SELECT 1 FROM corrective_actions_dtl WHERE operator_id=? AND defect_id=? AND isactive=1 AND status='COMPLETED'", operatorId, id); }
+    private boolean hasAssignedAction(UUID operatorId, UUID id) { return exists("SELECT 1 FROM corrective_actions_dtl ca WHERE ca.operator_id=? AND ca.defect_id=? AND ca.isactive=1 AND ca.status IN ('ASSIGNED','IN_PROGRESS','COMPLETED') AND ca.id=(SELECT latest.id FROM corrective_actions_dtl latest WHERE latest.operator_id=ca.operator_id AND latest.defect_id=ca.defect_id AND latest.isactive=1 ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1)", operatorId, id); }
+    private boolean hasCompletedAction(UUID operatorId, UUID id) { return exists("SELECT 1 FROM corrective_actions_dtl ca WHERE ca.operator_id=? AND ca.defect_id=? AND ca.isactive=1 AND ca.status='COMPLETED' AND ca.id=(SELECT latest.id FROM corrective_actions_dtl latest WHERE latest.operator_id=ca.operator_id AND latest.defect_id=ca.defect_id AND latest.isactive=1 ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1)", operatorId, id); }
     private boolean hasPassingVerification(UUID operatorId, UUID id) { return exists("SELECT 1 FROM verifications_dtl WHERE operator_id=? AND defect_id=? AND isactive=1 AND result='PASS'", operatorId, id); }
     private boolean hasApprovedClosure(UUID operatorId, UUID id) { return exists("SELECT 1 FROM closure_approvals_dtl WHERE operator_id=? AND defect_id=? AND isactive=1 AND decision='APPROVED'", operatorId, id); }
     private boolean exists(String sql, UUID operatorId, UUID id) { return Boolean.TRUE.equals(jdbc.query(sql, (ResultSetExtractor<Boolean>) rs -> rs.next(), operatorId, id)); }

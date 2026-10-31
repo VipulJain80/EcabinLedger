@@ -108,8 +108,11 @@ public final class ApiModels {
         @Size(max = 2000) String rejectionReason,
         @Size(max = 2000) String remark,
         @NotNull UUID formId,
-        @NotNull UUID versionId
+        @NotNull UUID versionId,
+        UUID reviewerSeverityId,
+        @Size(max = 2000) String severityChangeReason
     ) {
+        public ReviewerDecisionRequest(String decision,UUID maintenanceTeamId,String rejectionReason,String remark,UUID formId,UUID versionId){this(decision,maintenanceTeamId,rejectionReason,remark,formId,versionId,null,null);}
         public ReviewerDecisionRequest(String decision,UUID maintenanceTeamId,String remark,UUID formId,UUID versionId){this(decision,maintenanceTeamId,null,remark,formId,versionId);}
         public ReviewerDecisionRequest(String decision,UUID maintenanceTeamId,String remark){this(decision,maintenanceTeamId,null,remark,null,null);}
     }
@@ -123,7 +126,11 @@ public final class ApiModels {
         String location, String category, String zone, Integer rowNumber, String seatReference,
         String component, UUID areaId, UUID componentId, UUID conditionId, String conditionName, String title, String description, String severity, String severityName, String status,
         String reportedBy, String assignedTo, UUID activeActionId, Instant dueAt, Instant reportedAt, Instant updatedAt,
-        String assignedTeam, String routingAttention, Instant closedAt) {}
+        String assignedTeam, String routingAttention, Instant closedAt, String currentActionStatus) {
+        public DefectView(UUID id,String reference,String tailNumber,String aircraftType,String location,String category,String zone,Integer rowNumber,String seatReference,String component,UUID areaId,UUID componentId,UUID conditionId,String conditionName,String title,String description,String severity,String severityName,String status,String reportedBy,String assignedTo,UUID activeActionId,Instant dueAt,Instant reportedAt,Instant updatedAt,String assignedTeam,String routingAttention,Instant closedAt) {
+            this(id,reference,tailNumber,aircraftType,location,category,zone,rowNumber,seatReference,component,areaId,componentId,conditionId,conditionName,title,description,severity,severityName,status,reportedBy,assignedTo,activeActionId,dueAt,reportedAt,updatedAt,assignedTeam,routingAttention,closedAt,null);
+        }
+    }
 
     public record SubmittedFormValue(String label, String value) {}
     /** Whitelisted, user-facing values projected from the immutable form snapshot or event state. */
@@ -139,7 +146,9 @@ public final class ApiModels {
     public record DashboardSummary(long openDefects, long criticalDefects, long reportedToday, long closedThisMonth) {}
     public record FleetStatusRow(UUID id, String msnNumber, String tailNumber, String aircraftType, long openDefects) {}
     public record FleetStatusPage(List<FleetStatusRow> items, int page, int size, long totalElements, int totalPages) {}
-    public record FleetDefectSummary(long totalDefects, long awaitingReview, long inMaintenance, long closed) {}
+    public record FleetDefectSummary(long totalDefects, long awaitingReview, long inMaintenance, long closed, long onHold) {
+        public FleetDefectSummary(long totalDefects,long awaitingReview,long inMaintenance,long closed){this(totalDefects,awaitingReview,inMaintenance,closed,0);}
+    }
     public record AircraftDefectPage(List<DefectView> items, int page, int size, long totalElements, int totalPages) {}
     public record MaintenanceWorkQueueRow(UUID id, String defectId, String aircraftRegistration, String msnNumber,
         String aircraftType, String zone, String component, String condition, String description, String assignedTeam,
@@ -150,7 +159,9 @@ public final class ApiModels {
     public record ReviewerQueuePage(List<ReviewerQueueRow> items, int page, int size, long totalElements, int totalPages) {}
     public record ReviewerTeamOption(UUID id,String name,int eligibleMembers) {}
     public record ConditionOption(UUID id, String code, String name, String description) {}
-    public record CurrentUserView(String organizationName, String applicationName, String displayName, String role, Set<String> permissions) {}
+    public record CurrentUserView(UUID organizationId, String organizationName, String applicationName, String displayName, String role, Set<String> permissions) {
+        public CurrentUserView(String organizationName,String applicationName,String displayName,String role,Set<String> permissions){this(null,organizationName,applicationName,displayName,role,permissions);}
+    }
     public record NavigationItem(String key, String label, String icon, String section, List<NavigationItem> children) {}
     public record ErrorBody(ErrorDetail error) {}
     public record ErrorDetail(String code, String message) {}

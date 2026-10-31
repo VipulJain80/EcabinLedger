@@ -103,7 +103,7 @@ public class DefectController {
     }
 
     @GetMapping("/me")
-    public CurrentUserView me(JwtAuthenticationToken auth) { AuthenticatedUser user=users.require(auth); var branding=service.organizationBranding(user.organizationId()); return new CurrentUserView(branding==null?null:branding.organizationName(), branding==null?null:branding.applicationName(), user.displayName(), user.role(), permissions.permissionsFor(user.organizationId(), user.role()).stream().map(Enum::name).collect(java.util.stream.Collectors.toUnmodifiableSet())); }
+    public CurrentUserView me(JwtAuthenticationToken auth) { AuthenticatedUser user=users.require(auth); var branding=service.organizationBranding(user.organizationId()); return new CurrentUserView(user.organizationId(),branding==null?null:branding.organizationName(), branding==null?null:branding.applicationName(), user.displayName(), user.role(), permissions.permissionsFor(user.organizationId(), user.role()).stream().map(Enum::name).collect(java.util.stream.Collectors.toUnmodifiableSet())); }
 
     @PostMapping("/defects") @ResponseStatus(HttpStatus.CREATED)
     public DefectView create(JwtAuthenticationToken auth, @Valid @RequestBody CreateDefectRequest request,

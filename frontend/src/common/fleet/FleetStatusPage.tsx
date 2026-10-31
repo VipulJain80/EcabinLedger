@@ -8,14 +8,16 @@ import { alert, responseErrorMessage } from "@/common/alerts";
 import { useDefectWorkflowStatuses, workflowStatusLabel } from "@/common/workflow/workflowStatuses";
 import { SearchableSelect } from "@/common/selects/SearchableSelect";
 import { shouldUseSearchableSelect } from "@/common/selects/searchableDropdownModel.mjs";
+import ReferenceDataRefreshButton from "@/common/query/ReferenceDataRefreshButton";
+import { referenceQueryKeys } from "@/common/query/referenceQueryKeys";
 
 export type FleetAircraft = { id: string; msnNumber: string | null; tailNumber: string; aircraftType: string; openDefects: number };
 type FleetRow = FleetAircraft;
-type FleetSummary = { totalDefects: number; awaitingReview: number; inMaintenance: number; closed: number };
+type FleetSummary = { totalDefects: number; awaitingReview: number; inMaintenance: number; closed: number; onHold: number };
 type FleetFilters = { fleets: Array<{ id: string; name: string }>; aircraftTypes: string[] };
 type Request = (path: string, init?: RequestInit) => Promise<Response>;
 
-export default function FleetStatusPage({ request, onSelectAircraft }: { request: Request; onSelectAircraft: (aircraft: FleetRow) => void }) {
+export default function FleetStatusPage({ request, onSelectAircraft, organizationId }: { request: Request; onSelectAircraft: (aircraft: FleetRow) => void; organizationId: string }) {
   const workflowStatuses = useDefectWorkflowStatuses(request).data?.items || [];
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(25);
@@ -25,7 +27,7 @@ export default function FleetStatusPage({ request, onSelectAircraft }: { request
   const [sorting, setSorting] = useState<SortingState>([]);
   const [exporting, setExporting] = useState(false);
   const query = useQuery<ServerTablePage<FleetRow>>({
-    queryKey: ["fleet-status", page, pageSize, search, fleetId, aircraftType, sorting],
+    queryKey: ["fleet-status", organizationId, page, pageSize, search, fleetId, aircraftType, sorting],
     staleTime: 10_000,
     queryFn: async ({ signal }) => {
       const params = new URLSearchParams({ page: String(page), size: String(pageSize) });
@@ -39,7 +41,7 @@ export default function FleetStatusPage({ request, onSelectAircraft }: { request
     },
   });
   const filters = useQuery<FleetFilters>({
-    queryKey: ["fleet-status-filters"],
+    queryKey: referenceQueryKeys.list(organizationId,"fleet-status-filters"),
     queryFn: async ({ signal }) => {
       const response = await request("/reference-data", { signal });
       if (!response.ok) throw new Error(await responseErrorMessage(response, "Could not load fleet filters."));
@@ -48,7 +50,7 @@ export default function FleetStatusPage({ request, onSelectAircraft }: { request
     staleTime: 60_000,
   });
   const summary = useQuery<FleetSummary>({
-    queryKey: ["fleet-defect-summary"],
+    queryKey: ["fleet-defect-summary",organizationId],
     staleTime: 10_000,
     queryFn: async ({ signal }) => {
       const response = await request("/fleet-status/summary", { signal });
@@ -83,11 +85,12 @@ export default function FleetStatusPage({ request, onSelectAircraft }: { request
 
   const data = query.data;
   return <div className="content fleet-status-content">
-    <div className="heading"><div><h1>Defect Summary</h1></div></div>
-    <section className="metrics aircraft-summary-metrics mb-[22px] grid grid-cols-[repeat(4,minmax(0,1fr))] gap-3 max-[700px]:grid-cols-2" aria-label="Authorized fleet defect summary">
+    <div className="heading flex flex-wrap items-center justify-between gap-3"><div><h1>Defect Summary</h1></div><ReferenceDataRefreshButton request={request} tasks={[{body:{resources:["FLEETS"]},queryKey:referenceQueryKeys.list(organizationId,"fleet-status-filters")},{body:{resources:["AIRCRAFT_TYPES"]},queryKey:referenceQueryKeys.list(organizationId,"fleet-status-filters")}]}/></div>
+    <section className="metrics aircraft-summary-metrics mb-[22px] grid grid-cols-[repeat(5,minmax(0,1fr))] gap-3 max-[900px]:grid-cols-3 max-[600px]:grid-cols-2" aria-label="Authorized fleet defect summary">
       <article className="metric-card"><div className="metric-head">TOTAL DEFECTS <span className="metric-icon blue">▦</span></div><strong>{summary.isPending ? "—" : summary.data?.totalDefects ?? "—"}</strong><div className="metric-foot">Visible in your authorized scope</div></article>
       <article className="metric-card"><div className="metric-head">AWAITING REVIEW <span className="metric-icon red">◷</span></div><strong>{summary.isPending ? "—" : summary.data?.awaitingReview ?? "—"}</strong><div className="metric-foot">Reported and under review</div></article>
       <article className="metric-card"><div className="metric-head">IN MAINTENANCE <span className="metric-icon green">↗</span></div><strong>{summary.isPending ? "—" : summary.data?.inMaintenance ?? "—"}</strong><div className="metric-foot">Assigned or in progress</div></article>
+      <article className="metric-card"><div className="metric-head">ON HOLD <span className="metric-icon red">Ⅱ</span></div><strong>{summary.isPending ? "—" : summary.data?.onHold ?? "—"}</strong><div className="metric-foot">Maintenance work temporarily paused</div></article>
       <article className="metric-card"><div className="metric-head">{workflowStatusLabel("CLOSED", workflowStatuses).toUpperCase()} <span className="metric-icon green">✓</span></div><strong>{summary.isPending ? "—" : summary.data?.closed ?? "—"}</strong><div className="metric-foot">With recorded closure status</div></article>
     </section>
     <section className="configuration-table-card fleet-status-card">

@@ -306,6 +306,37 @@ class LocalPostgresOperationalIntegrationTest {
     @Test
     @Transactional
     @Rollback
+    void severityDefaultIsTenantScopedUniqueAndClearedWhenDeactivated() {
+        UUID orgA=createTenant("SEVERITY-DEFAULT-A"),orgB=createTenant("SEVERITY-DEFAULT-B");
+        UUID area=jdbc.queryForObject("SELECT id FROM cabin_areas_mst WHERE operator_id=? AND code='CABIN'",UUID.class,orgA);
+        UUID first=jdbc.queryForObject("SELECT id FROM defect_severities_mst WHERE operator_id=? AND severity_code='LOW' AND isactive=1",UUID.class,orgA);
+        UUID second=jdbc.queryForObject("SELECT id FROM defect_severities_mst WHERE operator_id=? AND severity_code='MEDIUM' AND isactive=1",UUID.class,orgA);
+        UUID inactive=jdbc.queryForObject("SELECT id FROM defect_severities_mst WHERE operator_id=? AND severity_code='HIGH' AND isactive=1",UUID.class,orgA);
+        configuration.deactivate(orgA,"severity-admin", "severities",inactive.toString(),"Retire severity for default validation.");
+        assertThrows(IllegalArgumentException.class,()->configuration.setDefaultSeverity(orgA,"severity-admin",inactive.toString()));
+        assertThrows(ResponseStatusException.class,()->configuration.setDefaultSeverity(orgB,"severity-admin",first.toString()));
+
+        configuration.setDefaultSeverity(orgA,"severity-admin",first.toString());
+        assertTrue(jdbc.queryForObject("SELECT is_default FROM defect_severities_mst WHERE operator_id=? AND id=?",Boolean.class,orgA,first));
+        assertFalse(jdbc.queryForObject("SELECT is_default FROM defect_severities_mst WHERE operator_id=? AND id=?",Boolean.class,orgA,second));
+        var severityField=new FieldDefinition("severity","Severity",FieldType.DROPDOWN,null,true,0,null,null,null,
+            OptionSource.DEFECT_SEVERITIES,null,null,DefectFieldBinding.SEVERITY);
+        var options=forms.optionsFor(orgA,area,severityField,area,null);
+        assertTrue(options.stream().filter(option->option.id().equals(first)).findFirst().orElseThrow().isDefault());
+        assertFalse(options.stream().anyMatch(option->option.id().equals(inactive)));
+
+        configuration.setDefaultSeverity(orgA,"severity-admin",second.toString());
+        assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM defect_severities_mst WHERE operator_id=? AND is_default",Integer.class,orgA));
+        assertEquals(second,UUID.fromString(String.valueOf(configuration.list(orgA,"severities",false).stream().filter(row->Boolean.TRUE.equals(row.get("isDefault"))).findFirst().orElseThrow().get("id"))));
+        configuration.deactivate(orgA,"severity-admin","severities",second.toString(),"Deactivate the selected default severity.");
+        assertEquals(0,jdbc.queryForObject("SELECT count(*) FROM defect_severities_mst WHERE operator_id=? AND is_default",Integer.class,orgA));
+        assertEquals(0,jdbc.queryForObject("SELECT count(*) FROM defect_severities_mst WHERE operator_id=? AND is_default AND isactive<>1",Integer.class,orgA));
+        assertEquals(2,jdbc.queryForObject("SELECT count(*) FROM defect_events_dtl WHERE operator_id=? AND entity_type='SEVERITIES' AND event_type='MASTER_DATA_DEFAULT_CHANGED'",Integer.class,orgA));
+    }
+
+    @Test
+    @Transactional
+    @Rollback
     void aircraftDefectListRouteAllowsAuthorizedAuditorAndKeepsTenantAndPermissionFailuresDistinct() throws Exception {
         UUID org=createTenant("AIRCRAFT-HTTP"),other=createTenant("AIRCRAFT-HTTP-OTHER");
         jdbc.update("INSERT INTO operator_roles_mst(operator_id,role_key,name,permissions,system_role) VALUES(?, 'AUDITOR','Test Auditor','VIEW|REPORT|AUDIT',false),(?, 'AUDIT_ONLY','Audit Only','AUDIT',false),(?, 'REVIEWER_SCOPE','Reviewer Scope','VIEW|REVIEW',false),(?, 'MAINTENANCE_SCOPE','Maintenance Scope','VIEW|PERFORM_ACTION',false),(?, 'ADMIN_SCOPE','Admin Scope','VIEW|ADMINISTER_ORGANIZATION',false)",org,org,org,org,org);
@@ -537,7 +568,8 @@ class LocalPostgresOperationalIntegrationTest {
         assertTrue(reviewerQueue.queue(org,"reviewer.test@ecabin.local",false,0,25,"ALL",null,"reportedAt","DESC").items().stream().anyMatch(row->row.id().equals(approved.id())));
         assertTrue(forms.publishedForDefect(org,approved.id(),FormPurpose.DEFECT_REPORT).isEmpty(),"Initial report forms remain in Report Defect and are not actionable forms on an already-created case.");
         assertTrue(forms.publishedForDefect(org,approved.id(),FormPurpose.REVIEW_DECISION).stream().anyMatch(form->form.id().equals(decisionForm.id())),"The published Reviewer form resolves for the created Galley case.");
-        assertThrows(org.springframework.web.server.ResponseStatusException.class,()->reviewerQueue.decide(org,approved.id(),"maintenance.test@ecabin.local",new ReviewerDecisionRequest("APPROVE",maintenanceTeam,"should be denied")));
+        UUID reviewedSeverityId=jdbc.queryForObject("SELECT id FROM defect_severities_mst WHERE operator_id=? AND severity_code='MEDIUM' AND isactive=1",UUID.class,org);
+        assertThrows(org.springframework.web.server.ResponseStatusException.class,()->reviewerQueue.decide(org,approved.id(),"maintenance.test@ecabin.local",new ReviewerDecisionRequest("APPROVE",maintenanceTeam,null,"should be denied",decisionForm.id(),decisionPublished.id(),reviewedSeverityId,"Unauthorized change")));
         assertTrue(reviewerQueue.decisionOptions(org,approved.id(),"reviewer.test@ecabin.local").maintenanceTeams().stream().anyMatch(team->team.id().equals(maintenanceTeam)),"Reviewer options are available from the case's typed defect details even when the legacy report-submission row is absent.");
         assertThrows(ResponseStatusException.class,()->reviewerQueue.decide(org,approved.id(),"reviewer.test@ecabin.local",new ReviewerDecisionRequest("REJECT",null,"Fix the report",null,decisionForm.id(),UUID.randomUUID())),"A stale or unpublished decision form version cannot be submitted.");
         forms.submit(org,"auditor.test@ecabin.local",approved.id(),new SubmitFormRequest(galleyForm.id(),galleyPublished.id(),approvedAnswers));
@@ -548,16 +580,23 @@ class LocalPostgresOperationalIntegrationTest {
         assertThrows(IllegalArgumentException.class,()->reviewerQueue.decide(org,approved.id(),"reviewer.test@ecabin.local",new ReviewerDecisionRequest("APPROVE",null,null,null,decisionForm.id(),decisionPublished.id())));
         assertThrows(IllegalStateException.class,()->defects.transition(org,approved.id(),"reviewer.test@ecabin.local",new TransitionRequest("ACTION_ASSIGNED","Attempt to bypass the decision operation.",null,null)),"Generic status changes cannot perform Reviewer approval or create Maintenance assignment.");
         assertThrows(IllegalStateException.class,()->defects.transition(org,approved.id(),"reviewer.test@ecabin.local",new TransitionRequest("INSPECTION_REQUIRED","Attempt to bypass the Reviewer decision.",null,null)),"A case cannot bypass the shared Reviewer decision through the generic status transition.");
-        var approval=reviewerQueue.decide(org,approved.id(),"reviewer.test@ecabin.local",new ReviewerDecisionRequest("APPROVE",maintenanceTeam,null,null,decisionForm.id(),decisionPublished.id()));
+        assertThrows(IllegalArgumentException.class,()->reviewerQueue.decide(org,approved.id(),"reviewer.test@ecabin.local",new ReviewerDecisionRequest("APPROVE",maintenanceTeam,null,null,decisionForm.id(),decisionPublished.id(),reviewedSeverityId,"  ")),"A changed severity requires a nonblank justification.");
+        var approval=reviewerQueue.decide(org,approved.id(),"reviewer.test@ecabin.local",new ReviewerDecisionRequest("APPROVE",maintenanceTeam,null,null,decisionForm.id(),decisionPublished.id(),reviewedSeverityId,"Evidence supports a lower assessed severity."));
         assertEquals("ACTION_ASSIGNED",approval.status());
         assertEquals("ACTION_ASSIGNED",defects.get(org,approved.id()).status());
         assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM corrective_actions_dtl WHERE operator_id=? AND defect_id=? AND isactive=1 AND status='ASSIGNED' AND assigned_team='Cabin Maintenance'",Integer.class,org,approved.id()));
         assertEquals("Cabin Maintenance",jdbc.queryForObject("SELECT assigned_team FROM defects_dtl WHERE operator_id=? AND id=?",String.class,org,approved.id()));
+        assertEquals("MEDIUM",jdbc.queryForObject("SELECT severity FROM defects_dtl WHERE operator_id=? AND id=?",String.class,org,approved.id()),"Approval applies the final Reviewer-assessed severity to the current defect.");
+        assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM operational_form_submissions_dtl WHERE operator_id=? AND defect_id=? AND purpose='DEFECT_REPORT' AND snapshot_severity_id=(SELECT id FROM defect_severities_mst WHERE operator_id=? AND severity_code='HIGH')",Integer.class,org,approved.id(),org),"The original Auditor snapshot remains unchanged.");
         assertEquals(0,jdbc.queryForObject("SELECT count(*) FROM inspections_dtl WHERE operator_id=? AND defect_id=?",Integer.class,org,approved.id()),"Reviewer approval must not create an inspection record.");
         assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM defect_events_dtl WHERE operator_id=? AND defect_id=? AND event_type='REVIEW_APPROVED' AND actor_id='reviewer.test@ecabin.local' AND from_status='REPORTED' AND to_status='ACTION_ASSIGNED' AND note='Reviewer approved the report and assigned it to Maintenance.' AND new_state->>'maintenanceTeamId'=?",Integer.class,org,approved.id(),maintenanceTeam.toString()));
         var approvalEvent=defects.events(org,approved.id()).stream().filter(event->event.eventType().equals("REVIEW_APPROVED")).findFirst().orElseThrow();
         assertEquals("APPROVE",approvalEvent.details().decision());
         assertEquals("Cabin Maintenance",approvalEvent.details().maintenanceTeam());
+        assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM defect_events_dtl WHERE operator_id=? AND defect_id=? AND event_type='REVIEW_SEVERITY_CHANGED' AND actor_id='reviewer.test@ecabin.local' AND previous_state->>'severity'='High' AND new_state->>'severity'='Medium' AND new_state->>'reason'='Evidence supports a lower assessed severity.'",Integer.class,org,approved.id()));
+        var severityEvent=defects.events(org,approved.id()).stream().filter(event->event.eventType().equals("REVIEW_SEVERITY_CHANGED")).findFirst().orElseThrow();
+        assertEquals("High → Medium",severityEvent.details().submittedDetails().stream().filter(value->value.label().equals("Reviewer-assessed Severity")).findFirst().orElseThrow().value());
+        assertEquals("Evidence supports a lower assessed severity.",severityEvent.details().submittedDetails().stream().filter(value->value.label().equals("Reason")).findFirst().orElseThrow().value());
         assertThrows(org.springframework.web.server.ResponseStatusException.class,()->reviewerQueue.decide(org,approved.id(),"reviewer.test@ecabin.local",new ReviewerDecisionRequest("REJECT",null,"must be rejected before repeat", "conflicting retry",decisionForm.id(),decisionPublished.id())));
         assertEquals(1,defects.maintenanceWorkQueue(org,"maintenance.test@ecabin.local",0,25,null,null,"assignmentDate","DESC").totalElements());
         assertEquals("Cabin Maintenance",jdbc.queryForObject("SELECT assigned_team FROM corrective_actions_dtl WHERE operator_id=? AND defect_id=? AND isactive=1",String.class,org,approved.id()));
@@ -567,9 +606,10 @@ class LocalPostgresOperationalIntegrationTest {
         var rejectedAnswers=galleyReportAnswers(org,component,condition,"Galley 1","Duplicate finding","Reviewed report.","LOW");
         forms.submit(org,"auditor.test@ecabin.local",rejected.id(),new SubmitFormRequest(galleyForm.id(),galleyPublished.id(),rejectedAnswers));
         int priorAuditEvents=jdbc.queryForObject("SELECT count(*) FROM defect_events_dtl WHERE operator_id=? AND defect_id=?",Integer.class,org,rejected.id());
-        var rejection=reviewerQueue.decide(org,rejected.id(),"reviewer.test@ecabin.local",new ReviewerDecisionRequest("REJECT",null,"The location is unclear.",null,decisionForm.id(),decisionPublished.id()));
+        var rejection=reviewerQueue.decide(org,rejected.id(),"reviewer.test@ecabin.local",new ReviewerDecisionRequest("REJECT",null,"The location is unclear.",null,decisionForm.id(),decisionPublished.id(),reviewedSeverityId,"Submitted evidence supports a higher severity."));
         assertEquals("REWORK",rejection.status());
         assertEquals("REWORK",defects.get(org,rejected.id()).status());
+        assertEquals("LOW",jdbc.queryForObject("SELECT severity FROM defects_dtl WHERE operator_id=? AND id=?",String.class,org,rejected.id()),"A rejected assessment is recorded without changing the operational severity.");
         assertEquals("auditor.test@ecabin.local",jdbc.queryForObject("SELECT reported_by FROM defects_dtl WHERE operator_id=? AND id=?",String.class,org,rejected.id()));
         assertEquals("auditor.test@ecabin.local",jdbc.queryForObject("SELECT assigned_user_id FROM defects_dtl WHERE operator_id=? AND id=?",String.class,org,rejected.id()));
         assertEquals(rejected.id(),defects.getForReporter(org,"auditor.test@ecabin.local",rejected.id()).id());
@@ -580,7 +620,8 @@ class LocalPostgresOperationalIntegrationTest {
         assertFalse(reviewerQueue.queue(org,"reviewer.test@ecabin.local",false,0,25,"ALL",null,"reportedAt","DESC").items().stream().anyMatch(row->row.id().equals(rejected.id())),"Rejected reports leave the review queue.");
         assertEquals(0,jdbc.queryForObject("SELECT count(*) FROM corrective_actions_dtl WHERE operator_id=? AND defect_id=? AND isactive=1",Integer.class,org,rejected.id()));
         assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM defect_events_dtl WHERE operator_id=? AND defect_id=? AND event_type='REVIEW_REJECTED' AND note='Rejected: The location is unclear.' AND to_status='REWORK' AND new_state->>'rejectionReason'='The location is unclear.' AND new_state->>'originalReporter'='auditor.test@ecabin.local' AND new_state->>'assignedUserId'='auditor.test@ecabin.local' AND new_state ? 'assignedTeam' AND new_state->>'assignedTeam' IS NULL",Integer.class,org,rejected.id()));
-        assertEquals(priorAuditEvents+1,jdbc.queryForObject("SELECT count(*) FROM defect_events_dtl WHERE operator_id=? AND defect_id=?",Integer.class,org,rejected.id()),"The rejection appends one event without overwriting earlier history.");
+        assertEquals(priorAuditEvents+2,jdbc.queryForObject("SELECT count(*) FROM defect_events_dtl WHERE operator_id=? AND defect_id=?",Integer.class,org,rejected.id()),"The rejection and changed assessment append events without overwriting earlier history.");
+        assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM defect_events_dtl WHERE operator_id=? AND defect_id=? AND event_type='REVIEW_SEVERITY_CHANGED' AND new_state->>'reason'='Submitted evidence supports a higher severity.'",Integer.class,org,rejected.id()));
         assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM defect_events_dtl WHERE operator_id=? AND defect_id=? AND id=? AND from_status='REPORTED' AND previous_state ? 'assignedTo' AND previous_state ? 'assignedUserId' AND previous_state ? 'assignedTeam' AND jsonb_typeof(previous_state->'assignedTo')='null' AND jsonb_typeof(previous_state->'assignedUserId')='null' AND jsonb_typeof(previous_state->'assignedTeam')='null'",Integer.class,org,rejected.id(),rejection.id()),"The immutable event records null prior assignment fields as typed JSON nulls.");
         assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM notifications_dtl WHERE operator_id=? AND defect_id=? AND recipient_user_id='auditor.test@ecabin.local' AND notification_type='REVIEW_REJECTED' AND source_event_id=?",Integer.class,org,rejected.id(),rejection.id()));
         assertThrows(org.springframework.web.server.ResponseStatusException.class,()->reviewerQueue.decide(org,rejected.id(),"reviewer.test@ecabin.local",new ReviewerDecisionRequest("APPROVE",maintenanceTeam,null,"must conflict",decisionForm.id(),decisionPublished.id())));
@@ -601,6 +642,7 @@ class LocalPostgresOperationalIntegrationTest {
         assertEquals("REWORK",secondRejection.status());
         assertEquals("auditor.test@ecabin.local",jdbc.queryForObject("SELECT assigned_user_id FROM defects_dtl WHERE operator_id=? AND id=?",String.class,org,rejected.id()));
         assertEquals(2,jdbc.queryForObject("SELECT count(*) FROM defect_events_dtl WHERE operator_id=? AND defect_id=? AND event_type='REVIEW_REJECTED'",Integer.class,org,rejected.id()));
+        assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM defect_events_dtl WHERE operator_id=? AND defect_id=? AND event_type='REVIEW_SEVERITY_CHANGED'",Integer.class,org,rejected.id()),"Keeping the original severity on the next review does not append another severity-change event.");
         assertEquals(2,jdbc.queryForObject("SELECT count(*) FROM notifications_dtl WHERE operator_id=? AND defect_id=? AND recipient_user_id='auditor.test@ecabin.local' AND notification_type='REVIEW_REJECTED'",Integer.class,org,rejected.id()));
     }
 

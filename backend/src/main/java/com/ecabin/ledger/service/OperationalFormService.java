@@ -41,11 +41,14 @@ public class OperationalFormService {
     private final ObjectMapper mapper;
     private final FormFieldBindingCatalog bindingCatalog;
     private final DefectPersistenceRequirements persistenceRequirements;
+    private TenantReferenceCache referenceCache;
 
     public OperationalFormService(JdbcTemplate jdbc, ObjectMapper mapper) { this(jdbc,mapper,new FormFieldBindingCatalog(),new DefectPersistenceRequirements(jdbc,new FormFieldBindingCatalog())); }
     @org.springframework.beans.factory.annotation.Autowired
     public OperationalFormService(JdbcTemplate jdbc, ObjectMapper mapper, FormFieldBindingCatalog bindingCatalog) { this(jdbc,mapper,bindingCatalog,new DefectPersistenceRequirements(jdbc,bindingCatalog)); }
     public OperationalFormService(JdbcTemplate jdbc,ObjectMapper mapper,FormFieldBindingCatalog bindingCatalog,DefectPersistenceRequirements persistenceRequirements) {this.jdbc=jdbc;this.mapper=mapper;this.bindingCatalog=bindingCatalog;this.persistenceRequirements=persistenceRequirements;}
+    @org.springframework.beans.factory.annotation.Autowired
+    public void setReferenceCache(TenantReferenceCache referenceCache) { this.referenceCache = referenceCache; }
 
     public List<FormSummary> list(UUID operatorId, boolean includeInactive) {
         String sql = "SELECT f.id,f.form_key,f.name,f.area_id,a.name AS area_name,(SELECT string_agg(am.name, ', ' ORDER BY am.name) FROM operational_form_areas_mst fm JOIN cabin_areas_mst am ON am.operator_id=fm.operator_id AND am.id=fm.area_id WHERE fm.operator_id=f.operator_id AND fm.form_id=f.id) AS area_names,f.purpose,f.workflow_stage,f.isactive,f.updated_at,p.version_number AS published_version,p.id AS published_version_id,d.version_number AS draft_version,d.id AS draft_version_id " +
@@ -112,6 +115,7 @@ public class OperationalFormService {
         int changed=jdbc.update("UPDATE operational_forms_dtl SET area_id=?,purpose=?,workflow_stage=?,updated_at=now(),updated_by=? WHERE operator_id=? AND id=? AND isactive=1",primaryArea,request.purpose().name(),request.workflowStage().name(),actor,operatorId,formId);
         if(changed!=1)throw new ResponseStatusException(HttpStatus.CONFLICT,"The form mapping changed while saving. Reload and try again.");
         audit(operatorId,actor,null,"FORM_MAPPING_UPDATED","FORM",formId,request.reason().trim(),Map.of("areaIds",previousAreas,"purpose",previousPurpose,"workflowStage",previousStage),Map.of("areaIds",areaIds,"purpose",request.purpose().name(),"workflowStage",request.workflowStage().name()));
+        invalidatePublishedFormCaches(operatorId);
     }
 
     private List<UUID> normalizedAreaIds(List<UUID> requested){if(requested==null||requested.isEmpty())throw new IllegalArgumentException("Select at least one cabin area.");if(requested.size()>100||requested.stream().anyMatch(java.util.Objects::isNull)||new HashSet<>(requested).size()!=requested.size())throw new IllegalArgumentException("Cabin areas must be unique valid selections.");return List.copyOf(requested);}
@@ -185,7 +189,7 @@ public class OperationalFormService {
     private void requireNoBrokenActiveWorkflow(UUID operatorId,UUID formId,Map<String,Object> form){
         Object published=form.get("published_version_id");if(published==null)return;
         FormVersion publishedVersion=requireVersion(operatorId,formId,(UUID)published);
-        FormPurpose purpose=publishedVersion.purpose();String[] statuses=switch(purpose){case DEFECT_REPORT->new String[]{"REPORTED"};case REVIEW_DECISION->new String[]{"REPORTED","UNDER_REVIEW"};case INSPECTION->new String[]{"INSPECTION_REQUIRED","INSPECTION_IN_PROGRESS"};case CORRECTIVE_ACTION->new String[]{"ACTION_ASSIGNED","IN_PROGRESS"};case VERIFICATION->new String[]{"AWAITING_VERIFICATION"};case CLOSURE_APPROVAL->new String[]{"APPROVAL_REQUIRED"};case REOPEN->new String[]{"CLOSED"};};
+        FormPurpose purpose=publishedVersion.purpose();String[] statuses=switch(purpose){case DEFECT_REPORT->new String[]{"REPORTED"};case REVIEW_DECISION->new String[]{"REPORTED","UNDER_REVIEW"};case INSPECTION->new String[]{"INSPECTION_REQUIRED","INSPECTION_IN_PROGRESS"};case CORRECTIVE_ACTION->new String[]{"ACTION_ASSIGNED","IN_PROGRESS","ON_HOLD"};case VERIFICATION->new String[]{"AWAITING_VERIFICATION"};case CLOSURE_APPROVAL->new String[]{"APPROVAL_REQUIRED"};case REOPEN->new String[]{"CLOSED"};};
         String marks=String.join(",",java.util.Collections.nCopies(statuses.length,"?"));
         for(UUID areaId:publishedVersion.areaIds()){
             String dependency="SELECT EXISTS(SELECT 1 FROM defects_dtl d WHERE d.operator_id=? AND d.area_id=? AND d.isactive=1 AND d.status IN ("+marks+") AND NOT EXISTS(SELECT 1 FROM operational_forms_dtl f JOIN operational_form_versions_dtl v ON v.operator_id=f.operator_id AND v.form_id=f.id AND v.id=f.published_version_id AND v.status='PUBLISHED' JOIN operational_form_version_areas_dtl va ON va.operator_id=v.operator_id AND va.form_id=v.form_id AND va.form_version_id=v.id WHERE f.operator_id=d.operator_id AND f.id<>? AND f.isactive=1 AND va.area_id=d.area_id AND v.purpose=? AND v.workflow_stage=?))";
@@ -233,6 +237,7 @@ public class OperationalFormService {
         if(changed!=1)throw new ResponseStatusException(HttpStatus.CONFLICT,"The form changed while renaming. Reload and try again.");
         jdbc.update("UPDATE operational_form_versions_dtl SET form_name=?,updated_by=?,updated_at=now() WHERE operator_id=? AND form_id=? AND status='DRAFT'",name,actor,operatorId,formId);
         audit(operatorId,actor,null,"FORM_RENAMED","FORM",formId,request.reason().trim(),Map.of("name",previous,"formKey",before.get("form_key")),Map.of("name",name,"formKey",before.get("form_key")));
+        invalidatePublishedFormCaches(operatorId);
         return list(operatorId,true).stream().filter(form->form.id().equals(formId)).findFirst().orElseThrow();
     }
 
@@ -251,6 +256,7 @@ public class OperationalFormService {
         DeletedForm deleted=new DeletedForm(formId,String.valueOf(form.get("form_key")),String.valueOf(form.get("name")),(UUID)form.get("area_id"),String.valueOf(form.get("area_name")),FormPurpose.valueOf(String.valueOf(form.get("purpose"))),WorkflowStage.valueOf(String.valueOf(form.get("workflow_stage"))));
         Map<String,Object> snapshot=Map.ofEntries(Map.entry("operatorId",operatorId),Map.entry("formId",formId),Map.entry("formKey",deleted.formKey()),Map.entry("name",deleted.name()),Map.entry("areaId",deleted.areaId()),Map.entry("areaName",deleted.areaName()),Map.entry("purpose",deleted.purpose().name()),Map.entry("workflowStage",deleted.workflowStage().name()),Map.entry("deletedVersionIds",versions),Map.entry("mode","PERMANENT_DELETE"),Map.entry("outcome","DELETED"));
         audit(operatorId,actor,null,"FORM_PERMANENTLY_DELETED","FORM",formId,request.reason().trim(),snapshot,Map.of("formId",formId,"formKey",deleted.formKey(),"mode","PERMANENT_DELETE","outcome","DELETED"));
+        invalidatePublishedFormCaches(operatorId);
         return deleted;
     }
 
@@ -345,6 +351,7 @@ public class OperationalFormService {
             audit(operatorId,actor,null,"FORM_MAPPING_RESTORED","FORM",formId,request.reason().trim(),Map.of("areaIds",previousAreas,"purpose",previousPurpose,"workflowStage",previousStage),Map.of("areaIds",restoredAreas,"purpose",source.purpose().name(),"workflowStage",source.workflowStage().name()));
         Map<String,Object> restoredState=new LinkedHashMap<>();restoredState.put("formId",formId);restoredState.put("sourceVersionId",sourceVersionId);restoredState.put("sourceVersionNumber",source.versionNumber());restoredState.put("restoredVersionId",restoredId);restoredState.put("restoredVersionNumber",number);restoredState.put("replacedDraftId",replacedDraft);restoredState.put("areaIds",restoredAreas);restoredState.put("purpose",source.purpose().name());restoredState.put("workflowStage",source.workflowStage().name());
         audit(operatorId,actor,null,"FORM_VERSION_RESTORED","FORM_VERSION",restoredId,request.reason().trim(),replacedDraft==null?Map.of("sourceVersionId",sourceVersionId):Map.of("sourceVersionId",sourceVersionId,"replacedDraftId",replacedDraft),restoredState);
+        invalidatePublishedFormCaches(operatorId);
         return requireVersion(operatorId,formId,restoredId);
     }
 
@@ -371,6 +378,7 @@ public class OperationalFormService {
         int linked=jdbc.update("UPDATE operational_forms_dtl SET published_version_id=?,updated_at=now() WHERE operator_id=? AND id=? AND isactive=1",versionId,operatorId,formId);
         if(published!=1||linked!=1) throw new ResponseStatusException(HttpStatus.CONFLICT,"The form changed while publishing. Reload and try again.");
         audit(operatorId,actor,null,"FORM_VERSION_PUBLISHED","FORM",formId,"Form version published.",null,Map.of("versionId",versionId,"versionNumber",version.versionNumber()));
+        invalidatePublishedFormCaches(operatorId);
         return requireVersion(operatorId,formId,versionId);
     }
 
@@ -384,6 +392,7 @@ public class OperationalFormService {
         else requireNoBrokenActiveWorkflow(operatorId,formId,before);
         jdbc.update("UPDATE operational_forms_dtl SET isactive=?,updated_at=now() WHERE operator_id=? AND id=?",target,operatorId,formId);
         audit(operatorId,actor,null,active?"FORM_REACTIVATED":"FORM_DEACTIVATED","FORM",formId,reason,Map.of("isactive",before.get("isactive")),Map.of("isactive",target));
+        invalidatePublishedFormCaches(operatorId);
     }
 
     public List<FormVersion> versions(UUID operatorId,UUID formId) {
@@ -398,6 +407,17 @@ public class OperationalFormService {
     }
 
     public List<FormForArea> publishedForArea(UUID operatorId,UUID areaId,FormPurpose purpose,WorkflowStage stage) {
+        if(referenceCache==null)return publishedForAreaUncached(operatorId,areaId,purpose,stage);
+        String key=areaId+":"+purpose.name()+":"+stage.name();
+        return referenceCache.get(TenantReferenceCache.Resource.PUBLISHED_FORMS,operatorId,key,()->publishedForAreaUncached(operatorId,areaId,purpose,stage));
+    }
+
+    public List<FormForArea> refreshPublishedForArea(UUID operatorId,UUID areaId,FormPurpose purpose,WorkflowStage stage) {
+        String key=areaId+":"+purpose.name()+":"+stage.name();
+        return referenceCache==null?publishedForAreaUncached(operatorId,areaId,purpose,stage):referenceCache.refresh(TenantReferenceCache.Resource.PUBLISHED_FORMS,operatorId,key,()->publishedForAreaUncached(operatorId,areaId,purpose,stage));
+    }
+
+    private List<FormForArea> publishedForAreaUncached(UUID operatorId,UUID areaId,FormPurpose purpose,WorkflowStage stage) {
         requireActiveArea(operatorId,areaId);
         FormResolutionRules.requireMapping(purpose,stage);
         List<FormForArea> published=jdbc.query("SELECT f.id,f.form_key,v.form_name,va.area_id AS version_area_id,v.purpose AS version_purpose,v.workflow_stage AS version_workflow_stage,v.id AS version_id,v.version_number,v.fields_json::text FROM operational_forms_dtl f JOIN operational_form_versions_dtl v ON v.operator_id=f.operator_id AND v.form_id=f.id AND v.id=f.published_version_id AND v.status='PUBLISHED' JOIN operational_form_version_areas_dtl va ON va.operator_id=v.operator_id AND va.form_id=v.form_id AND va.form_version_id=v.id WHERE f.operator_id=? AND va.area_id=? AND v.purpose=? AND v.workflow_stage=? AND f.isactive=1 ORDER BY v.form_name",(rs,n)->formForArea(rs),operatorId,areaId,purpose.name(),stage.name());
@@ -424,6 +444,10 @@ public class OperationalFormService {
         if(!eligible.isEmpty())return List.copyOf(eligible);
         if(!configurationIssues.isEmpty())throw new ResponseStatusException(HttpStatus.CONFLICT,"No usable defect-report form is currently available for this cabin area.");
         return List.of();
+    }
+
+    private void invalidatePublishedFormCaches(UUID operatorId) {
+        if(referenceCache!=null)referenceCache.invalidateAfterCommit(operatorId,TenantReferenceCache.Resource.PUBLISHED_FORMS,TenantReferenceCache.Resource.FORM_OPTIONS);
     }
 
     /** Search active aircraft for an authorized reporting user; identity is supplied by the controller's validated principal. */
@@ -541,7 +565,7 @@ public class OperationalFormService {
         Map<String,Object> defect=jdbc.query("SELECT area_id,status FROM defects_dtl WHERE operator_id=? AND id=? AND isactive=1",new ColumnMapRowMapper(),operatorId,defectId).stream().findFirst().orElseThrow(()->new ResponseStatusException(HttpStatus.NOT_FOUND,"Defect not found for this organization."));
         String status=String.valueOf(defect.get("status"));
         UUID areaId=(UUID)defect.get("area_id");
-        if(purpose==FormPurpose.CORRECTIVE_ACTION&&!Set.of("ACTION_ASSIGNED","IN_PROGRESS").contains(status))return List.of();
+        if(purpose==FormPurpose.CORRECTIVE_ACTION&&!Set.of("ACTION_ASSIGNED","IN_PROGRESS","ON_HOLD").contains(status))return List.of();
         if(purpose==FormPurpose.DEFECT_REPORT&&(!"REWORK".equals(status)||!isReturnedReport(operatorId,defectId)))return List.of();
         if(purpose==FormPurpose.REVIEW_DECISION){
             if(!Set.of("REPORTED","UNDER_REVIEW").contains(status)||reviewDecisionAwaitingCorrection(operatorId,defectId))return List.of();
@@ -572,12 +596,29 @@ public class OperationalFormService {
     }
 
     public List<FormOption> options(UUID operatorId,UUID formId,UUID versionId,String fieldKey,UUID areaId,UUID componentId) {
+        return resolveOptions(operatorId,formId,versionId,fieldKey,areaId,componentId,false);
+    }
+
+    public List<FormOption> refreshOptions(UUID operatorId,UUID formId,UUID versionId,String fieldKey,UUID areaId,UUID componentId) {
+        return resolveOptions(operatorId,formId,versionId,fieldKey,areaId,componentId,true);
+    }
+
+    private List<FormOption> resolveOptions(UUID operatorId,UUID formId,UUID versionId,String fieldKey,UUID areaId,UUID componentId,boolean forceRefresh) {
         FormForArea form=published(operatorId,formId,versionId,areaId);
         if(areaId!=null&&!areaId.equals(form.areaId())) throw new ResponseStatusException(HttpStatus.NOT_FOUND,"Area was not found for this form.");
         FieldDefinition field=findField(form.configuration(),fieldKey);
         if(field==null || field.optionSource()==null) throw new ResponseStatusException(HttpStatus.NOT_FOUND,"Dropdown field was not found.");
         if(field.binding()==DefectFieldBinding.REVIEW_MAINTENANCE_TEAM)throw new ResponseStatusException(HttpStatus.CONFLICT,"Maintenance-team choices must be loaded from the case-scoped Reviewer decision options endpoint.");
-        return optionsFor(operatorId,form.areaId(),field,areaId,componentId);
+        java.util.function.Supplier<List<FormOption>> loader=()->optionsFor(operatorId,form.areaId(),field,areaId,componentId);
+        if(referenceCache==null||!cacheableOptionSource(field.optionSource()))return loader.get();
+        String discriminator=formId+":"+versionId+":"+fieldKey+":"+(areaId==null?"":areaId)+":"+(componentId==null?"":componentId);
+        return forceRefresh?referenceCache.refresh(TenantReferenceCache.Resource.FORM_OPTIONS,operatorId,discriminator,loader):referenceCache.get(TenantReferenceCache.Resource.FORM_OPTIONS,operatorId,discriminator,loader);
+    }
+
+    public static boolean cacheableOptionSource(OptionSource source) {
+        return source==OptionSource.DEFECT_CATEGORIES||source==OptionSource.DEFECT_SEVERITIES||source==OptionSource.GALLEY_SEVERITIES
+            ||source==OptionSource.CABIN_AREAS||source==OptionSource.CABIN_ZONES||source==OptionSource.COMPONENTS
+            ||source==OptionSource.DEFECT_CONDITIONS||source==OptionSource.FLEETS;
     }
 
     @Transactional
@@ -648,7 +689,7 @@ public class OperationalFormService {
     }
 
     public List<FormSubmission> submissions(UUID operatorId,UUID defectId,String externalUserId,boolean teamScoped,boolean reporterScoped) {
-        String teamVisibility = "EXISTS (SELECT 1 FROM corrective_actions_dtl ca JOIN operator_membership_teams_mst omt ON omt.operator_id=ca.operator_id AND omt.team_name=ca.assigned_team AND omt.external_user_id=? AND omt.isactive=1 JOIN operator_memberships_mst om ON om.operator_id=omt.operator_id AND om.external_user_id=omt.external_user_id AND om.isactive=1 JOIN maintenance_teams_mst mt ON mt.operator_id=omt.operator_id AND mt.name=omt.team_name AND mt.isactive=1 WHERE ca.operator_id=d.operator_id AND ca.defect_id=d.id AND ca.assigned_team=d.assigned_team AND ca.isactive=1 AND ca.status IN ('ASSIGNED','IN_PROGRESS','ON_HOLD') AND d.status IN ('ACTION_ASSIGNED','IN_PROGRESS'))";
+        String teamVisibility = "EXISTS (SELECT 1 FROM corrective_actions_dtl ca JOIN operator_membership_teams_mst omt ON omt.operator_id=ca.operator_id AND omt.team_name=ca.assigned_team AND omt.external_user_id=? AND omt.isactive=1 JOIN operator_memberships_mst om ON om.operator_id=omt.operator_id AND om.external_user_id=omt.external_user_id AND om.isactive=1 JOIN maintenance_teams_mst mt ON mt.operator_id=omt.operator_id AND mt.name=omt.team_name AND mt.isactive=1 WHERE ca.operator_id=d.operator_id AND ca.defect_id=d.id AND ca.isactive=1 AND ca.status IN ('ASSIGNED','IN_PROGRESS','ON_HOLD') AND ca.id=(SELECT latest.id FROM corrective_actions_dtl latest WHERE latest.operator_id=ca.operator_id AND latest.defect_id=ca.defect_id AND latest.isactive=1 ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1) AND d.status IN ('ACTION_ASSIGNED','IN_PROGRESS','ON_HOLD'))";
         Boolean visible=jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM defects_dtl d WHERE d.operator_id=? AND d.id=? AND d.isactive=1 AND (?=false OR d.reported_by=?) AND (?=false OR "+teamVisibility+"))",Boolean.class,operatorId,defectId,reporterScoped,externalUserId,teamScoped,externalUserId);
         if(!Boolean.TRUE.equals(visible)) throw new ResponseStatusException(HttpStatus.NOT_FOUND,"Defect not found.");
         return submissions(operatorId,defectId);
@@ -743,7 +784,7 @@ public class OperationalFormService {
         requireActiveArea(operatorId,selectedArea);
         return switch(field.optionSource()) {
             case DEFECT_CATEGORIES -> jdbc.query("SELECT id,code,name FROM defect_categories_mst WHERE operator_id=? AND isactive=1 ORDER BY name LIMIT 500",(rs,n)->new FormOption(rs.getObject("id",UUID.class),rs.getString("code"),rs.getString("name")),operatorId);
-            case DEFECT_SEVERITIES, GALLEY_SEVERITIES -> jdbc.query("SELECT id,severity_code AS code,severity_name AS name FROM defect_severities_mst WHERE operator_id=? AND isactive=1 ORDER BY sort_order,severity_code LIMIT 500",(rs,n)->new FormOption(rs.getObject("id",UUID.class),rs.getString("code"),rs.getString("name")),operatorId);
+            case DEFECT_SEVERITIES, GALLEY_SEVERITIES -> jdbc.query("SELECT id,severity_code AS code,severity_name AS name,is_default FROM defect_severities_mst WHERE operator_id=? AND isactive=1 ORDER BY sort_order,severity_code LIMIT 500",(rs,n)->new FormOption(rs.getObject("id",UUID.class),rs.getString("code"),rs.getString("name"),rs.getBoolean("is_default")),operatorId);
             case REVIEW_DECISIONS -> List.of(new FormOption(UUID.nameUUIDFromBytes("REVIEW_DECISION:APPROVE".getBytes(java.nio.charset.StandardCharsets.UTF_8)),"APPROVE","Approve"),new FormOption(UUID.nameUUIDFromBytes("REVIEW_DECISION:REJECT".getBytes(java.nio.charset.StandardCharsets.UTF_8)),"REJECT","Reject"));
             case CLOSURE_DECISIONS -> List.of(new FormOption(UUID.nameUUIDFromBytes("CLOSURE_DECISION:ACCEPT".getBytes(java.nio.charset.StandardCharsets.UTF_8)),"ACCEPT","Accept"),new FormOption(UUID.nameUUIDFromBytes("CLOSURE_DECISION:DECLINE".getBytes(java.nio.charset.StandardCharsets.UTF_8)),"DECLINE","Decline"));
             case MAINTENANCE_ACTION_STATUSES -> List.of("WORK_IN_PROGRESS","ON_HOLD","CLOSE_SUBMITTED").stream().map(code->new FormOption(UUID.nameUUIDFromBytes(("MAINTENANCE_ACTION:"+code).getBytes(java.nio.charset.StandardCharsets.UTF_8)),code,switch(code){case "WORK_IN_PROGRESS"->"Work in Progress";case "ON_HOLD"->"On Hold";default->"Close Submitted";})).toList();

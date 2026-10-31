@@ -224,6 +224,6 @@ export default function AircraftRegistrationSelect({
       <option value="">Select an aircraft registration</option>
       {selected && <option value={selected.id}>{aircraftOptionLabel(selected)}</option>}
     </select>
-    {selected && <p className="selected-aircraft-context m-0 text-xs text-[#526173]" role="status">Selected aircraft: <strong>{selected.tailNumber}</strong> · MSN <strong>{selected.msnNumber || "—"}</strong> · {selected.aircraftType}</p>}
+    {selected && <p className="selected-aircraft-context m-0 text-xs text-[#526173]" role="status">Selected aircraft: <strong>{selected.tailNumber}</strong>{selected.aircraftType ? <> · {selected.aircraftType}</> : null}</p>}
   </div>;
 }

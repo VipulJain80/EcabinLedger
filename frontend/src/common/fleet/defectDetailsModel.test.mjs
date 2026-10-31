@@ -1,14 +1,22 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { answersFromReportSnapshot, canReassignMaintenance, defectDetailsRequestPath, formatHistoryDate, newestFirst, safeReturnPath, zoneLocationSeatValue } from "./defectDetailsModel.ts";
+import { answersFromReportSnapshot, canReassignMaintenance, defectDetailsRequestPath, effectiveDefectStatus, formatHistoryDate, newestFirst, safeReturnPath, zoneLocationSeatValue } from "./defectDetailsModel.ts";
 
 test("maintenance reassignment is offered only with permission, an active action id, and a supported workflow state", () => {
   assert.equal(canReassignMaintenance(["ASSIGN_ACTION"], "action-1", "ACTION_ASSIGNED"), true);
   assert.equal(canReassignMaintenance(["ASSIGN_ACTION"], "action-1", "IN_PROGRESS"), true);
+  assert.equal(canReassignMaintenance(["ASSIGN_ACTION"], "action-1", "ON_HOLD"), true);
   assert.equal(canReassignMaintenance(["ASSIGN_ACTION"], null, "ACTION_ASSIGNED"), false);
   assert.equal(canReassignMaintenance(["ASSIGN_ACTION"], "action-1", "CLOSED"), false);
   assert.equal(canReassignMaintenance(["PERFORM_ACTION"], "action-1", "IN_PROGRESS"), false);
+});
+
+test("held corrective action takes display priority for legacy and new defect status pairs", () => {
+  assert.equal(effectiveDefectStatus("IN_PROGRESS", "ON_HOLD"), "ON_HOLD");
+  assert.equal(effectiveDefectStatus("ON_HOLD", "ON_HOLD"), "ON_HOLD");
+  assert.equal(effectiveDefectStatus("IN_PROGRESS", "IN_PROGRESS"), "IN_PROGRESS");
+  assert.equal(effectiveDefectStatus("REPORTED", "ON_HOLD"), "REPORTED", "unexpected combinations do not mask an unrelated workflow state");
 });
 
 test("activity is explicitly sorted newest first without mutating the response", () => {

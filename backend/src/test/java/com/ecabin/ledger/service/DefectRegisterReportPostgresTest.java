@@ -92,6 +92,31 @@ class DefectRegisterReportPostgresTest {
     }
 
     @Test
+    void v74AddsOnlyTheApprovedOnHoldStatusAndKeepsV69Statuses() {
+        assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM flyway_schema_history WHERE version='74' AND success",Integer.class));
+        assertEquals(1,jdbc.queryForObject("SELECT count(*) FROM workflow_status_master WHERE module_code='DEFECT' AND status_code='ON_HOLD' AND display_name='On Hold' AND alias_name='On Hold' AND description='Maintenance work is temporarily paused.' AND sort_order=8 AND is_active AND NOT is_initial AND NOT is_terminal",Integer.class));
+        String definition=jdbc.queryForObject("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='defects_dtl'::regclass AND conname='defects_status_check'",String.class);
+        for(String status:List.of("REPORTED","UNDER_REVIEW","INSPECTION_REQUIRED","INSPECTION_IN_PROGRESS","INSPECTION_COMPLETE","ACTION_ASSIGNED","IN_PROGRESS","AWAITING_VERIFICATION","VERIFIED","APPROVAL_REQUIRED","CLOSED","REJECTED","REWORK","CANCELLED","REOPENED","ON_HOLD"))assertTrue(definition.contains(status),"Constraint retains status "+status);
+    }
+
+    @Test
+    void reportUsesLatestActiveActionForLegacyAndNewHeldCasesAndFiltersAsOnHold() {
+        String actor="on-hold-viewer-"+tenant;
+        addRoleAndMember(actor,"VIEW|REPORT");
+        UUID legacy=addDefect("LEGACY_HELD",actor,"GALLEY","IN_PROGRESS",null,"Cabin Maintenance",Instant.parse("2026-10-03T10:00:00Z"));
+        UUID modern=addDefect("NEW_HELD",actor,"GALLEY","ON_HOLD",null,"Cabin Maintenance",Instant.parse("2026-10-03T11:00:00Z"));
+        UUID oldAction=UUID.randomUUID(),latestAction=UUID.randomUUID(),newAction=UUID.randomUUID();
+        jdbc.update("INSERT INTO corrective_actions_dtl(id,operator_id,defect_id,created_by_user_id,assigned_team,description,priority,status,created_at) VALUES(?,?,? ,?,'Cabin Maintenance','prior assignment','MEDIUM','IN_PROGRESS','2026-10-03T10:01:00Z')",oldAction,tenant,legacy,actor);
+        jdbc.update("INSERT INTO corrective_actions_dtl(id,operator_id,defect_id,created_by_user_id,assigned_team,description,priority,status,created_at) VALUES(?,?,? ,?,'Cabin Maintenance','current held assignment','MEDIUM','ON_HOLD','2026-10-03T10:02:00Z')",latestAction,tenant,legacy,actor);
+        jdbc.update("INSERT INTO corrective_actions_dtl(id,operator_id,defect_id,created_by_user_id,assigned_team,description,priority,status,created_at) VALUES(?,?,? ,?,'Cabin Maintenance','new held assignment','MEDIUM','ON_HOLD','2026-10-03T11:01:00Z')",newAction,tenant,modern,actor);
+        List<Result> results=call(tenant,actor,"ON_HOLD_TEST",Map.of("status","ON_HOLD"),0,25,"[]");
+        assertEquals(Set.of(legacy.toString(),modern.toString()),rowIds(results));
+        assertTrue(results.stream().allMatch(row->"On Hold".equals(row.row().get("status").asText())));
+        assertEquals(2,defects.fleetDefectSummary(tenant,actor,false,false).onHold());
+        assertEquals(0,defects.fleetDefectSummary(tenant,actor,false,false).inMaintenance());
+    }
+
+    @Test
     void functionReturnsExactConfiguredRowKeysAndUsesInclusiveIstDateBoundariesAndTrueTotals() throws Exception {
         String actor = "report-viewer-" + tenant;
         addRoleAndMember(actor, "VIEW|REPORT");

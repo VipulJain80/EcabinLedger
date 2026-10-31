@@ -29,7 +29,7 @@ type Request = (path: string, init?: RequestInit) => Promise<Response>;
 const human = (value: string) => value.replaceAll("_", " ").toLowerCase().replace(/\b\w/g, (character) => character.toUpperCase());
 const dateTime = formatDateTime;
 
-export default function MaintenanceWorkQueuePage({ request, onOpen }: { request: Request; onOpen: (defectId: string) => void }) {
+export default function MaintenanceWorkQueuePage({ request, onOpen, organizationId }: { request: Request; onOpen: (defectId: string) => void; organizationId:string }) {
   const workflowStatuses = useDefectWorkflowStatuses(request).data?.items || [];
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(25);
@@ -37,7 +37,7 @@ export default function MaintenanceWorkQueuePage({ request, onOpen }: { request:
   const [actionStatus, setActionStatus] = useState("ALL");
   const [sorting, setSorting] = useState<SortingState>([{ id: "assignmentDate", desc: true }]);
   const query = useQuery<ServerTablePage<WorkItem>>({
-    queryKey: ["maintenance-work-queue", page, pageSize, search, actionStatus, sorting],
+    queryKey: ["maintenance-work-queue", organizationId, page, pageSize, search, actionStatus, sorting],
     queryFn: async ({ signal }) => {
       const params = new URLSearchParams({ page: String(page), size: String(pageSize), actionStatus });
       if (search.trim()) params.set("search", search.trim());

@@ -7,12 +7,14 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.sql.ResultSet;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.ResultSetExtractor;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
+import static org.mockito.ArgumentMatchers.argThat;
 
 class OperationalFormServiceTest {
     private final OperationalFormService service=new OperationalFormService(null,new ObjectMapper());
@@ -98,6 +100,30 @@ class OperationalFormServiceTest {
 
         assertThrows(IllegalArgumentException.class,
             ()->fixture.service().resolveDefectReport(operator,area,fixture.formId(),fixture.versionId(),Map.of("severity",severityId.toString())));
+    }
+
+    @Test void activeSeverityOptionsExposeTheConfiguredDefaultAndKeepTheOptionId() throws Exception {
+        JdbcTemplate jdbc=mock(JdbcTemplate.class);
+        UUID severityId=UUID.randomUUID();
+        ResultSet rs=mock(ResultSet.class);
+        when(jdbc.queryForObject(contains("SELECT EXISTS(SELECT 1 FROM cabin_areas_mst"),eq(Boolean.class),any(Object[].class))).thenReturn(true);
+        when(rs.getObject("id",UUID.class)).thenReturn(severityId);
+        when(rs.getString("code")).thenReturn("MAJOR");
+        when(rs.getString("name")).thenReturn("Major");
+        when(rs.getBoolean("is_default")).thenReturn(true);
+        when(jdbc.query(contains("FROM defect_severities_mst"),any(RowMapper.class),any(Object[].class))).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked") RowMapper<FormOption> mapper=invocation.getArgument(1);
+            return List.of(mapper.mapRow(rs,0));
+        });
+        OperationalFormService optionsService=new OperationalFormService(jdbc,new ObjectMapper());
+
+        List<FormOption> options=optionsService.optionsFor(operator,area,severityField(),area,null);
+
+        assertEquals(1,options.size());
+        assertEquals(severityId,options.get(0).id());
+        assertEquals("MAJOR",options.get(0).code());
+        assertTrue(options.get(0).isDefault());
+        verify(jdbc).query(argThat(sql->sql.contains("is_default")&&sql.contains("ORDER BY sort_order,severity_code")),any(RowMapper.class),any(Object[].class));
     }
 
     private ResolverFixture resolver(List<FieldDefinition> fields,List<FormOption> options,Map<String,Boolean> requiredColumns){

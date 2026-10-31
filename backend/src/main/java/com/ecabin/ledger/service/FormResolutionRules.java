@@ -31,7 +31,7 @@ final class FormResolutionRules {
         }
         if (purpose == FormPurpose.REVIEW_DECISION && !Set.of("REPORTED", "UNDER_REVIEW").contains(status))
             throw new ResponseStatusException(HttpStatus.CONFLICT, "The Reviewer decision form is not applicable to this workflow status.");
-        if (purpose == FormPurpose.CORRECTIVE_ACTION && Set.of("ACTION_ASSIGNED","IN_PROGRESS").contains(status)) return WorkflowStage.IN_PROGRESS;
+        if (purpose == FormPurpose.CORRECTIVE_ACTION && Set.of("ACTION_ASSIGNED","IN_PROGRESS","ON_HOLD").contains(status)) return WorkflowStage.IN_PROGRESS;
         WorkflowStage stage;
         try { stage = WorkflowStage.valueOf(status); }
         catch (IllegalArgumentException ex) { throw new ResponseStatusException(HttpStatus.CONFLICT, "No operational form is available for this workflow status."); }

@@ -3095,3 +3095,214 @@ Verification:
 - `mvn -f backend/pom.xml -DskipTests test-compile` — passed; main and test sources compile.
 - The PostgreSQL integration test requires `ECABIN_DB_VERIFY=true` and the configured `ecabin_ledger` database. It was not run because this session has no confirmed disposable PostgreSQL target; no migrations or database writes were run.
 - `git diff --check` — passed.
+2026-10-30 — Standardize evidence document actions
+
+Extracted the document card used by Supporting documents into a shared presentation component, then reused it in Reviewer decision, Closure Review, and the AUDIT TRAIL activity timeline. Timeline evidence now shows the complete category, filename, source description, uploader and timestamp, evidence type, file size, and `View` action. All document actions use the same `button-secondary` style and label. Unavailable evidence remains disabled and labeled `Unavailable`; existing authenticated preview/open handlers are unchanged.
+
+Files modified:
+- `frontend/src/common/fleet/DefectDetailsPage.tsx` — align Supporting documents action styling and label.
+- `frontend/src/common/fleet/EvidenceDocumentCard.tsx` — shared document card and secondary View action.
+- `frontend/src/common/fleet/ReviewerDecisionForm.tsx` — use the shared complete document card for Auditor report evidence.
+- `frontend/src/common/forms/OperationalFormRenderer.tsx` — use the shared document card for Closure Review evidence.
+- `frontend/src/common/fleet/ActivityTimeline.tsx` — replace the filename-only action with the shared complete document card.
+- `updatesfiles.me` — record this change.
+
+No document access behavior, authorization, download, or preview logic was changed.
+2026-10-30 — Hide form version numbers in the Activity timeline
+
+Removed the version suffix from form labels in AUDIT TRAIL → Activity timeline. Form name and purpose remain visible; backend audit records, form version history, and version management are unchanged.
+
+Files modified:
+- `frontend/src/common/fleet/ActivityTimeline.tsx` — omit formVersionNumber from the displayed form description.
+- `updatesfiles.me` — record this update.
+
+2026-10-30 — Hide redundant evidence upload audit note
+
+The Activity timeline no longer repeats the upload note containing the filename and `NOT_SCANNED` status for `ATTACHMENT_UPLOADED` events. The event entry and evidence document card remain, and audit data and scan-state behavior are unchanged.
+
+Files modified:
+- `frontend/src/common/fleet/ActivityTimeline.tsx` — suppress only the generated note for evidence upload events.
+- `updatesfiles.me` — record this update.
+2026-10-30 — Put Activity timeline title and metadata on one row
+
+Changed each audit entry summary to a flex row with vertically centered items and consistent horizontal spacing. The title uses medium weight; actor and timestamp use muted gray. Flex wrapping is enabled for narrow screens, while the row remains horizontal when there is sufficient desktop width. Audit data and interactions are unchanged.
+
+Files modified:
+- `frontend/src/common/fleet/ActivityTimeline.tsx` — adjust all entry summaries with responsive flex layout.
+- `updatesfiles.me` — record this update.
+
+2026-10-30 — Add reviewer-assessed Severity
+
+Reviewer decision now starts with the Severity from the latest Auditor report snapshot and lets an authorized Reviewer retain or change it using active, tenant-scoped Severity Master values. A changed value requires a reason. The Auditor’s submitted snapshot remains unchanged. On approval, the chosen severity becomes the current defect severity; on rejection, the assessment is recorded without changing the operational severity. A severity change appends an immutable `REVIEW_SEVERITY_CHANGED` activity event with before/after labels, reviewer identity, timestamp, and justification. Unchanged values do not append a separate severity-change event. The existing review decision event retains the assessment for backward-compatible persistence, so no database migration was needed.
+
+Files modified:
+- `backend/src/main/java/com/ecabin/ledger/api/ApiModels.java` — add optional reviewer severity and change-reason fields to the decision request while retaining old constructor/API compatibility.
+- `backend/src/main/java/com/ecabin/ledger/service/ReviewerQueueService.java` — resolve the latest submitted severity, validate tenant-owned active changes and conditional reason, apply approved values, and append the change event transactionally.
+- `backend/src/main/java/com/ecabin/ledger/service/DefectService.java` — project severity-change event details for the Activity timeline.
+- `backend/src/test/java/com/ecabin/ledger/service/LocalPostgresOperationalIntegrationTest.java` — cover changed approval and rejection assessments, unchanged Auditor snapshots, reason validation, authorization, and no extra event for unchanged values.
+- `frontend/src/common/fleet/ReviewerDecisionForm.tsx` — show the read-only Auditor value and editable Reviewer assessment with conditional justification.
+- `frontend/src/common/fleet/reviewerSeverityModel.mjs` — isolate initial-value and change-reason rules.
+- `frontend/src/common/fleet/reviewerSeverityModel.test.mjs` — test inherited values, legacy fallback, and conditional reason rules.
+- `frontend/src/common/fleet/ActivityTimeline.tsx` — render the severity-change event using its recorded details without repeating the event note.
+- `updatesfiles.me` — record this update.
+
+Verification:
+- `mvn -f backend/pom.xml -DskipTests test-compile` — passed.
+- `pnpm --dir frontend exec node --test src/common/fleet/reviewerSeverityModel.test.mjs` — 5 tests passed.
+- `pnpm --dir frontend exec tsc --noEmit` — passed.
+- `pnpm --dir frontend lint` — passed with two existing warnings in `AttachmentPreviewDialog.tsx` and `OperationalFormRenderer.tsx`.
+- `NEXT_PUBLIC_API_BASE_URL=https://localhost:8080/api/v1 pnpm --dir frontend exec next build --webpack` — passed. The first attempt without this required build variable stopped in Next configuration before compilation.
+- `mvn -f backend/pom.xml test` — passed: 240 tests, 0 failures, 0 errors; 55 skipped. The PostgreSQL workflow tests are opt-in and were skipped; no database migrations or writes were run. Testcontainers also reported that Docker is unavailable.
+- `git diff --check` — passed.
+- No migrations or database records were changed.
+
+2026-10-30 — Rename Reviewer Decision severity field
+
+Renamed the reviewer-controlled field and its validation prompts from “Reviewer-assessed Severity” to “Severity”. The separate read-only “Auditor-reported Severity” context remains labeled as before. Severity selection, conditional reason validation, and persistence behavior are unchanged.
+
+Files modified:
+- `frontend/src/common/fleet/ReviewerDecisionForm.tsx` — rename the displayed field and client-side validation messages.
+- `backend/src/main/java/com/ecabin/ledger/service/ReviewerQueueService.java` — align server validation messages.
+- `updatesfiles.me` — record this update.
+
+2026-10-30 — Add explicit ON_HOLD maintenance workflow support
+
+Added an explicit DEFECT/ON_HOLD workflow status for new cases while preserving legacy records where the defect remains IN_PROGRESS and its latest active corrective action is ON_HOLD. The latest active corrective action is selected consistently by tenant and defect, ordered by `created_at DESC, id DESC`. Held cases display as On Hold, are excluded from In Maintenance, and appear in a separate Fleet Status count. Reassignment from a held action cancels it, creates a replacement ASSIGNED action, moves the defect to ACTION_ASSIGNED, and records the reassignment transactionally. Repeated hold/resume requests return the current state without duplicate audit entries or timestamp updates.
+
+Files modified or added for this update:
+- `backend/src/main/resources/db/migration/V74__support_on_hold_workflow.sql` — guarded status constraint update, safe global Workflow Status Master insertion, and V61 report function update for effective held status and reviewer visibility.
+- `backend/src/main/java/com/ecabin/ledger/api/ApiModels.java` — expose corrective-action status and the separate On Hold fleet count with compatibility constructors.
+- `backend/src/main/java/com/ecabin/ledger/service/DefectWorkflow.java` — allow the approved hold, resume, and reassignment status transitions.
+- `backend/src/main/java/com/ecabin/ledger/service/DefectService.java` — apply latest-action status and assignment to defect lists, maintenance/reviewer visibility, fleet dashboard counts, aircraft summaries, report inputs, and exports.
+- `backend/src/main/java/com/ecabin/ledger/service/MaintenanceActionService.java` — synchronize defect/action status on hold and resume, enforce idempotent success, lock the current action and defect, and retain authorization checks.
+- `backend/src/main/java/com/ecabin/ledger/service/OperationalWorkflowService.java` — permit reassignment of the latest held action through cancel-and-replace behavior and keep action transitions bound to the latest active action.
+- `backend/src/main/java/com/ecabin/ledger/service/ReviewerQueueService.java` — use latest-action status for queue status, filtering, and ordering while preserving reviewer checks.
+- `backend/src/main/java/com/ecabin/ledger/service/AttachmentService.java` — apply current action assignment for evidence access.
+- `backend/src/main/java/com/ecabin/ledger/service/NotificationService.java` — resolve maintenance notification access through the latest active action.
+- `backend/src/main/java/com/ecabin/ledger/service/OperationalFormService.java` — allow the current assigned maintenance team to resolve corrective-action forms for held cases.
+- `backend/src/main/java/com/ecabin/ledger/service/FormResolutionRules.java` — resolve held cases to the corrective-action workflow stage.
+- `frontend/src/common/fleet/defectDetailsModel.ts` and `.test.mjs` — define and test held-status display and reassignment eligibility.
+- `frontend/src/common/forms/formResolution.ts` — resolve corrective-action forms for ON_HOLD.
+- `frontend/src/common/fleet/DefectDetailsPage.tsx`, `AircraftDefectListPage.tsx`, `ReviewerWorkQueuePage.tsx`, `FleetStatusPage.tsx`, and `frontend/src/app/loginhome/page.tsx` — present effective status, expose the queue filter, and show the separate On Hold KPI.
+- `backend/src/test/java/com/ecabin/ledger/service/DefectWorkflowTest.java` — cover status transitions.
+- `backend/src/test/java/com/ecabin/ledger/service/MaintenanceActionHoldIdempotencyTest.java` — cover repeated hold/resume requests for legacy and new combinations and verify unauthorized callers cannot use idempotent success.
+- `backend/src/test/java/com/ecabin/ledger/service/DefectRegisterReportPostgresTest.java` — add disposable PostgreSQL migration, report-filter, visibility, and dashboard regression coverage.
+- `updatesfiles.me` — record this update.
+
+Verification:
+- Targeted backend unit tests passed: 8 tests, 0 failures/errors; 8 PostgreSQL Testcontainers tests were skipped because Docker is unavailable.
+- Frontend Node tests passed: 17 tests, 0 failures.
+- `pnpm exec tsc --noEmit` — passed.
+- `pnpm lint` — passed with two warnings in `AttachmentPreviewDialog.tsx` and `OperationalFormRenderer.tsx`.
+- `mvn -f backend/pom.xml -DskipTests package -q` — passed.
+- `git diff --check` — passed.
+- V74 was not applied to any database. Disposable PostgreSQL migration/report verification remains pending because no Docker environment is available; the shared development database was not accessed or changed.
+
+2026-10-31 — Configure the default Severity for new defect reports
+
+Added an organization-managed default severity to Severity Master. Administrators can select one active severity in the new Default column; selecting another changes the organization default, and deactivating the chosen severity clears it safely. The API uses the authenticated organization, verifies that the target severity is active and tenant-owned, serializes updates on the organization row, and records the change in the existing audit event stream. A database check and partial unique index enforce active-only and at-most-one-default constraints.
+
+New defect-report preparation loads the existing tenant-scoped active severity options, chooses the configured default, or falls back to the first option in the existing order. It keeps the option ID as the answer, while the existing backend mapping still persists the stable severity code. Existing answers, edit flows, and reviewer severity are not initialized from this setting. If the active option list is empty, the new-report severity control remains blank and required. Existing organizations are not assigned an automatic default; they use the ordered first-active fallback until an administrator selects one.
+
+Files modified or added:
+- `backend/src/main/resources/db/migration/V75__organization_default_defect_severity.sql` — add the default flag, active-only check, and per-organization partial unique index. Not applied to a database.
+- `backend/src/main/java/com/ecabin/ledger/api/ConfigurationController.java` — add the admin-only POST `/api/v1/configuration/severities/{id}/default` route, deriving organization and actor from authentication.
+- `backend/src/main/java/com/ecabin/ledger/api/FormModels.java` — include an additive `isDefault` field in form option responses while retaining the three-argument constructor.
+- `backend/src/main/java/com/ecabin/ledger/service/ConfigurationService.java` — include default state in Severity Master reads/exports, update the default transactionally with tenant serialization and audit, and clear it when its severity is deactivated.
+- `backend/src/main/java/com/ecabin/ledger/service/OperationalFormService.java` — return the configured default flag with existing ordered active tenant severity options.
+- `backend/src/test/java/com/ecabin/ledger/api/ConfigurationControllerSeverityDefaultTest.java` — verify authenticated tenant/actor resolution and administrator authorization.
+- `backend/src/test/java/com/ecabin/ledger/service/OperationalFormServiceTest.java` — verify active severity option IDs and default metadata.
+- `backend/src/test/java/com/ecabin/ledger/service/LocalPostgresOperationalIntegrationTest.java` — add opt-in PostgreSQL coverage for tenant isolation, active-only selection, uniqueness, option metadata, audit, and clearing on deactivation.
+- `frontend/src/app/configuration.tsx` — add the Severity Master Default radio column and update action.
+- `frontend/src/common/forms/OperationalFormRenderer.tsx` — initialize only a new preparation-mode defect report from the returned default/fallback, preserving manually touched and pre-existing values.
+- `frontend/src/common/forms/severityDefaultModel.mjs` and `.test.mjs` — isolate and test default selection/fallback and initialization guards.
+- `updatesfiles.me` — record this update.
+
+Verification:
+- `pnpm exec node --test src/common/forms/severityDefaultModel.test.mjs src/common/forms/defectReportMapping.test.mjs` — 14 tests passed.
+- `pnpm exec tsc --noEmit` — passed.
+- `pnpm exec eslint src/app/configuration.tsx src/common/forms/OperationalFormRenderer.tsx src/common/forms/severityDefaultModel.mjs src/common/forms/severityDefaultModel.test.mjs` — passed with one existing unused-import warning in `OperationalFormRenderer.tsx` (`formatDateTime`).
+- `mvn -f backend/pom.xml -Dtest=OperationalFormServiceTest,ConfigurationControllerSeverityDefaultTest test` — 32 tests passed, 0 failures/errors/skips.
+- `mvn -f backend/pom.xml -DskipTests package` — passed, including test-source compilation.
+- `git diff --check` — passed.
+- The opt-in PostgreSQL integration test was not run because it targets the configured shared schema unless a disposable database is explicitly supplied. No shared database was accessed or modified; V75 was not applied.
+
+2026-10-31 — Move default Severity selection into the Severity edit dialog
+
+Removed the Default column and its controls from the Severity Master table. The Set as default action is now inside the severity's Edit dialog, alongside the severity configuration. It uses the existing tenant-authenticated default endpoint and refreshes the table after success.
+
+Bulk upload was checked: its existing Severity CSV template and import mapping do not include an `is_default` field, and imports use create-only behavior. Therefore bulk upload does not set, replace, or clear the configured default. Administrators set the default through the Severity Edit dialog after importing severities.
+
+Files modified:
+- `frontend/src/app/configuration.tsx` — move default selection from the table into the Severity Edit dialog.
+- `updatesfiles.me` — record this update and the verified bulk-upload behavior.
+
+2026-10-31 — Remove implicit database credential fallback; audit the Defect Register Area filter
+
+The base Spring configuration now requires datasource URL, username, and password environment variables instead of silently targeting a local PostgreSQL database with embedded credentials. Flyway uses its explicitly supplied credentials when configured, and otherwise the already-required datasource credentials. Local development remains configured through the documented `.env` loading steps. The Area filter was traced but left unchanged: it sends a `location` value, while tenant cabin-area codes and persisted defect locations are not equivalent for all areas (for example, Entry Area maps to the CABIN domain location). Supporting arbitrary configured areas safely requires an area-ID-based list filter and a backward-compatible API/query change; sending area codes through the current location filter would produce incorrect or rejected results.
+
+Files modified:
+- `backend/src/main/resources/application.properties` — require datasource environment variables and remove hardcoded PostgreSQL URL and credentials.
+- `README.md` — document fail-closed database configuration and update migration credential guidance.
+- `updatesfiles.me` — record the audit findings and changes.
+
+Remaining finding: `DefectService.list` validates the `location` filter against a fixed domain-location list and matches `defects_dtl.location`. A separate tenant-scoped `areaId` filter is needed before replacing the UI options with configurable cabin-area records.
+
+2026-10-31 — Fix Fleet Status SQL scope grouping
+
+The provided Fleet Status request log showed PostgreSQL rejecting the generated open-defect count SQL near `AS`. The maintenance visibility predicate was missing a closing parenthesis before the reviewer visibility predicate, so the correlated count expression was malformed. Closed the maintenance predicate before combining it with reviewer scope; tenant, reporter, team-membership, reviewer-membership, ON_HOLD, pagination, and sorting logic remain in place.
+
+Files modified:
+- `backend/src/main/java/com/ecabin/ledger/service/DefectService.java` — close the maintenance scope predicate in the Fleet Status open-defect count SQL.
+- `backend/src/test/java/com/ecabin/ledger/service/DefectServiceFleetStatusSqlTest.java` — verify the generated Fleet Status query includes both scoped predicates and balanced SQL parentheses.
+- `updatesfiles.me` — record the fix.
+
+2026-10-31 — Simplify Aircraft Registration dropdown labels
+
+Removed the MSN value from the Aircraft Registration selection label and selected-aircraft summary. Options now display the aircraft registration (and aircraft type in its existing secondary context) without showing the MSN. Search can still match registration or MSN, and the selected aircraft ID submitted by the form is unchanged.
+
+Files modified:
+- `frontend/src/common/forms/aircraftDropdownModel.mjs` — display the tail number as the dropdown option label.
+- `frontend/src/common/forms/AircraftRegistrationSelect.tsx` — omit MSN from the selected-aircraft context.
+- `frontend/src/common/forms/aircraftDropdownModel.test.mjs` — verify the label and rendered summary do not display MSN.
+- `updatesfiles.me` — record the change.
+
+2026-10-31 — Add tenant-scoped Caffeine reference-data caching and refresh controls
+
+Added bounded in-process Caffeine caches for approved tenant-owned reference lists, published operational forms/options, and global workflow status definitions. Cache keys include the authenticated organization UUID for tenant-owned data. Per-resource TTLs and cache size limits are configurable. Successful configuration, form publication, and workflow-status writes invalidate relevant cache resources after transaction commit. The secured `POST /api/v1/reference-data/refresh` endpoint accepts only enumerated resources, resolves tenant identity from authentication, checks the existing read permissions, and preserves the last valid cache value if a forced reload fails. No permissions, memberships, reviewer eligibility, defect decisions, or case-specific state are cached.
+
+Added a reusable frontend refresh control using the existing TanStack Query architecture. It refreshes only the resources needed by applicable forms, invalidates matching tenant query keys, and does not reset form answers. Stable organization UUIDs now scope the related reference-data query keys.
+
+Files modified or added for this update:
+- `backend/pom.xml` — add Caffeine.
+- `backend/src/main/resources/application.properties` — configure per-resource cache TTLs and bounded entry counts.
+- `backend/src/main/java/com/ecabin/ledger/service/ReferenceCacheConfiguration.java` — create bounded Caffeine caches and cache metrics.
+- `backend/src/main/java/com/ecabin/ledger/service/ReferenceCacheProperties.java` — validate and expose cache settings.
+- `backend/src/main/java/com/ecabin/ledger/service/ReferenceCacheRegistry.java` — provide named resource caches.
+- `backend/src/main/java/com/ecabin/ledger/service/TenantReferenceCache.java` — tenant-aware keys, refresh, after-commit invalidation, and load/invalidation coordination.
+- `backend/src/main/java/com/ecabin/ledger/service/ConfigurationService.java` — cache approved reference reads and invalidate dependent resources after writes/imports.
+- `backend/src/main/java/com/ecabin/ledger/service/OperationalFormService.java` — cache published forms and safe dynamic option sources; invalidate on published configuration changes.
+- `backend/src/main/java/com/ecabin/ledger/service/WorkflowStatusService.java` — cache workflow status pages and invalidate after updates.
+- `backend/src/main/java/com/ecabin/ledger/api/ReferenceDataController.java` — expose typed, permission-checked force refresh.
+- `backend/src/main/java/com/ecabin/ledger/api/ApiModels.java` and `backend/src/main/java/com/ecabin/ledger/api/DefectController.java` — return authenticated organization UUID from `/me` for stable frontend cache scoping.
+- `backend/src/test/java/com/ecabin/ledger/service/TenantReferenceCacheTest.java` — verify tenant separation, refresh failure safety, transaction commit/rollback behavior, and invalidation racing a load.
+- `backend/src/test/java/com/ecabin/ledger/api/ReferenceDataControllerTest.java` — verify refresh uses the authenticated organization and rejects callers lacking read permission.
+- `frontend/src/common/query/referenceQueryKeys.ts` — centralize stable organization-scoped query keys.
+- `frontend/src/common/query/ReferenceDataRefreshButton.tsx` — reusable selective refresh control.
+- `frontend/src/app/loginhome/page.tsx`, `frontend/src/common/fleet/DefectDetailsPage.tsx`, `frontend/src/common/fleet/AircraftDefectListPage.tsx`, `frontend/src/common/fleet/FleetStatusPage.tsx`, `frontend/src/common/fleet/MaintenanceWorkQueuePage.tsx`, `frontend/src/common/fleet/ReviewerWorkQueuePage.tsx`, `frontend/src/common/fleet/ReportDefectPage.tsx`, and `frontend/src/common/forms/OperationalFormRenderer.tsx` — use stable organization-scoped keys and add refresh controls only where reference data is used.
+
+Verification: backend compilation and packaging passed; focused cache/controller tests passed (7 tests); the full backend suite passed (256 tests, 58 skipped); frontend TypeScript check passed; frontend tests passed (97); lint passed with one existing `<img>` performance warning; the production build passed using the Webpack builder. Docker was unavailable, so Testcontainers PostgreSQL tests were skipped; the explicitly opt-in local PostgreSQL tests were not run to avoid touching the configured shared database. No database migration was run and no database was accessed for this caching change. Query-count measurements against PostgreSQL were not collected; the cache unit tests verify loader call counts only, so production query savings remain unmeasured.
+
+2026-10-31 — Add manual database cleanup and reset utilities
+
+Added separate administrative SQL scripts and an operator guide for safely reviewing and running inactive-master cleanup and approved development/test/UAT transaction purges. The scripts are outside Flyway and are never invoked by application startup. Master cleanup uses an explicit allowlist, preserves seeded/system records, and reports FK-blocked rows. Transaction purge is child-first, gated by explicit database policy, confirmation, and a recent approved production backup; it preserves tenant/authentication/master/workflow configuration and retains cleanup logs. Evidence object keys are queued for a separate post-commit storage cleanup because PostgreSQL cannot atomically delete external blobs. Form configuration is preserved unless separately approved by policy.
+
+Files added:
+- `database/admin/01_cleanup_inactive_master_data.sql` — define the dry-run-first, FK-aware inactive-master procedure.
+- `database/admin/02_purge_transaction_data.sql` — define the explicitly gated, atomic transaction purge.
+- `database/admin/03_cleanup_execution_log.sql` — define policy, allowlist, execution log, storage manifest, and administrative roles.
+- `database/admin/04_cleanup_verification.sql` — provide read-only schema, FK, policy, execution, and storage checks.
+- `docs/DATABASE_CLEANUP_GUIDE.md` — document migration-derived inventory, retention classes, safeguards, execution, rollback, and external blob handling.
+- `updatesfiles.me` — record this update.
+
+Static checks: the new files passed a trailing-whitespace and dollar-quote balance scan. `git diff --check` was run for the new paths. No PostgreSQL parser or client was available, so SQL was not parsed or executed against PostgreSQL. No database was accessed or modified; no migration, procedure, DELETE, TRUNCATE, or DROP was executed.

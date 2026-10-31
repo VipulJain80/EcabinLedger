@@ -20,6 +20,9 @@ class DefectWorkflowTest {
         assertTrue(DefectWorkflow.permits("AWAITING_VERIFICATION", "VERIFIED"));
         assertTrue(DefectWorkflow.permits("VERIFIED", "APPROVAL_REQUIRED"));
         assertTrue(DefectWorkflow.permits("IN_PROGRESS", "APPROVAL_REQUIRED"), "Maintenance Close submission routes directly to Closure Team review.");
+        assertTrue(DefectWorkflow.permits("IN_PROGRESS", "ON_HOLD"), "Maintenance can place active work on hold.");
+        assertTrue(DefectWorkflow.permits("ON_HOLD", "IN_PROGRESS"), "A held case can resume work.");
+        assertTrue(DefectWorkflow.permits("ON_HOLD", "ACTION_ASSIGNED"), "Reassigning held work routes it back to the assigned state.");
         assertTrue(DefectWorkflow.permits("IN_PROGRESS", "AWAITING_VERIFICATION"), "Legacy verification workflows remain supported.");
         assertTrue(DefectWorkflow.permits("APPROVAL_REQUIRED", "CLOSED"));
         assertTrue(DefectWorkflow.permits("APPROVAL_REQUIRED", "IN_PROGRESS"), "A declined closure returns maintenance work to the active work state.");

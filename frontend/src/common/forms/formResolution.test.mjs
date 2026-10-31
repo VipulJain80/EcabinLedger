@@ -7,6 +7,7 @@ test("maps operational forms from the current workflow state and capability", ()
   assert.equal(formPurposeForStatus("REWORK", ["REPORT"]), "DEFECT_REPORT");
   assert.equal(formPurposeForStatus("INSPECTION_REQUIRED", ["INSPECT"]), "INSPECTION");
   assert.equal(formPurposeForStatus("IN_PROGRESS", ["PERFORM_ACTION"]), "CORRECTIVE_ACTION");
+  assert.equal(formPurposeForStatus("ON_HOLD", ["PERFORM_ACTION"]), "CORRECTIVE_ACTION");
   assert.equal(formPurposeForStatus("AWAITING_VERIFICATION", ["VERIFY"]), "VERIFICATION");
   assert.equal(formPurposeForStatus("APPROVAL_REQUIRED", ["APPROVE"]), "CLOSURE_APPROVAL");
   assert.equal(formPurposeForStatus("CLOSED", ["REOPEN"]), "REOPEN");
